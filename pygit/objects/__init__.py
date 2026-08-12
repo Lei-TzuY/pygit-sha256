@@ -8,6 +8,7 @@ from .base   import GitObject, HASH_ALGO
 from .blob   import BlobObject
 from .tree   import TreeObject, TreeEntry
 from .commit import CommitObject, Identity
+from .tag    import TagObject
 
 __all__ = [
     "GitObject",
@@ -17,4 +18,5 @@ __all__ = [
     "TreeEntry",
     "CommitObject",
     "Identity",
+    "TagObject",
 ]
