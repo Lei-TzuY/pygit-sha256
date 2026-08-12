@@ -774,11 +774,6 @@ class Repository:
             queue.extend(obj.parents)
 
         return result
-            if max_count and len(result) >= max_count:
-                break
-            queue.extend(obj.parents)
-
-        return result
 
     @staticmethod
     def format_log_graph(entries: List[Tuple[str, "CommitObject"]]) -> str:
