@@ -247,14 +247,15 @@ class RefStore:
         """
         Resolve a name to a SHA.  Tries in order:
 
-        1. Raw SHA (if it looks like one)
+        1. Raw 64-char SHA
         2. Branch name
         3. Tag name
-        4. ``HEAD``
+        4. Remote tracking branch
+        5. ``HEAD``
         """
         if name == "HEAD":
             return self.resolve_head()
-        if len(name) == 64 and all(c in "0123456789abcdef" for c in name):
+        if len(name) == 64 and all(c in "0123456789abcdef" for c in name.lower()):
             return name
         branch = self.get_branch(name)
         if branch:

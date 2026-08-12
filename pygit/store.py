@@ -36,6 +36,7 @@ from .objects.base   import GitObject, HASH_ALGO
 from .objects.blob   import BlobObject
 from .objects.tree   import TreeObject
 from .objects.commit import CommitObject
+from .objects.tag    import TagObject
 
 
 # Map type-name bytes → concrete class for deserialisation
@@ -43,6 +44,7 @@ _TYPE_MAP = {
     b"blob":   BlobObject,
     b"tree":   TreeObject,
     b"commit": CommitObject,
+    b"tag":    TagObject,
 }
 
 
@@ -99,7 +101,7 @@ class ObjectStore:
 
     def read(self, sha: str) -> GitObject:
         """
-        Read the object identified by *sha* from disk.
+        Read the object identified by *sha* from disk (loose or pack).
 
         Raises
         ------
@@ -109,25 +111,94 @@ class ObjectStore:
             If the stored data is corrupt (hash mismatch or bad format).
         """
         obj_path = self._path_for(sha)
-        if not obj_path.exists():
-            raise KeyError(f"Object not found: {sha}")
+        if obj_path.exists():
+            compressed = obj_path.read_bytes()
+            store_bytes = zlib.decompress(compressed)
+            actual_sha = hashlib.new(HASH_ALGO, store_bytes).hexdigest()
+            if actual_sha != sha:
+                raise ValueError(f"Object {sha} is corrupt (stored hash is {actual_sha})")
+            return self._parse(store_bytes)
 
-        compressed = obj_path.read_bytes()
-        store_bytes = zlib.decompress(compressed)
+        # Check packfiles
+        from .pack import PackReader
+        pack_dir = self.root / "pack"
+        if pack_dir.exists():
+            for idx_file in pack_dir.glob("*.idx"):
+                reader = PackReader(idx_file)
+                if reader.has_object(sha):
+                    obj = reader.read_object(sha)
+                    if obj:
+                        return obj
 
-        # Verify integrity: re-hash and compare
-        actual_sha = hashlib.new(HASH_ALGO, store_bytes).hexdigest()
-        if actual_sha != sha:
-            raise ValueError(
-                f"Object {sha} is corrupt "
-                f"(stored hash is {actual_sha})"
-            )
-
-        return self._parse(store_bytes)
+        raise KeyError(f"Object not found: {sha}")
 
     def exists(self, sha: str) -> bool:
-        """Return True if the object exists in the store."""
-        return self._path_for(sha).exists()
+        """Return True if the object exists in loose or pack storage."""
+        if self._path_for(sha).exists():
+            return True
+        from .pack import PackReader
+        pack_dir = self.root / "pack"
+        if pack_dir.exists():
+            for idx_file in pack_dir.glob("*.idx"):
+                if PackReader(idx_file).has_object(sha):
+                    return True
+        return False
+
+    def delete(self, sha: str) -> bool:
+        """Delete a loose object from disk. Returns True if deleted."""
+        p = self._path_for(sha)
+        if p.exists():
+            p.unlink()
+            if p.parent.is_dir() and not any(p.parent.iterdir()):
+                p.parent.rmdir()
+            return True
+        return False
+
+    def all_shas(self) -> List[str]:
+        """Return a list of all 64-char object SHAs stored on disk (loose and pack)."""
+        shas: set = set()
+        if self.root.exists():
+            for prefix_dir in sorted(self.root.iterdir()):
+                if prefix_dir.is_dir() and len(prefix_dir.name) == 2:
+                    for obj_file in sorted(prefix_dir.iterdir()):
+                        if obj_file.is_file():
+                            shas.add(prefix_dir.name + obj_file.name)
+        from .pack import PackReader
+        pack_dir = self.root / "pack"
+        if pack_dir.exists():
+            for idx_file in pack_dir.glob("*.idx"):
+                shas.update(PackReader(idx_file).get_shas())
+        return sorted(shas)
+
+    def resolve_prefix(self, prefix: str) -> Optional[str]:
+        """
+        Resolve a short SHA prefix (4+ hex chars) to a full 64-char SHA.
+
+        Returns full SHA if unique match found, raises ValueError if ambiguous,
+        returns None if no object matches.
+        """
+        prefix = prefix.lower()
+        if len(prefix) == 64:
+            return prefix if self.exists(prefix) else None
+        if len(prefix) < 4:
+            return None
+
+        dir_prefix = prefix[:2]
+        file_prefix = prefix[2:]
+        target_dir = self.root / dir_prefix
+        if not target_dir.is_dir():
+            return None
+
+        matches = [
+            dir_prefix + f.name
+            for f in target_dir.iterdir()
+            if f.is_file() and f.name.startswith(file_prefix)
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(f"Ambiguous short SHA prefix '{prefix}': matches {len(matches)} objects")
+        return None
 
     # ------------------------------------------------------------------
     # Internals
