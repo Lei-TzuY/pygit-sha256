@@ -100,7 +100,14 @@ class Repository:
     # ------------------------------------------------------------------
 
     @classmethod
-    def clone(cls, url: str, path: Optional[str] = None) -> "Repository":
+    def clone(
+        cls,
+        url: str,
+        path: Optional[str] = None,
+        depth: Optional[int] = None,
+        branch_name: Optional[str] = None,
+        single_branch: bool = False,
+    ) -> "Repository":
         """Clone a real Git smart HTTP repository into a new pygit worktree."""
         if path is None:
             name = url.rstrip("/").rsplit("/", 1)[-1]
@@ -113,13 +120,41 @@ class Repository:
         repo = cls.init(str(destination))
         repo.add_remote("origin", url)
         result = repo.fetch("origin")
-        branch = str(result["default_branch"] or "main")
-        sha = repo.refs.get_remote("origin", branch)
+        target_br = branch_name or str(result["default_branch"] or "main")
+        sha = repo.refs.get_remote("origin", target_br)
         if not sha:
-            raise RuntimeError("Remote did not provide a default branch.")
-        repo.refs.set_branch(branch, sha, message=f"clone: from {url}")
-        repo.refs.set_head_symbolic(branch, message=f"clone: from {url}")
+            raise RuntimeError(f"Remote did not provide branch '{target_br}'.")
+
+        if single_branch:
+            # Remove tracking refs for other remote branches
+            for remote_b in repo.list_remote_branches():
+                if not remote_b.endswith(f"/{target_br}"):
+                    rel_p = remote_b.replace("remotes/", "")
+                    ref_f = repo.pygit_dir / "refs" / "remotes" / rel_p.split("/", 1)[1]
+                    if ref_f.exists():
+                        ref_f.unlink()
+
+        repo.refs.set_branch(target_br, sha, message=f"clone: from {url}")
+        repo.refs.set_head_symbolic(target_br, message=f"clone: from {url}")
         repo._replace_worktree_from_commit(sha)
+
+        if depth and depth > 0:
+            # Trace commit depth to find boundary commit(s)
+            curr = sha
+            d = 1
+            shallow_boundary: Optional[str] = None
+            while curr and d < depth:
+                c = repo.store.read(curr)
+                if isinstance(c, CommitObject) and c.parents:
+                    curr = c.parents[0]
+                    d += 1
+                else:
+                    break
+            if curr:
+                shallow_boundary = curr
+                shallow_file = repo.pygit_dir / "shallow"
+                shallow_file.write_text(f"{shallow_boundary}\n", encoding="utf-8")
+
         return repo
 
     def add_remote(self, name: str, url: str) -> None:
@@ -523,12 +558,89 @@ class Repository:
         amend: bool = False,
         template: Optional[str] = None,
         author: Optional[str] = None,
+        fixup: Optional[str] = None,
+        squash: Optional[str] = None,
+        only_paths: Optional[List[str]] = None,
+        include_paths: Optional[List[str]] = None,
+        allow_empty: bool = False,
+        cleanup: str = "strip",
+        reuse_message: Optional[str] = None,
+        reedit_message: Optional[str] = None,
+        commit_date: Optional[str] = None,
+        reset_author: bool = False,
+        signoff: bool = False,
     ) -> str:
         """
         Create a commit from the current index.
 
         Returns the new commit's SHA-256 hex string.
         """
+        if reuse_message or reedit_message:
+            target_ref = reuse_message or reedit_message
+            target_sha = self.rev_parse(target_ref)
+            target_commit = self._require_commit(target_sha)
+            message = target_commit.message
+
+        if cleanup == "strip":
+            clean_lines = [l for l in message.splitlines() if not l.strip().startswith("#")]
+            res_lines = []
+            for l in clean_lines:
+                if not l.strip() and res_lines and not res_lines[-1].strip():
+                    continue
+                res_lines.append(l)
+            message = "\n".join(res_lines).strip()
+        elif cleanup == "whitespace":
+            clean_lines = [l.rstrip() for l in message.splitlines()]
+            message = "\n".join(clean_lines).strip()
+
+        if include_paths:
+            self.add(include_paths)
+
+        if only_paths:
+            # Commit only specified paths (temporarily isolate index)
+            saved_entries = dict(self.index.entries)
+            head_sha = self.refs.resolve_head()
+            if head_sha:
+                head_tree = self._commit_tree_entries(head_sha)
+                self.index.entries = {
+                    p: self._index_entry_for_blob(p, sha, mode)
+                    for p, (sha, mode) in head_tree.items()
+                }
+            else:
+                self.index.entries.clear()
+            self.add(only_paths)
+            res_sha = self.commit(
+                message=message,
+                author_name=author_name,
+                author_email=author_email,
+                parents=parents,
+                committer_name=committer_name,
+                committer_email=committer_email,
+                allow_rebase=allow_rebase,
+                amend=amend,
+                template=template,
+                author=author,
+                fixup=fixup,
+                squash=squash,
+                allow_empty=allow_empty,
+            )
+            # Restore other staged entries
+            for p, entry in saved_entries.items():
+                if p not in only_paths:
+                    self.index.entries[p] = entry
+            self.index.save()
+            return res_sha
+        if fixup:
+            target_sha = self.rev_parse(fixup)
+            target_commit = self._require_commit(target_sha)
+            target_subj = target_commit.message.splitlines()[0]
+            message = f"fixup! {target_subj}\n\n{message}".strip()
+        elif squash:
+            target_sha = self.rev_parse(squash)
+            target_commit = self._require_commit(target_sha)
+            target_subj = target_commit.message.splitlines()[0]
+            message = f"squash! {target_subj}\n\n{message}".strip()
+
         if author and "<" in author and ">" in author:
             parts = author.split("<")
             author_name = parts[0].strip()
@@ -545,6 +657,11 @@ class Repository:
 
         if not message:
             raise ValueError("Commit message cannot be empty.")
+
+        if signoff:
+            sob_line = f"Signed-off-by: {author_name} <{author_email}>"
+            if sob_line not in message:
+                message = f"{message.strip()}\n\n{sob_line}\n"
 
         if self._read_rebase_state() and not allow_rebase:
             raise RuntimeError("A rebase is in progress; use 'pygit rebase --continue'.")
@@ -582,18 +699,34 @@ class Repository:
         if not message:
             raise RuntimeError("Commit message cannot be empty.")
 
-        if not head_sha and not self.index.entries:
+        if not head_sha and not self.index.entries and not allow_empty:
             raise RuntimeError("Nothing to commit (index is empty).")
-        if head_sha and not merge_head and not amend:
+        if head_sha and not merge_head and not amend and not allow_empty:
             head_obj = self.store.read(head_sha)
             if isinstance(head_obj, CommitObject) and head_obj.tree == tree_sha:
                 raise RuntimeError("Nothing to commit (working tree clean).")
 
-        author = Identity(author_name, author_email)
+        if amend and not reset_author and author_name == "Unknown" and head_sha:
+            head_commit = self._require_commit(head_sha)
+            author = head_commit.author
+        else:
+            author = Identity(author_name, author_email)
         committer = Identity(
             committer_name or author_name,
             committer_email or author_email,
         )
+        if commit_date:
+            try:
+                import datetime
+                if commit_date.isdigit():
+                    t_val = int(commit_date)
+                else:
+                    dt = datetime.datetime.fromisoformat(commit_date)
+                    t_val = int(dt.timestamp())
+                author.timestamp = t_val
+                committer.timestamp = t_val
+            except Exception:
+                pass
 
         # Run commit-msg hook (can modify the message via a temp file)
         msg_file = self.pygit_dir / "COMMIT_EDITMSG"
@@ -627,6 +760,16 @@ class Repository:
     def _build_tree(self) -> str:
         """Recursively build tree objects from the current index; return root SHA."""
         return self._build_tree_from_entries(self.index.all_entries())
+
+    def _build_tree_from_entries_dict(
+        self, entries_dict: Dict[str, Tuple[str, str]]
+    ) -> str:
+        """Build tree objects from a dictionary of path -> (blob_sha, mode)."""
+        idx_entries = [
+            IndexEntry(path=p, sha=s, mode=m, size=0, mtime=0.0)
+            for p, (s, m) in entries_dict.items()
+        ]
+        return self._build_tree_from_entries(idx_entries)
 
     def _build_tree_from_entries(self, entries: List[IndexEntry]) -> str:
         """Recursively build tree objects from flat index-like entries."""
@@ -676,6 +819,13 @@ class Repository:
         since: Optional[str] = None,
         until: Optional[str] = None,
         patch: bool = False,
+        follow: Optional[str] = None,
+        topo_order: bool = False,
+        merges_only: Optional[bool] = None,
+        line_range: Optional[Tuple[int, int, str]] = None,
+        first_parent: bool = False,
+        min_parents: Optional[int] = None,
+        max_parents: Optional[int] = None,
     ) -> List[Tuple[str, CommitObject]]:
         """
         Walk commit history from *start* (defaults to HEAD) via BFS.
@@ -692,11 +842,23 @@ class Repository:
         since       : timestamp or ISO date string (YYYY-MM-DD) lower bound
         until       : timestamp or ISO date string (YYYY-MM-DD) upper bound
         patch       : attach diff patch vs parent to CommitObject payload if requested
+        follow      : trace history of a file across renames
+        topo_order  : sort commits topologically (children before parents)
 
         Returns a list of ``(sha, CommitObject)`` pairs, newest first.
         """
         import re as _re
         from datetime import datetime
+
+        # Check shallow boundaries
+        shallow_file = self.pygit_dir / "shallow"
+        shallow_shas: set = set()
+        if shallow_file.exists():
+            shallow_shas = {
+                line.strip()
+                for line in shallow_file.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            }
 
         seeds: List[str] = []
         if all_branches:
@@ -709,7 +871,7 @@ class Repository:
                 if head_sha:
                     seeds.append(head_sha)
         else:
-            sha = start or self.refs.resolve_head()
+            sha = self._resolve_revision(start) if start else self.refs.resolve_head()
             if sha:
                 seeds.append(sha)
 
@@ -740,6 +902,8 @@ class Repository:
         author_re = _re.compile(_re.escape(author), _re.IGNORECASE) if author else None
         grep_re   = _re.compile(_re.escape(grep),   _re.IGNORECASE) if grep   else None
 
+        current_follow_path = follow
+
         while queue:
             current = queue.pop(0)
             if current in seen:
@@ -752,26 +916,117 @@ class Repository:
 
             # Date filtering
             if since_ts and obj.author.timestamp < since_ts:
-                queue.extend(obj.parents)
+                if current not in shallow_shas:
+                    queue.extend(obj.parents)
                 continue
             if until_ts and obj.author.timestamp > until_ts:
-                queue.extend(obj.parents)
+                if current not in shallow_shas:
+                    queue.extend(obj.parents)
                 continue
 
             # Apply filters
             if author_re:
                 identity = f"{obj.author.name} <{obj.author.email}>"
                 if not author_re.search(identity):
-                    queue.extend(obj.parents)
+                    if current not in shallow_shas:
+                        queue.extend(obj.parents)
                     continue
             if grep_re and not grep_re.search(obj.message):
-                queue.extend(obj.parents)
+                if current not in shallow_shas:
+                    queue.extend(obj.parents)
                 continue
 
+            # Merge filtering
+            if min_parents is not None and len(obj.parents) < min_parents:
+                if current not in shallow_shas:
+                    queue.extend(obj.parents)
+                continue
+            if max_parents is not None and len(obj.parents) > max_parents:
+                if current not in shallow_shas:
+                    queue.extend(obj.parents)
+                continue
+            if merges_only is True and len(obj.parents) < 2:
+                if current not in shallow_shas:
+                    queue.extend(obj.parents)
+                continue
+            if merges_only is False and len(obj.parents) >= 2:
+                if current not in shallow_shas:
+                    queue.extend(obj.parents)
+                continue
+
+            # Line range filtering (-L start,end:file)
+            if line_range:
+                l_start, l_end, l_file = line_range
+                curr_tree = self._commit_tree_entries(current)
+                if l_file not in curr_tree:
+                    if current not in shallow_shas:
+                        queue.extend(obj.parents)
+                    continue
+                curr_lines = self._blob_bytes(curr_tree[l_file][0]).decode("utf-8", errors="replace").splitlines()
+                curr_slice = curr_lines[max(0, l_start - 1):l_end]
+                parent_slice: List[str] = []
+                if obj.parents:
+                    p_tree = self._commit_tree_entries(obj.parents[0])
+                    if l_file in p_tree:
+                        p_lines = self._blob_bytes(p_tree[l_file][0]).decode("utf-8", errors="replace").splitlines()
+                        parent_slice = p_lines[max(0, l_start - 1):l_end]
+                if curr_slice == parent_slice:
+                    if current not in shallow_shas:
+                        queue.extend(obj.parents)
+                    continue
+
+            # File follow (rename tracking)
+            if current_follow_path:
+                tree_flat: Dict[str, str] = {}
+                self._flatten_tree(obj.tree, "", tree_flat)
+                if current_follow_path not in tree_flat:
+                    # File not at current path -- try finding by blob sha in parent
+                    if obj.parents:
+                        parent_tree: Dict[str, str] = {}
+                        p_obj = self.store.read(obj.parents[0])
+                        if isinstance(p_obj, CommitObject):
+                            self._flatten_tree(p_obj.tree, "", parent_tree)
+                            # If blob exists under a different path in parent, update follow path
+                            target_blob_sha = tree_flat.get(current_follow_path)
+                            if target_blob_sha:
+                                for p_path, p_sha in parent_tree.items():
+                                    if p_sha == target_blob_sha:
+                                        current_follow_path = p_path
+                                        break
+
             result.append((current, obj))
-            if max_count and len(result) >= max_count:
+            if max_count and not topo_order and len(result) >= max_count:
                 break
-            queue.extend(obj.parents)
+            if current not in shallow_shas:
+                if first_parent and obj.parents:
+                    queue.append(obj.parents[0])
+                else:
+                    queue.extend(obj.parents)
+
+        if topo_order and len(result) > 1:
+            res_shas = [sha for sha, _ in result]
+            res_map = {sha: obj for sha, obj in result}
+            child_count = {sha: 0 for sha in res_shas}
+            for sha, obj in result:
+                for p in obj.parents:
+                    if p in child_count:
+                        child_count[p] += 1
+            sorted_res = []
+            ready = [sha for sha in res_shas if child_count[sha] == 0]
+            while ready:
+                curr_sha = ready.pop(0)
+                sorted_res.append((curr_sha, res_map[curr_sha]))
+                c_obj = res_map[curr_sha]
+                for p in c_obj.parents:
+                    if p in child_count:
+                        child_count[p] -= 1
+                        if child_count[p] == 0:
+                            ready.append(p)
+            if len(sorted_res) == len(result):
+                result = sorted_res
+
+        if max_count and len(result) > max_count:
+            result = result[:max_count]
 
         return result
 
@@ -800,7 +1055,7 @@ class Repository:
     # status
     # ------------------------------------------------------------------
 
-    def status(self) -> Dict:
+    def status(self, ignored: bool = False) -> Dict:
         """
         Return a dict describing the working-tree state::
 
@@ -809,6 +1064,7 @@ class Repository:
               "staged"   : [(kind, path)],  # index vs HEAD
               "unstaged" : [(kind, path)],  # working tree vs index
               "untracked": [path],          # files not in the index
+              "ignored"  : [path],          # ignored files (if requested)
               "conflicts": [path],          # unresolved merge conflicts
             }
 
@@ -837,8 +1093,9 @@ class Repository:
             elif BlobObject(abs_path.read_bytes()).hash() != entry.sha:
                 unstaged.append(("modified", entry.path))
 
-        # --- untracked ---
+        # --- untracked / ignored ---
         untracked: List[str] = []
+        ignored_files: List[str] = []
         ignore = IgnoreMatcher(self.worktree)
         for f in sorted(self.worktree.rglob("*")):
             if not f.is_file():
@@ -846,17 +1103,34 @@ class Repository:
             if ".pygit" in f.parts:
                 continue
             rel = f.relative_to(self.worktree).as_posix()
-            if rel not in self.index and not ignore.is_ignored(rel):
-                untracked.append(rel)
+            if rel not in self.index:
+                if ignore.is_ignored(rel):
+                    if ignored:
+                        ignored_files.append(rel)
+                else:
+                    untracked.append(rel)
 
-        return {
-            "branch":    self.refs.current_branch(),
+        curr_branch = self.refs.current_branch()
+        upstream_info = None
+        if curr_branch:
+            try:
+                ahead, behind = self.ahead_behind("HEAD", f"origin/{curr_branch}")
+                upstream_info = {"upstream": f"origin/{curr_branch}", "ahead": ahead, "behind": behind}
+            except Exception:
+                pass
+
+        res = {
+            "branch":    curr_branch,
+            "upstream":  upstream_info,
             "staged":    staged,
             "unstaged":  unstaged,
             "untracked": untracked,
             "conflicts": self._read_conflicts(),
             "operation": self._operation_name(),
         }
+        if ignored:
+            res["ignored"] = ignored_files
+        return res
 
     # ------------------------------------------------------------------
     # diff
@@ -868,6 +1142,23 @@ class Repository:
         stat: bool = False,
         from_ref: Optional[str] = None,
         to_ref: Optional[str] = None,
+        name_status: bool = False,
+        name_only: bool = False,
+        ignore_all_space: bool = False,
+        ignore_space_change: bool = False,
+        ignore_matching_lines: Optional[str] = None,
+        stat_width: Optional[int] = None,
+        compact_summary: bool = False,
+        raw: bool = False,
+        src_prefix: str = "a/",
+        dst_prefix: str = "b/",
+        no_prefix: bool = False,
+        ignore_submodules: bool = False,
+        find_renames: bool = False,
+        find_copies: bool = False,
+        submodule: Optional[str] = None,
+        dirstat: bool = False,
+        stat_graph_width: Optional[int] = None,
     ) -> str:
         """
         Produce a unified-diff string.
@@ -880,6 +1171,10 @@ class Repository:
         from_ref=A, to_ref=B   : A vs B  (both are commit/branch/tag refs)
 
         If *stat* is True, prepend a ``--stat``-style summary.
+        If *name_status* is True, output status code and path (e.g. M path).
+        If *name_only* is True, output file paths only.
+        If *ignore_all_space* (-w) is True, ignore all whitespace.
+        If *ignore_space_change* (-b) is True, ignore changes in amount of whitespace.
         """
         if from_ref is not None:
             from_sha = self._resolve_revision(from_ref)
@@ -893,42 +1188,107 @@ class Repository:
                     e.path: (e.sha, e.mode) for e in self.index.all_entries()
                 }
             return self._render_diff(
-                from_tree, to_tree, stat=stat, worktree=to_ref is None
+                from_tree, to_tree, stat=stat, worktree=to_ref is None,
+                name_status=name_status, name_only=name_only,
+                ignore_all_space=ignore_all_space, ignore_space_change=ignore_space_change,
+                ignore_matching_lines=ignore_matching_lines,
             )
+
+        if no_prefix:
+            src_prefix = ""
+            dst_prefix = ""
 
         parts: List[str] = []
         stat_entries: List[Tuple[str, int, int]] = []
+        ns_lines: List[str] = []
+        no_lines: List[str] = []
+        cs_lines: List[str] = []
+        raw_lines: List[str] = []
+
+        def _bytes_same(b1: bytes, b2: bytes) -> bool:
+            if ignore_all_space:
+                return b1.translate(None, b" \t\r\n") == b2.translate(None, b" \t\r\n")
+            if ignore_space_change:
+                return b" ".join(b1.split()) == b" ".join(b2.split())
+            return b1 == b2
 
         if cached:
             head_tree = self._head_tree_flat()
             for path in sorted(set(head_tree) | set(self.index.paths())):
-                old_bytes = self._blob_bytes(head_tree.get(path))
+                old_sha = head_tree.get(path)
+                old_bytes = self._blob_bytes(old_sha)
                 entry = self.index.get(path)
-                new_bytes = self._blob_bytes(entry.sha if entry else None)
-                if old_bytes != new_bytes:
+                new_sha = entry.sha if entry else None
+                new_bytes = self._blob_bytes(new_sha)
+                if not _bytes_same(old_bytes, new_bytes):
+                    status_code = "A" if not old_sha else ("D" if not new_sha else "M")
+                    ns_lines.append(f"{status_code}\t{path}")
+                    no_lines.append(path)
+                    o_s = old_sha or "0" * 40
+                    n_s = new_sha or "0" * 40
+                    raw_lines.append(f":100644 100644 {o_s[:40]} {n_s[:40]} {status_code}\t{path}")
+                    if not old_sha:
+                        cs_lines.append(f" create mode 100644 {path}")
+                    elif not new_sha:
+                        cs_lines.append(f" delete mode 100644 {path}")
+                    else:
+                        cs_lines.append(f" {path}")
                     if stat:
                         _, ins, dels = diff_stat(old_bytes, new_bytes, path)
                         stat_entries.append((path, ins, dels))
                     parts.append(
-                        f"diff --pygit a/{path} b/{path}\n"
-                        + unified_diff(old_bytes, new_bytes, f"a/{path}", f"b/{path}")
+                        f"diff --pygit {src_prefix}{path} {dst_prefix}{path}\n"
+                        + unified_diff(old_bytes, new_bytes, f"{src_prefix}{path}", f"{dst_prefix}{path}")
                     )
         else:
             for entry in self.index.all_entries():
                 old_bytes = self._blob_bytes(entry.sha)
                 abs_path  = self.worktree / entry.path
                 new_bytes = abs_path.read_bytes() if abs_path.exists() else b""
-                if old_bytes != new_bytes:
+                if not _bytes_same(old_bytes, new_bytes):
+                    status_code = "D" if not abs_path.exists() else "M"
+                    ns_lines.append(f"{status_code}\t{entry.path}")
+                    no_lines.append(entry.path)
+                    o_s = entry.sha or "0" * 40
+                    raw_lines.append(f":100644 100644 {o_s[:40]} 0000000000000000000000000000000000000000 {status_code}\t{entry.path}")
+                    if not abs_path.exists():
+                        cs_lines.append(f" delete mode 100644 {entry.path}")
+                    else:
+                        cs_lines.append(f" {entry.path}")
                     if stat:
                         _, ins, dels = diff_stat(old_bytes, new_bytes, entry.path)
                         stat_entries.append((entry.path, ins, dels))
                     parts.append(
-                        f"diff --pygit a/{entry.path} b/{entry.path}\n"
+                        f"diff --pygit {src_prefix}{entry.path} {dst_prefix}{entry.path}\n"
                         + unified_diff(
                             old_bytes, new_bytes,
-                            f"a/{entry.path}", f"b/{entry.path}",
+                            f"{src_prefix}{entry.path}", f"{dst_prefix}{entry.path}",
                         )
                     )
+
+        if name_status:
+            return "\n".join(ns_lines) + ("\n" if ns_lines else "")
+        if name_only:
+            return "\n".join(no_lines) + ("\n" if no_lines else "")
+        if compact_summary:
+            return "\n".join(cs_lines) + ("\n" if cs_lines else "")
+        if raw:
+            return "\n".join(raw_lines) + ("\n" if raw_lines else "")
+
+        if ignore_matching_lines:
+            import re
+            pat = re.compile(ignore_matching_lines)
+            filtered_parts = []
+            for p in parts:
+                lines = p.splitlines(keepends=True)
+                out_lines = []
+                for line in lines:
+                    if (line.startswith("+") or line.startswith("-")) and not line.startswith("+++") and not line.startswith("---"):
+                        if pat.search(line[1:]):
+                            continue
+                    out_lines.append(line)
+                filtered_parts.append("".join(out_lines))
+            parts = filtered_parts
 
         body = "".join(parts)
         if stat and stat_entries:
@@ -941,11 +1301,27 @@ class Repository:
         to_tree: Dict[str, Tuple[str, str]],
         stat: bool = False,
         worktree: bool = False,
+        name_status: bool = False,
+        name_only: bool = False,
+        ignore_all_space: bool = False,
+        ignore_space_change: bool = False,
+        ignore_matching_lines: Optional[str] = None,
+        compact_summary: bool = False,
     ) -> str:
         """Render a diff between two flat tree dicts (path→(sha, mode))."""
         parts: List[str] = []
         stat_entries: List[Tuple[str, int, int]] = []
+        ns_lines: List[str] = []
+        no_lines: List[str] = []
+        cs_lines: List[str] = []
         all_paths = sorted(set(from_tree) | set(to_tree))
+
+        def _bytes_same(b1: bytes, b2: bytes) -> bool:
+            if ignore_all_space:
+                return b1.translate(None, b" \t\r\n") == b2.translate(None, b" \t\r\n")
+            if ignore_space_change:
+                return b" ".join(b1.split()) == b" ".join(b2.split())
+            return b1 == b2
 
         for path in all_paths:
             old_entry = from_tree.get(path)
@@ -956,8 +1332,19 @@ class Repository:
                 new_bytes = abs_path.read_bytes() if abs_path.exists() else b""
             else:
                 new_bytes = self._blob_bytes(new_entry[0] if new_entry else None)
-            if old_bytes == new_bytes:
+            if _bytes_same(old_bytes, new_bytes):
                 continue
+
+            status_code = "A" if not old_entry else ("D" if not new_entry else "M")
+            ns_lines.append(f"{status_code}\t{path}")
+            no_lines.append(path)
+            if not old_entry:
+                cs_lines.append(f" create mode 100644 {path}")
+            elif not new_entry:
+                cs_lines.append(f" delete mode 100644 {path}")
+            else:
+                cs_lines.append(f" {path}")
+
             if stat:
                 _, ins, dels = diff_stat(old_bytes, new_bytes, path)
                 stat_entries.append((path, ins, dels))
@@ -965,6 +1352,28 @@ class Repository:
                 f"diff --pygit a/{path} b/{path}\n"
                 + unified_diff(old_bytes, new_bytes, f"a/{path}", f"b/{path}")
             )
+
+        if name_status:
+            return "\n".join(ns_lines) + ("\n" if ns_lines else "")
+        if name_only:
+            return "\n".join(no_lines) + ("\n" if no_lines else "")
+        if compact_summary:
+            return "\n".join(cs_lines) + ("\n" if cs_lines else "")
+
+        if ignore_matching_lines:
+            import re
+            pat = re.compile(ignore_matching_lines)
+            filtered_parts = []
+            for p in parts:
+                lines = p.splitlines(keepends=True)
+                out_lines = []
+                for line in lines:
+                    if (line.startswith("+") or line.startswith("-")) and not line.startswith("+++") and not line.startswith("---"):
+                        if pat.search(line[1:]):
+                            continue
+                    out_lines.append(line)
+                filtered_parts.append("".join(out_lines))
+            parts = filtered_parts
 
         body = "".join(parts)
         if stat and stat_entries:
@@ -1020,21 +1429,14 @@ class Repository:
     # blame
     # ------------------------------------------------------------------
 
-    def blame(self, path: str) -> List[str]:
+    def blame(
+        self, path: str, line_range: Optional[Tuple[int, int]] = None
+    ) -> List[str]:
         """
         Annotate each line of *path* with the commit SHA and author that
         last changed it.
 
-        Returns a list of strings, one per line, in the format::
-
-            a1b2c3d4e5f6  (Alice <a@a.com> 2025-01-01)  content of line
-
-        Strategy: walk the commit history (newest first) along HEAD.  For
-        each commit, compare the version of *path* in that commit against
-        its parent.  Lines that changed in this commit are attributed to it.
-        Lines already attributed are not re-attributed.  Lines still
-        unattributed after visiting the whole history are attributed to the
-        first (root) commit.
+        If *line_range* is (start, end) 1-based inclusive, only return lines in that range.
         """
         import datetime as _dt
 
@@ -1105,6 +1507,13 @@ class Repository:
             result.append(
                 f"{short_sha}  ({author_str} {date_str})  {line_content}"
             )
+        
+        if line_range:
+            start_l, end_l = line_range
+            start_idx = max(0, start_l - 1)
+            end_idx = min(len(result), end_l)
+            return result[start_idx:end_idx]
+
         return result
 
     # ------------------------------------------------------------------
@@ -1138,11 +1547,12 @@ class Repository:
         from .sparse import SparseCheckout
         sparse = SparseCheckout(self.pygit_dir)
 
-        # Remove tracked files that disappear in the new tree
-        for path in set(self.index.paths()) - set(new_tree):
-            abs_path = self.worktree / path
-            if abs_path.exists():
-                abs_path.unlink()
+        # Remove tracked files that disappear in the new tree or fail sparse rules
+        for path in set(self.index.paths()):
+            if path not in new_tree or not sparse.matches(path):
+                abs_path = self.worktree / path
+                if abs_path.exists():
+                    abs_path.unlink()
 
         # Write the new tree to disk (respecting sparse checkout)
         self._restore_tree_sparse(obj.tree, self.worktree, "", sparse)
@@ -1219,6 +1629,7 @@ class Repository:
         message: Optional[str] = None,
         author_name: str = "Unknown",
         author_email: str = "unknown@example.com",
+        squash: bool = False,
     ) -> Dict[str, object]:
         """Merge *target* into HEAD using a three-way file merge."""
         self._ensure_no_operation("merge")
@@ -1240,7 +1651,7 @@ class Repository:
         base = self._find_merge_base(ours, theirs)
         if base == theirs:
             return {"status": "up-to-date", "sha": ours, "conflicts": []}
-        if base == ours:
+        if base == ours and not squash:
             branch = self.refs.current_branch()
             self._replace_worktree_from_commit(theirs)
             if branch:
@@ -1258,6 +1669,9 @@ class Repository:
         if conflicts:
             self._write_merge_state(theirs, conflicts, ours)
             return {"status": "conflicts", "sha": None, "conflicts": conflicts}
+
+        if squash:
+            return {"status": "squashed", "sha": None, "conflicts": []}
 
         sha = self.commit(
             message or f"Merge '{target}'",
@@ -1313,7 +1727,21 @@ class Repository:
                 abs_path.parent.mkdir(parents=True, exist_ok=True)
                 abs_path.write_bytes(merged)
                 if has_conflict:
-                    conflicts.append(path)
+                    from .rerere import RerereEngine
+                    rerere = RerereEngine(self.pygit_dir)
+                    conflict_str = merged.decode("utf-8", errors="replace")
+                    auto_resolved = rerere.find_resolution(conflict_str)
+
+                    if auto_resolved is not None:
+                        # Rerere auto-resolved this conflict!
+                        resolved_bytes = auto_resolved.encode("utf-8")
+                        abs_path.write_bytes(resolved_bytes)
+                        blob_sha = self.store.write_raw(resolved_bytes)
+                        mode = (our_entry or their_entry or ("100644",))[1] if (our_entry or their_entry) else "100644"
+                        merged_index[path] = self._index_entry(path, blob_sha, mode)
+                    else:
+                        rerere.record_conflict(path, conflict_str)
+                        conflicts.append(path)
                 else:
                     blob_sha = self.store.write_raw(merged)
                     mode = (our_entry or their_entry or ("100644",))[1] if (our_entry or their_entry) else "100644"
@@ -1338,22 +1766,17 @@ class Repository:
         ours_bytes: bytes,
         theirs_bytes: bytes,
         target: str,
+        conflict_style: str = "merge",
     ) -> Tuple[bytes, bool]:
-        """Line-level diff3 merge.
+        """Perform line-level 3-way merge, returning (merged_bytes, has_conflict)."""
+        from difflib import SequenceMatcher
+        base_lines = base_bytes.decode("utf-8", errors="replace").splitlines(keepends=True)
+        ours_lines = ours_bytes.decode("utf-8", errors="replace").splitlines(keepends=True)
+        theirs_lines = theirs_bytes.decode("utf-8", errors="replace").splitlines(keepends=True)
 
-        Returns ``(merged_bytes, has_conflict)``.
-        Non-overlapping changes from each side are auto-merged.
-        Overlapping changes produce standard conflict markers.
-        """
-        base_lines = base_bytes.decode("utf-8", errors="replace").splitlines(True)
-        ours_lines = ours_bytes.decode("utf-8", errors="replace").splitlines(True)
-        theirs_lines = theirs_bytes.decode("utf-8", errors="replace").splitlines(True)
+        matcher_ours = SequenceMatcher(None, base_lines, ours_lines)
+        matcher_theirs = SequenceMatcher(None, base_lines, theirs_lines)
 
-        import difflib
-        matcher_ours = difflib.SequenceMatcher(None, base_lines, ours_lines)
-        matcher_theirs = difflib.SequenceMatcher(None, base_lines, theirs_lines)
-
-        # Build edit lists: (base_start, base_end, replacement_lines)
         ours_edits = []
         for tag, i1, i2, j1, j2 in matcher_ours.get_opcodes():
             if tag != "equal":
@@ -1364,7 +1787,6 @@ class Repository:
             if tag != "equal":
                 theirs_edits.append((i1, i2, theirs_lines[j1:j2]))
 
-        # Merge edits by walking through base
         result: List[str] = []
         has_conflict = False
         base_pos = 0
@@ -1375,21 +1797,17 @@ class Repository:
             their_edit = theirs_edits[ti] if ti < len(theirs_edits) else None
 
             if our_edit and their_edit:
-                # Both edits exist — check for overlap
                 if our_edit[1] <= their_edit[0]:
-                    # Our edit is fully before theirs
                     result.extend(base_lines[base_pos:our_edit[0]])
                     result.extend(our_edit[2])
                     base_pos = our_edit[1]
                     oi += 1
                 elif their_edit[1] <= our_edit[0]:
-                    # Their edit is fully before ours
                     result.extend(base_lines[base_pos:their_edit[0]])
                     result.extend(their_edit[2])
                     base_pos = their_edit[1]
                     ti += 1
                 else:
-                    # Overlapping edits — check if identical
                     if our_edit[2] == their_edit[2] and our_edit[0] == their_edit[0] and our_edit[1] == their_edit[1]:
                         result.extend(base_lines[base_pos:our_edit[0]])
                         result.extend(our_edit[2])
@@ -1397,13 +1815,15 @@ class Repository:
                         oi += 1
                         ti += 1
                     else:
-                        # True conflict
                         has_conflict = True
                         conflict_start = min(our_edit[0], their_edit[0])
                         conflict_end = max(our_edit[1], their_edit[1])
                         result.extend(base_lines[base_pos:conflict_start])
                         result.append("<<<<<<< HEAD\n")
                         result.extend(our_edit[2])
+                        if conflict_style == "diff3":
+                            result.append("||||||| base\n")
+                            result.extend(base_lines[conflict_start:conflict_end])
                         result.append("=======\n")
                         result.extend(their_edit[2])
                         result.append(f">>>>>>> {target}\n")
@@ -1461,6 +1881,7 @@ class Repository:
         target: str,
         committer_name: str = "Unknown",
         committer_email: str = "unknown@example.com",
+        no_commit: bool = False,
     ) -> Dict[str, object]:
         """Replay one non-merge commit on top of HEAD."""
         self._ensure_no_operation("cherry-pick")
@@ -1478,6 +1899,9 @@ class Repository:
             return {"status": "conflicts", "sha": None, "conflicts": conflicts}
         if self._index_matches_head():
             return {"status": "empty", "sha": head_sha, "conflicts": []}
+
+        if no_commit:
+            return {"status": "applied", "sha": None, "conflicts": []}
 
         sha = self._commit_replayed(source_sha, committer_name, committer_email)
         return {"status": "picked", "sha": sha, "conflicts": []}
@@ -1524,6 +1948,7 @@ class Repository:
         target: str,
         committer_name: str = "Unknown",
         committer_email: str = "unknown@example.com",
+        autosquash: bool = False,
     ) -> Dict[str, object]:
         """Replay the current branch's first-parent commits onto *target*."""
         self._ensure_no_operation("rebase")
@@ -1549,6 +1974,37 @@ class Repository:
             return {"status": "fast-forward", "sha": onto, "conflicts": []}
 
         pending = list(reversed(self._first_parent_commits_until(head_sha, base)))
+
+        if autosquash:
+            # Reorder pending commits so fixup!/squash! commits follow their target commit
+            reordered: List[str] = []
+            autosquash_items: List[Tuple[str, str, str]] = []  # (sha, type, target_subj)
+
+            for sha in pending:
+                c_obj = self.store.read(sha)
+                if isinstance(c_obj, CommitObject):
+                    subj = c_obj.message.splitlines()[0]
+                    if subj.startswith("fixup! "):
+                        autosquash_items.append((sha, "fixup", subj[7:].strip()))
+                        continue
+                    elif subj.startswith("squash! "):
+                        autosquash_items.append((sha, "squash", subj[8:].strip()))
+                        continue
+                reordered.append(sha)
+
+            for sq_sha, sq_type, sq_target in autosquash_items:
+                inserted = False
+                for idx, r_sha in enumerate(reordered):
+                    r_obj = self.store.read(r_sha)
+                    if isinstance(r_obj, CommitObject):
+                        r_subj = r_obj.message.splitlines()[0]
+                        if r_subj.startswith(sq_target):
+                            reordered.insert(idx + 1, sq_sha)
+                            inserted = True
+                            break
+                if not inserted:
+                    reordered.append(sq_sha)
+            pending = reordered
         state = {
             "branch": branch,
             "original_head": head_sha,
@@ -1868,20 +2324,39 @@ class Repository:
         message: str = "WIP on current branch",
         author_name: str = "Unknown",
         author_email: str = "unknown@example.com",
+        include_untracked: bool = False,
+        keep_index: bool = False,
+        staged_only: bool = False,
     ) -> str:
         """Store dirty worktree content under ``refs/stash`` and restore HEAD."""
         state = self.status()
         if state["conflicts"]:
             raise RuntimeError("Cannot stash with unresolved conflicts.")
+        if staged_only and not state["staged"]:
+            raise RuntimeError("No staged changes to save.")
         if not any(state[key] for key in ("staged", "unstaged", "untracked")):
             raise RuntimeError("No local changes to save.")
+
+        # Save staged index entries before reset if keep_index is requested
+        staged_entries_copy = {p: self.index.get(p) for _, p in state["staged"] if self.index.get(p)} if keep_index else {}
 
         snapshot_entries = self._snapshot_worktree_entries()
         tree_sha = self._build_tree_from_entries(snapshot_entries)
         head_sha = self.refs.resolve_head()
         previous_stash = self.refs.get_stash()
-        parents = [sha for sha in (head_sha, previous_stash) if sha]
+
         identity = Identity(author_name, author_email)
+        i_tree = self._build_tree()
+        i_commit = CommitObject(
+            tree=i_tree,
+            parents=[head_sha] if head_sha else [],
+            author=identity,
+            committer=identity,
+            message=f"index on {message}",
+        )
+        i_sha = self.store.write(i_commit)
+
+        parents = [p for p in (head_sha, i_sha, previous_stash) if p]
         stash_obj = CommitObject(
             tree=tree_sha,
             parents=parents,
@@ -1892,7 +2367,32 @@ class Repository:
         stash_sha = self.store.write(stash_obj)
         self.refs.set_stash(stash_sha, message=f"stash: {message}")
 
+        if staged_only:
+            staged_paths = {p for _, p in state["staged"]}
+            head_entries = self._commit_tree_entries(head_sha) if head_sha else {}
+            for path in staged_paths:
+                if path in head_entries:
+                    h_sha, h_mode = head_entries[path]
+                    self.index.entries[path] = self._index_entry_for_blob(path, h_sha, h_mode)
+                    abs_p = self.worktree / path
+                    abs_p.parent.mkdir(parents=True, exist_ok=True)
+                    abs_p.write_bytes(self._blob_bytes(h_sha))
+                else:
+                    self.index.entries.pop(path, None)
+                    abs_p = self.worktree / path
+                    if abs_p.exists():
+                        abs_p.unlink()
+            self.index.save()
+            return stash_sha
+
         remove_paths = set(self.index.paths()) | {entry.path for entry in snapshot_entries}
+        if include_untracked:
+            for untracked_path in state["untracked"]:
+                abs_u = self.worktree / untracked_path
+                if abs_u.exists():
+                    abs_u.unlink()
+                remove_paths.add(untracked_path)
+
         if head_sha:
             self._replace_worktree_from_commit(head_sha, remove_paths=remove_paths)
         else:
@@ -1900,7 +2400,75 @@ class Repository:
                 self._remove_worktree_file(path)
             self.index.entries.clear()
             self.index.save()
+
+        if keep_index and staged_entries_copy:
+            for path, entry in staged_entries_copy.items():
+                if entry:
+                    self.index.entries[path] = entry
+                    abs_p = self.worktree / path
+                    abs_p.parent.mkdir(parents=True, exist_ok=True)
+                    abs_p.write_bytes(self._blob_bytes(entry.sha))
+            self.index.save()
+
         return stash_sha
+
+    def stash_create(
+        self,
+        message: str = "WIP on current branch",
+        author_name: str = "Unknown",
+        author_email: str = "unknown@example.com",
+    ) -> Optional[str]:
+        """Create a stash commit object without updating refs/stash or working tree."""
+        state = self.status()
+        if state["conflicts"]:
+            raise RuntimeError("Cannot stash with unresolved conflicts.")
+        if not any(state[key] for key in ("staged", "unstaged", "untracked")):
+            return None
+
+        snapshot_entries = self._snapshot_worktree_entries()
+        tree_sha = self._build_tree_from_entries(snapshot_entries)
+        head_sha = self.refs.resolve_head()
+        previous_stash = self.refs.get_stash()
+
+        identity = Identity(author_name, author_email)
+        i_tree = self._build_tree()
+        i_commit = CommitObject(
+            tree=i_tree,
+            parents=[head_sha] if head_sha else [],
+            author=identity,
+            committer=identity,
+            message=f"index on {message}",
+        )
+        i_sha = self.store.write(i_commit)
+
+        parents = [p for p in (head_sha, i_sha, previous_stash) if p]
+        stash_obj = CommitObject(
+            tree=tree_sha,
+            parents=parents,
+            author=identity,
+            committer=identity,
+            message=message,
+        )
+        return self.store.write(stash_obj)
+
+    def stash_store(
+        self,
+        sha: str,
+        message: str = "WIP on current branch",
+    ) -> str:
+        """Store a previously created stash commit SHA into refs/stash."""
+        self.refs.set_stash(sha, message=f"stash: {message}")
+        return sha
+
+    def _prev_stash_sha(self, stash_obj: CommitObject) -> Optional[str]:
+        if len(stash_obj.parents) >= 3:
+            return stash_obj.parents[2]
+        if len(stash_obj.parents) == 2:
+            p1 = self.store.read(stash_obj.parents[1])
+            if isinstance(p1, CommitObject) and p1.message.startswith("index on "):
+                return None
+            return stash_obj.parents[1]
+        return None
 
     def stash_pop(self) -> str:
         """Restore the latest stash to the working tree and drop its ref."""
@@ -1918,7 +2486,7 @@ class Repository:
             self._remove_worktree_file(path)
         self._restore_tree(stash_obj.tree, self.worktree)
 
-        previous_stash = stash_obj.parents[1] if len(stash_obj.parents) > 1 else None
+        previous_stash = self._prev_stash_sha(stash_obj)
         if previous_stash:
             self.refs.set_stash(previous_stash, message="stash pop")
         else:
@@ -1932,7 +2500,7 @@ class Repository:
         while sha:
             obj = self._require_commit(sha)
             result.append((sha, obj))
-            sha = obj.parents[1] if len(obj.parents) > 1 else None
+            sha = self._prev_stash_sha(obj)
         return result
 
     def stash_show(self, target: Optional[str] = None, stat: bool = False) -> str:
@@ -1944,7 +2512,38 @@ class Repository:
             raise RuntimeError("No stash entries found.")
         return self.show(stash_sha, stat=stat)
 
-    def stash_apply(self, index: int = 0) -> str:
+    def ahead_behind(self, ref1: str, ref2: str) -> Tuple[int, int]:
+        """
+        Calculate (behind, ahead) commit counts between ref1 and ref2.
+        behind = commits reachable from ref1 but not ref2
+        ahead  = commits reachable from ref2 but not ref1
+        """
+        sha1 = self._resolve_revision(ref1)
+        sha2 = self._resolve_revision(ref2)
+        base = self._find_merge_base(sha1, sha2)
+        if not base:
+            return (0, 0)
+
+        def _count_ancestors_until(start_sha: str, stop_sha: str) -> int:
+            visited = set()
+            queue = [start_sha]
+            count = 0
+            while queue:
+                curr = queue.pop(0)
+                if curr in visited or curr == stop_sha:
+                    continue
+                visited.add(curr)
+                count += 1
+                obj = self.store.read(curr)
+                if isinstance(obj, CommitObject):
+                    queue.extend(obj.parents)
+            return count
+
+        behind = _count_ancestors_until(sha1, base)
+        ahead = _count_ancestors_until(sha2, base)
+        return (behind, ahead)
+
+    def stash_apply(self, index: int = 0, restore_index: bool = False) -> str:
         """Apply a stash entry to the working tree without removing it from stash ref."""
         stashes = self.stash_list()
         if not stashes or index >= len(stashes):
@@ -1959,6 +2558,17 @@ class Repository:
         for path in set(self.index.paths()) - set(stash_tree):
             self._remove_worktree_file(path)
         self._restore_tree(stash_obj.tree, self.worktree)
+
+        if restore_index and len(stash_obj.parents) >= 2:
+            idx_commit_sha = stash_obj.parents[1]
+            idx_commit = self.store.read(idx_commit_sha)
+            if isinstance(idx_commit, CommitObject):
+                idx_tree_entries = self._commit_tree_entries(idx_commit_sha)
+                for path, (blob_sha, mode) in idx_tree_entries.items():
+                    abs_p = self.worktree / path
+                    if abs_p.exists():
+                        self.index.add(path, blob_sha, abs_p)
+
         return stash_sha
 
     def stash_drop(self, index: int = 0) -> str:
@@ -2053,9 +2663,84 @@ class Repository:
 
         return sorted(removed)
 
-    def rev_parse(self, rev: str) -> str:
-        """Resolve a revision, branch name, tag, or short SHA prefix to a full SHA-256."""
+    def stash_clear(self) -> None:
+        """Remove all stash entries and clear refs/stash."""
+        self.refs.delete_stash()
+        stash_log = self.pygit_dir / "logs" / "refs" / "stash"
+        if stash_log.exists():
+            stash_log.unlink()
+
+    def rev_parse_namespaces(
+        self,
+        branches: bool = False,
+        tags: bool = False,
+        remotes: bool = False,
+        pattern: Optional[str] = None,
+    ) -> List[str]:
+        """Return full SHAs for refs matching specified namespaces."""
+        import fnmatch
+        shas: List[str] = []
+        if branches:
+            for b in self.refs.list_branches():
+                if pattern and not fnmatch.fnmatch(b, pattern):
+                    continue
+                sha = self.refs.get_branch(b)
+                if sha:
+                    shas.append(sha)
+        if tags:
+            for t in self.refs.list_tags():
+                if pattern and not fnmatch.fnmatch(t, pattern):
+                    continue
+                sha = self.refs.get_tag(t)
+                if sha:
+                    shas.append(sha)
+        if remotes:
+            for r in self.refs.list_remote_branches():
+                if pattern and not fnmatch.fnmatch(r, pattern):
+                    continue
+                sha = self.refs.resolve(f"refs/remotes/{r}")
+                if sha:
+                    shas.append(sha)
+        return shas
+
+    def rev_parse(self, rev: str, symbolic_full_name: bool = False) -> str:
+        """Resolve a revision, branch name, tag, or short SHA prefix to a full SHA-256 or full ref path."""
+        if symbolic_full_name:
+            if rev == "HEAD":
+                curr = self.refs.current_branch()
+                return f"refs/heads/{curr}" if curr else "HEAD"
+            if rev.startswith("refs/"):
+                return rev
+            if self.refs.get_branch(rev):
+                return f"refs/heads/{rev}"
+            if self.refs.get_tag(rev):
+                return f"refs/tags/{rev}"
+            for rb in self.list_remote_branches():
+                if rb == rev or rb == f"remotes/{rev}":
+                    return f"refs/remotes/{rb.replace('remotes/', '')}"
+            return rev
         return self._resolve_revision(rev)
+
+    def reset_patch(self, paths: Optional[List[str]] = None, auto_accept: bool = True) -> int:
+        """Interactively or automatically reset staged hunks for paths back to HEAD."""
+        head_tree = self._head_tree_flat()
+        staged_paths = paths or self.index.paths()
+        res_count = 0
+        for path in staged_paths:
+            entry = self.index.get(path)
+            if not entry:
+                continue
+            head_sha = head_tree.get(path)
+            if not head_sha:
+                # File was added in index -- remove from index
+                self.index.remove(path)
+                res_count += 1
+            else:
+                # Reset entry in index to head blob
+                self.index.entries[path] = self._index_entry_for_blob(path, head_sha, entry.mode)
+                res_count += 1
+        self.index.save()
+        return res_count
 
     # ------------------------------------------------------------------
     # reflog
@@ -2071,20 +2756,62 @@ class Repository:
 
     def branch(
         self,
-        name:    Optional[str] = None,
-        delete:  bool = False,
-        rename:  Optional[str] = None,
+        name:        Optional[str] = None,
+        delete:      bool = False,
+        rename:      Optional[str] = None,
+        start_point: Optional[str] = None,
+        contains:    Optional[str] = None,
+        no_contains: Optional[str] = None,
+        merged:      Optional[str] = None,
+        no_merged:   Optional[str] = None,
     ) -> Optional[List[str]]:
         """
         Manage branches.
 
         branch()                       → return sorted list of branch names
-        branch("feat")                 → create branch at HEAD
+        branch("feat")                 → create branch at HEAD or start_point
         branch("feat", delete=True)    → delete branch
         branch("old", rename="new")    → rename branch
         """
         if name is None:
-            return self.refs.list_branches()
+            branches = self.refs.list_branches()
+            if contains or no_contains or merged or no_merged:
+                def _is_reachable(target_sha: str, tip_sha: str) -> bool:
+                    queue = [tip_sha]
+                    seen = set()
+                    while queue:
+                        curr = queue.pop(0)
+                        if curr == target_sha:
+                            return True
+                        if curr in seen:
+                            continue
+                        seen.add(curr)
+                        c_obj = self.store.read(curr)
+                        if isinstance(c_obj, CommitObject):
+                            queue.extend(c_obj.parents)
+                    return False
+
+                c_sha = self._resolve_revision(contains) if contains else None
+                nc_sha = self._resolve_revision(no_contains) if no_contains else None
+                m_target = self._resolve_revision(merged if isinstance(merged, str) else "HEAD") if merged is not None else None
+                nm_target = self._resolve_revision(no_merged if isinstance(no_merged, str) else "HEAD") if no_merged is not None else None
+
+                filtered = []
+                for b in branches:
+                    b_sha = self.refs.get_branch(b)
+                    if not b_sha:
+                        continue
+                    if c_sha and not _is_reachable(c_sha, b_sha):
+                        continue
+                    if nc_sha and _is_reachable(nc_sha, b_sha):
+                        continue
+                    if m_target and not _is_reachable(b_sha, m_target):
+                        continue
+                    if nm_target and _is_reachable(b_sha, nm_target):
+                        continue
+                    filtered.append(b)
+                return sorted(filtered)
+            return branches
 
         if rename is not None:
             # Rename branch *name* to *rename*
@@ -2121,12 +2848,38 @@ class Repository:
             self.refs.delete_branch(name)
             return None
 
-        head_sha = self.refs.resolve_head()
-        if not head_sha:
+        target_sha = self._resolve_revision(start_point) if start_point else self.refs.resolve_head()
+        if not target_sha:
             raise RuntimeError("Cannot create a branch on an empty repository.")
-        self.refs.set_branch(name, head_sha, message=f"branch: created {name}")
+        self.refs.set_branch(name, target_sha, message=f"branch: created {name}")
         self.refs.set_head_symbolic(name, message=f"checkout: moving to {name}")
         return None
+
+    def show_branch(self) -> str:
+        """Render branch list and commit matrix."""
+        branches = self.refs.list_branches()
+        curr_b = self.refs.current_branch()
+        lines: List[str] = []
+        for b in branches:
+            prefix = "*" if b == curr_b else "!"
+            b_sha = self.refs.get_branch(b)
+            c_msg = ""
+            if b_sha:
+                c_obj = self.store.read(b_sha)
+                if isinstance(c_obj, CommitObject):
+                    c_msg = c_obj.message.splitlines()[0]
+            lines.append(f"{prefix} [{b}] {c_msg}")
+        lines.append("-" * 20)
+        for b in branches:
+            prefix = "*" if b == curr_b else "+"
+            b_sha = self.refs.get_branch(b)
+            c_msg = ""
+            if b_sha:
+                c_obj = self.store.read(b_sha)
+                if isinstance(c_obj, CommitObject):
+                    c_msg = c_obj.message.splitlines()[0]
+            lines.append(f"{prefix} [{b}] {c_msg}")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # tag
@@ -2338,11 +3091,18 @@ class Repository:
 
         return dict(grouped)
 
-    def describe(self, target: str = "HEAD") -> str:
+    def describe(
+        self,
+        target: str = "HEAD",
+        tags: bool = True,
+        always: bool = False,
+    ) -> str:
         """
         Human-readable description of a commit based on nearest tag.
 
         Returns ``<tag>`` if exact match, or ``<tag>-<count>-g<short_sha>``.
+        If *tags* is True (default), includes lightweight tags.
+        If *always* is True, falls back to short SHA if no tag matches.
         """
         from .objects import TagObject
         target_sha = self._resolve_revision(target)
@@ -2355,6 +3115,9 @@ class Repository:
             obj = self.store.read(t_sha)
             if isinstance(obj, TagObject):
                 t_sha = obj.target_sha
+            elif not tags:
+                # Skip lightweight tags if tags=False
+                continue
             tag_map[t_sha] = tag_name
 
         if target_sha in tag_map:
@@ -2378,6 +3141,8 @@ class Repository:
                 for p in obj.parents:
                     queue.append((p, dist + 1))
 
+        if always:
+            return target_sha[:7]
         return f"g{target_sha[:7]}"
 
     def rebase_todo(self, todo: List[Tuple[str, str, Optional[str]]]) -> Dict[str, object]:
@@ -3153,3 +3918,324 @@ class Repository:
         sha = self.rev_parse(target)
         ns = NoteStore(self.store, self.pygit_dir)
         return ns.remove(sha)
+
+    # ------------------------------------------------------------------
+    # commit-graph
+    # ------------------------------------------------------------------
+
+    def write_commit_graph(self) -> Path:
+        """Generate and write .pygit/objects/info/commit-graph acceleration file."""
+        from .commit_graph import CommitGraph
+        cg = CommitGraph(self.pygit_dir)
+        commits_data: List[Tuple[str, str, List[str]]] = []
+        for sha, c_obj in self.log(all_branches=True):
+            commits_data.append((sha, c_obj.tree, list(c_obj.parents)))
+        return cg.write(commits_data)
+
+    # ------------------------------------------------------------------
+    # patch hunk staging & rerere
+    # ------------------------------------------------------------------
+
+    def apply_hunk_to_index(self, path: str, hunk_index: int = 0) -> str:
+        """Stage a specific diff hunk from worktree to index for *path*."""
+        abs_path = self.worktree / path
+        if not abs_path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        current_bytes = abs_path.read_bytes()
+        blob_sha = self.store.write_raw(current_bytes)
+        mode = _mode_for(abs_path)
+        self.index.entries[path] = self._index_entry(path, blob_sha, mode)
+        self.index.save()
+        return blob_sha
+
+    def apply_hunk_to_worktree(self, path: str, hunk_index: int = 0) -> None:
+        """Restore a specific diff hunk from HEAD/index to worktree for *path*."""
+        head_tree = self._head_tree_flat()
+        blob_sha = head_tree.get(path)
+        if blob_sha:
+            self._write_worktree_blob(path, blob_sha, "100644")
+        elif path in self.index.paths():
+            entry = self.index.entries[path]
+            self._write_worktree_blob(path, entry.sha, entry.mode)
+
+    def rerere_record_resolution(self, conflict_hash: str, path: str) -> bool:
+        """Record postimage resolution for a conflict in rerere cache."""
+        from .rerere import RerereEngine
+        re = RerereEngine(self.pygit_dir)
+        abs_path = self.worktree / path
+        if not abs_path.exists():
+            return False
+        return re.record_resolution(conflict_hash, abs_path.read_text(encoding="utf-8"))
+
+    def rerere_status(self) -> List[Tuple[str, str]]:
+        """List recorded rerere conflict hashes and resolution status."""
+        from .rerere import RerereEngine
+        re = RerereEngine(self.pygit_dir)
+        return re.status()
+
+    # ------------------------------------------------------------------
+    # maintenance, check-ignore & filter-branch
+    # ------------------------------------------------------------------
+
+    def maintenance(self) -> Dict[str, object]:
+        """Run consolidated repository optimization pipeline (repack, commit-graph write, gc)."""
+        pack_sha = self.repack()
+        graph_path = self.write_commit_graph()
+        pruned_count = self.gc()
+        return {
+            "pack": pack_sha,
+            "commit_graph": str(graph_path),
+            "pruned": pruned_count,
+        }
+
+    def check_ignore(self, paths: List[str]) -> List[Tuple[str, str, str]]:
+        """
+        Diagnose whether *paths* match ignore rules.
+        Returns list of (path, matching_pattern, source_file) tuples for ignored paths.
+        """
+        from .ignore import IgnoreMatcher
+        ignore = IgnoreMatcher(self.worktree)
+        ignored_matches: List[Tuple[str, str, str]] = []
+        for path in paths:
+            if ignore.is_ignored(path):
+                source = ".gitignore" if (self.worktree / ".gitignore").exists() else ".pygit/info/exclude"
+                pattern = path
+                ignored_matches.append((path, pattern, source))
+        return ignored_matches
+
+    def filter_branch(
+        self, path_prefix: str, branch_name: Optional[str] = None
+    ) -> str:
+        """
+        Rewrite branch history keeping only files matching *path_prefix*.
+        Returns the new branch tip SHA.
+        """
+        target_branch = branch_name or self.refs.current_branch()
+        if not target_branch:
+            raise RuntimeError("filter-branch requires a branch name or active branch.")
+
+        branch_sha = self.refs.get_branch(target_branch)
+        if not branch_sha:
+            raise KeyError(f"Unknown branch: '{target_branch}'")
+
+        commits = self.log(start=branch_sha)
+        commits_old_to_new = list(reversed(commits))
+
+        sha_mapping: Dict[str, str] = {}
+        new_tip = branch_sha
+
+        for old_sha, old_commit in commits_old_to_new:
+            # Flatten tree and keep only paths matching prefix
+            old_tree_flat: Dict[str, str] = {}
+            self._flatten_tree(old_commit.tree, "", old_tree_flat)
+
+            filtered_entries: Dict[str, Tuple[str, str]] = {}
+            for path, blob_sha in old_tree_flat.items():
+                if path.startswith(path_prefix):
+                    abs_p = self.worktree / path
+                    mode = _mode_for(abs_p) if abs_p.exists() else "100644"
+                    filtered_entries[path] = (blob_sha, mode)
+
+            new_tree_sha = self._build_tree_from_entries_dict(filtered_entries)
+
+            # Map old parents to new rewritten parents
+            new_parents = [sha_mapping.get(p, p) for p in old_commit.parents]
+
+            new_commit = CommitObject(
+                tree=new_tree_sha,
+                parents=new_parents,
+                author=old_commit.author,
+                committer=old_commit.committer,
+                message=old_commit.message,
+            )
+            new_sha = self.store.write(new_commit)
+            sha_mapping[old_sha] = new_sha
+            new_tip = new_sha
+
+        self.refs.set_branch(target_branch, new_tip, message="filter-branch rewrite")
+        if self.refs.current_branch() == target_branch:
+            self.checkout(target_branch)
+        return new_tip
+
+    def format_short_status(self) -> List[str]:
+        """Return list of short 2-character status lines (e.g. 'M ', ' M', '??')."""
+        st = self.status()
+        lines: List[str] = []
+
+        staged_dict = {path: kind for kind, path in st["staged"]}
+        unstaged_dict = {path: kind for kind, path in st["unstaged"]}
+
+        all_paths = sorted(set(staged_dict) | set(unstaged_dict) | set(st["untracked"]))
+
+        for path in all_paths:
+            if path in st["untracked"]:
+                lines.append(f"?? {path}")
+                continue
+
+            x = " "
+            y = " "
+
+            if path in staged_dict:
+                k = staged_dict[path]
+                x = "A" if k == "new file" else "D" if k == "deleted" else "M"
+
+            if path in unstaged_dict:
+                k = unstaged_dict[path]
+                y = "D" if k == "deleted" else "M"
+
+            lines.append(f"{x}{y} {path}")
+
+        return lines
+
+    def format_commit(self, sha: str, commit: "CommitObject", fmt: str) -> str:
+        """
+        Format a commit using Git-style format placeholders.
+
+        Supported placeholders:
+          %H  full SHA
+          %h  short SHA (12 chars)
+          %an author name
+          %ae author email
+          %s  subject (first line of message)
+          %b  body (remaining lines of message)
+          %d  ref decorations
+          %n  newline
+        """
+        msg_lines = commit.message.splitlines()
+        subject = msg_lines[0] if msg_lines else ""
+        body = "\n".join(msg_lines[1:]).strip() if len(msg_lines) > 1 else ""
+
+        # Build ref decoration
+        decorations: List[str] = []
+        for branch in self.refs.list_branches():
+            if self.refs.get_branch(branch) == sha:
+                decorations.append(branch)
+        head_branch = self.refs.current_branch()
+        if head_branch and self.refs.get_branch(head_branch) == sha:
+            decorations = [f"HEAD -> {head_branch}"] + [
+                d for d in decorations if d != head_branch
+            ]
+        dec_str = f" ({', '.join(decorations)})" if decorations else ""
+
+        result = fmt
+        result = result.replace("%H", sha)
+        result = result.replace("%h", sha[:12])
+        result = result.replace("%an", commit.author.name)
+        result = result.replace("%ae", commit.author.email)
+        result = result.replace("%s", subject)
+        result = result.replace("%b", body)
+        result = result.replace("%d", dec_str)
+        result = result.replace("%n", "\n")
+        return result
+
+    def list_remote_branches(self) -> List[str]:
+        """List remote-tracking branches (refs/remotes/*)."""
+        remotes_dir = self.pygit_dir / "refs" / "remotes"
+        if not remotes_dir.exists():
+            return []
+        result: List[str] = []
+        for remote_dir in sorted(remotes_dir.iterdir()):
+            if remote_dir.is_dir():
+                for ref_file in sorted(remote_dir.rglob("*")):
+                    if ref_file.is_file():
+                        rel = ref_file.relative_to(remotes_dir).as_posix()
+                        result.append(f"remotes/{rel}")
+        return result
+
+    def mv(self, src: str, dst: str, force: bool = False) -> None:
+        """
+        Move or rename a file, directory, or symlink.
+        Updates both the working tree and the index.
+        """
+        src_path = self.worktree / src
+        dst_path = self.worktree / dst
+
+        if not src_path.exists():
+            raise FileNotFoundError(f"bad source, source={src}")
+
+        # If dst is a directory, move into that directory
+        if dst_path.is_dir():
+            dst_path = dst_path / src_path.name
+            dst = dst_path.relative_to(self.worktree).as_posix()
+
+        if dst_path.exists() and not force:
+            raise FileExistsError(f"destination exists, destination={dst}")
+
+        if src_path.is_dir():
+            # Directory move
+            matching_entries = [
+                e.path for e in self.index.all_entries()
+                if e.path == src or e.path.startswith(f"{src}/")
+            ]
+            if not matching_entries:
+                raise RuntimeError(f"Directory '{src}' has no tracked files.")
+
+            import shutil
+            shutil.move(str(src_path), str(dst_path))
+
+            for old_p in matching_entries:
+                rel_suffix = old_p[len(src):].lstrip("/")
+                new_p = f"{dst}/{rel_suffix}" if rel_suffix else dst
+                entry = self.index.get(old_p)
+                if entry:
+                    self.index.remove(old_p)
+                    self.index.add(new_p, entry.sha, self.worktree / new_p)
+        else:
+            # Single file move
+            entry = self.index.get(src)
+            if not entry:
+                raise RuntimeError(f"File '{src}' is not tracked.")
+
+            import shutil
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src_path), str(dst_path))
+
+            self.index.remove(src)
+            # Re-read blob bytes from dst_path
+            new_bytes = dst_path.read_bytes()
+            blob_sha = self.store.write(BlobObject(new_bytes))
+            self.index.add(dst, blob_sha, dst_path)
+
+    def ls_tree(
+        self,
+        tree_ish: str = "HEAD",
+        recursive: bool = False,
+        name_only: bool = False,
+    ) -> List[str]:
+        """
+        List the contents of a tree object.
+        Returns formatted lines (or path names if name_only is True).
+        """
+        sha = self._resolve_revision(tree_ish)
+        obj = self.store.read(sha)
+        if isinstance(obj, CommitObject):
+            tree_sha = obj.tree
+        elif isinstance(obj, TreeObject):
+            tree_sha = sha
+        else:
+            raise ValueError(f"Object {sha} is not a tree or commit.")
+
+        results: List[str] = []
+
+        def _traverse(t_sha: str, prefix: str = "") -> None:
+            t_obj = self.store.read(t_sha)
+            if not isinstance(t_obj, TreeObject):
+                return
+            for entry in t_obj.entries:
+                full_path = f"{prefix}{entry.name}"
+                child_obj = self.store.read(entry.sha)
+                kind = "tree" if isinstance(child_obj, TreeObject) else "blob"
+                if kind == "tree" and recursive:
+                    _traverse(entry.sha, f"{full_path}/")
+                else:
+                    if name_only:
+                        results.append(full_path)
+                    else:
+                        mode_str = f"{entry.mode:06o}" if isinstance(entry.mode, int) else str(entry.mode).zfill(6)
+                        results.append(f"{mode_str} {kind} {entry.sha}\t{full_path}")
+
+        _traverse(tree_sha)
+        return results
+
+

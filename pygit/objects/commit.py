@@ -117,15 +117,33 @@ class CommitObject(GitObject):
     # Pretty-print (used by 'log')
     # ------------------------------------------------------------------
 
-    def pretty_print(self, sha: str) -> str:
+    def pretty_print(self, sha: str, date_format: Optional[str] = None) -> str:
         import datetime
         dt = datetime.datetime.fromtimestamp(
             self.author.timestamp, tz=datetime.timezone.utc
         )
+        if date_format == "short":
+            date_str = dt.strftime("%Y-%m-%d")
+        elif date_format == "iso":
+            date_str = dt.strftime("%Y-%m-%d %H:%M:%S %z")
+        elif date_format == "relative":
+            now = datetime.datetime.now(tz=datetime.timezone.utc)
+            diff = now - dt
+            secs = max(0, int(diff.total_seconds()))
+            if secs < 60:
+                date_str = f"{secs} seconds ago"
+            elif secs < 3600:
+                date_str = f"{secs // 60} minutes ago"
+            elif secs < 86400:
+                date_str = f"{secs // 3600} hours ago"
+            else:
+                date_str = f"{secs // 86400} days ago"
+        else:
+            date_str = dt.strftime("%a %b %d %H:%M:%S %Y %z")
         lines = [
             f"commit {sha}",
             f"Author: {self.author.name} <{self.author.email}>",
-            f"Date:   {dt.strftime('%a %b %d %H:%M:%S %Y %z')}",
+            f"Date:   {date_str}",
             "",
             f"    {self.message}",
         ]

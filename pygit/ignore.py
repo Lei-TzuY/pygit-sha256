@@ -59,7 +59,11 @@ class IgnoreMatcher:
 
     def __init__(self, worktree: Path) -> None:
         self.worktree = worktree
-        self.patterns = self._load(worktree / ".pygitignore")
+        self.patterns = (
+            self._load(worktree / ".pygitignore")
+            + self._load(worktree / ".gitignore")
+            + self._load(worktree / ".pygit" / "info" / "exclude")
+        )
 
     @staticmethod
     def _load(path: Path) -> List[IgnorePattern]:
