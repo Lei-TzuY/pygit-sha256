@@ -1,6 +1,42 @@
 # pygit
 
-`pygit` is a feature-rich Git version control system implemented in Python. It stores loose objects compressed with `zlib` and addressed by SHA-256 hashes under `.pygit/objects/`. Its staging area (`.pygit/index`) is formatted as readable JSON for educational transparency.
+[![Tests](https://github.com/Lei-TzuY/pygit-sha256/actions/workflows/tests.yml/badge.svg)](https://github.com/Lei-TzuY/pygit-sha256/actions/workflows/tests.yml)
+
+`pygit` is an educational version-control system implemented in Python. It
+rebuilds many Git concepts—content-addressed objects, refs, an index, commit
+graphs, packs, merges, rebases, and remotes—while keeping its own repository
+format inspectable. Loose objects are compressed with `zlib`, addressed by
+SHA-256, and stored under `.pygit/objects/`; the staging area is readable JSON.
+
+> **Scope:** this project studies and reproduces Git behavior. It is not a
+> drop-in replacement for the Git executable, and `.pygit/` is not Git's
+> native `.git/` repository format.
+
+## Evidence map
+
+| Area | Implementation | Verification |
+| --- | --- | --- |
+| Object database | loose objects, trees, commits, tags, packs, fan-out indexes, fsck and GC | object/pack/integrity tests under [`tests/`](tests/) |
+| Worktree and history | index, status, diff, checkout, merge, rebase, cherry-pick, reflog and blame | unit and integration tests, including conflict and recovery paths |
+| Remotes | Smart HTTP negotiation plus SHA-1/SHA-256 translation for supported workflows | [remote tests](tests/test_remote.py) and multi-version [CI](.github/workflows/tests.yml) |
+| Internals | object layouts, refs, pack structures and command phases | [`INTERNALS.md`](INTERNALS.md) |
+
+## Compatibility boundary
+
+- Local repositories use `.pygit/`, JSON index metadata, and 64-character
+  SHA-256 object IDs. Native Git does not open that directory as a normal
+  repository.
+- Clone/fetch/pull/push implement selected Smart HTTP and transport workflows.
+  They do not imply complete compatibility with every server capability,
+  credential helper, hook, configuration key, partial-clone mode, or protocol
+  extension supported by mature Git clients.
+- SHA-1/SHA-256 translation is maintained for supported remote operations; it
+  is not a claim that the internal object format is identical to Git's
+  experimental SHA-256 repository format.
+- `verify-commit` exposes stored signature metadata for inspection; it is not
+  a complete trust-policy or key-management implementation.
+- The project prioritizes readable mechanisms and regression tests over
+  performance, hostile-repository hardening, and production support.
 
 ---
 
@@ -112,7 +148,7 @@ python -m pygit log --graph --oneline
 
 ## Test Suite
 
-Run the 253 unit and integration tests:
+Run the unit and integration suite:
 
 ```powershell
 python -m pytest -v
