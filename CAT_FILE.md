@@ -32,7 +32,19 @@ The command prints nothing and exits with status 0 when the object exists, or st
 printf 'HEAD\nHEAD:README.md\nmissing\n' | pygit cat-file --batch-check
 ```
 
-Each successful input produces `<object-id> <type> <size>`. Failed inputs produce `<input> missing`; failures are per-record and do not abort later records.
+Each successful input produces:
+
+```text
+<object-id> <type> <size>
+```
+
+A failed input produces:
+
+```text
+<input> missing
+```
+
+Batch failures are per-record and do not abort later records.
 
 ## Batch content
 
@@ -40,19 +52,28 @@ Each successful input produces `<object-id> <type> <size>`. Failed inputs produc
 printf 'HEAD:README.md\n' | pygit cat-file --batch
 ```
 
-For each successful object, `--batch` emits the same metadata header followed by raw serialized content and a trailing newline.
+For each successful object, `--batch` emits the same metadata header followed by the object's raw serialized content and a trailing newline. This makes the mode useful for scripts that need to inspect many objects without starting one process per lookup.
 
 ## Custom batch formats
 
-The optional format must be attached with `=`:
+The optional format must be attached with `=` just like Git:
 
 ```console
-printf 'HEAD metadata\n' | pygit cat-file '--batch-check=%(objectname) %(objecttype) %(objectsize) %(rest)'
-printf 'HEAD:README.md\n' | pygit cat-file '--batch=%(objecttype):%(objectsize)'
-printf 'info HEAD\n' | pygit cat-file '--batch-command=%(objectname)|%(objecttype)'
+printf 'HEAD metadata\n' | \
+  pygit cat-file '--batch-check=%(objectname) %(objecttype) %(objectsize) %(rest)'
+
+printf 'HEAD:README.md\n' | \
+  pygit cat-file '--batch=%(objecttype):%(objectsize)'
+
+printf 'info HEAD\ncontents HEAD:README.md\n' | \
+  pygit cat-file '--batch-command=%(objectname)|%(objecttype)|%(objectsize)'
 ```
 
-Supported atoms are `%(objectname)`, `%(objecttype)`, `%(objectsize)`, and `%(rest)`. `%%` emits a literal percent sign. Unknown or unterminated atoms fail before stdin is consumed. With `%(rest)`, ordinary batch modes split the input at the first whitespace run; command mode keeps everything after the command's first ASCII space as the object expression and expands `%(rest)` to empty.
+Supported atoms are `%(objectname)`, `%(objecttype)`, `%(objectsize)`, and `%(rest)`. `%%` emits a literal percent sign; other percent sequences are preserved literally. Unknown or unterminated atoms fail before stdin is consumed, preventing partial output from an invalid format.
+
+When `%(rest)` is present in `--batch` or `--batch-check`, the first whitespace run separates the object expression from auxiliary text; the separator is removed and the remaining text is preserved verbatim. Without `%(rest)`, the complete input line remains the object expression, so paths such as `HEAD:a b.txt` continue to work. `--batch-command` does not apply the rest split: everything after the command's first ASCII space remains the object expression and `%(rest)` expands to an empty string.
+
+Custom formatting applies only to successful headers. Missing objects always retain the stable `<object> missing` record so scripts can recognize failures independently of the selected format. An empty custom format is valid and emits only the record newline.
 
 ## Batch command protocol
 
@@ -60,11 +81,15 @@ Supported atoms are `%(objectname)`, `%(objecttype)`, `%(objectsize)`, and `%(re
 printf 'info HEAD\ncontents HEAD:README.md\n' | pygit cat-file --batch-command
 ```
 
-`info` emits metadata; `contents` emits metadata plus raw content. With `--buffer`, responses accumulate until `flush` or clean EOF.
+`info <object>` behaves like one `--batch-check` request. `contents <object>` behaves like one `--batch` request. Missing object expressions emit `<object> missing` and processing continues.
+
+With `--buffer`, responses are accumulated until a `flush` command is received. Pending output is also emitted at clean end-of-input. A parse error before `flush` does not publish the pending buffered data. Without `--buffer`, each response is flushed immediately for interactive clients.
+
+The command delimiter is one ASCII space; everything after that first space belongs to the object expression, so additional leading spaces are preserved rather than normalized.
 
 ## All-object enumeration
 
-`--batch-all-objects` switches a batch mode from stdin-selected lookups to complete local object-store enumeration:
+`--batch-all-objects` changes a batch mode from stdin-driven lookup to storage-wide enumeration:
 
 ```console
 pygit cat-file --batch-check --batch-all-objects
@@ -72,22 +97,51 @@ pygit cat-file '--batch-check=%(objectname) %(objecttype)' --batch-all-objects
 pygit cat-file --batch --batch-all-objects > object-stream.bin
 ```
 
-stdin is ignored completely. Enumeration includes reachable and unreachable objects, loose objects, packed-only objects, and objects duplicated between loose and packed storage. Duplicates are emitted once. Default order is deterministic lexical SHA-256 object-ID order.
+The command ignores stdin completely and emits every canonical object ID known to the local loose or packed object store. Enumeration is independent of refs and reachability, so unreachable objects are included. A loose object duplicated in a pack appears only once, and packed-only objects remain visible.
 
-Only canonical lowercase 64-hex object names are enumerated; incidental files beneath `.pygit/objects` are ignored. Object contents still pass through the ordinary verified object store, so enumeration does not weaken object integrity checks.
+Default output order is deterministic lexical SHA-256 object-ID order. Incidental files under `.pygit/objects` whose names are not canonical lowercase 64-hex IDs are ignored. Object contents still pass through the ordinary verified object store, so enumeration does not weaken object-integrity checks.
 
-Custom formats remain supported and `%(rest)` expands to empty. `--batch` emits raw contents; `--batch-check` and `--batch-command` emit metadata only. `--buffer` is accepted. `--unordered` remains separate work.
+Custom formats work unchanged. Because no stdin record exists for enumeration, `%(rest)` expands to the empty string. `--batch` emits raw contents after each formatted header; `--batch-check` and `--batch-command` emit metadata only. `--buffer` is accepted and flushes the completed stream. `--unordered` remains separate work.
 
 ## Python API
 
 ```python
-from pygit import all_object_ids, batch_all_objects, format_batch_object
+from pygit import (
+    all_object_ids,
+    batch_all_objects,
+    format_batch_object,
+    format_batch_record,
+    inspect_object,
+    object_exists,
+    parse_batch_command,
+    resolve_object,
+    run_batch_commands,
+    split_batch_input,
+)
 
-oids = all_object_ids(repo)
-headers = list(batch_all_objects(repo))
-custom = list(batch_all_objects(repo, format_string="%(objectname) %(objecttype)"))
-contents = list(batch_all_objects(repo, contents=True))
+oid = resolve_object(repo, "HEAD:README.md")
+record = inspect_object(repo, "HEAD:README.md")
+assert record.oid == oid
+assert record.type_name == "blob"
+assert object_exists(repo, "HEAD")
+
+expression, rest = split_batch_input(
+    "HEAD metadata\n",
+    "%(objectname) %(rest)",
+)
+custom = format_batch_record(record, "%(objecttype) %(objectsize)")
+command = parse_batch_command("info HEAD\n")
+chunks = list(
+    run_batch_commands(
+        repo,
+        ["info HEAD\n", "flush\n"],
+        buffered=True,
+        format_string="%(objectname) %(objecttype)",
+    )
+)
+object_ids = all_object_ids(repo)
+all_headers = list(batch_all_objects(repo, format_string="%(objectname) %(objecttype)"))
 header = format_batch_object(repo, "HEAD")
 ```
 
-`--unordered`, symlink following, disk-size/delta-base atoms, text conversion/filters, mailmap handling, and NUL framing remain separate work.
+`--unordered`, symlink following, `objectsize:disk`/delta-base atoms, text conversion/filters, mailmap toggling, and NUL-framed input remain separate work rather than being approximated here.
