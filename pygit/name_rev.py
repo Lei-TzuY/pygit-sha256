@@ -73,12 +73,39 @@ def _matches_patterns(refname: str, display: str, patterns: Sequence[str]) -> bo
     )
 
 
+def _read_ref_oid(repo: Repository, refname: str, seen: Optional[Set[str]] = None) -> Optional[str]:
+    """Read a direct or symbolic fully-qualified ref with cycle protection."""
+    if not refname.startswith("refs/"):
+        return None
+    seen = set() if seen is None else seen
+    if refname in seen or len(seen) >= 32:
+        return None
+    seen.add(refname)
+
+    root = (repo.pygit_dir / "refs").resolve()
+    path = (repo.pygit_dir / refname).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    if not path.is_file():
+        return None
+
+    raw = path.read_text(encoding="utf-8").strip()
+    if raw.startswith("ref: "):
+        return _read_ref_oid(repo, raw[5:].strip(), seen)
+    if not _is_oid(raw):
+        return None
+    return raw.lower()
+
+
 def _physical_refs(repo: Repository) -> Iterable[Tuple[str, str, bool]]:
     """Yield ``(refname, commit_oid, annotated_tag)`` records.
 
-    Symbolic refs under ``refs/`` are dereferenced when possible. Broken refs,
-    refs to non-commit objects and malformed object IDs are ignored so a naming
-    query remains useful even when unrelated namespaces contain special refs.
+    Symbolic refs under ``refs/`` are dereferenced with bounded cycle detection.
+    Broken refs, refs to non-commit objects and malformed object IDs are ignored
+    so a naming query remains useful when unrelated namespaces contain special
+    or damaged refs.
     """
     root = repo.pygit_dir / "refs"
     if not root.exists():
@@ -86,16 +113,9 @@ def _physical_refs(repo: Repository) -> Iterable[Tuple[str, str, bool]]:
 
     for path in sorted(p for p in root.rglob("*") if p.is_file()):
         refname = "refs/" + path.relative_to(root).as_posix()
-        raw = path.read_text(encoding="utf-8").strip()
-        if raw.startswith("ref: "):
-            target = raw[5:].strip()
-            oid = repo.refs.resolve(target)
-            if not oid:
-                continue
-        else:
-            if not _is_oid(raw):
-                continue
-            oid = raw.lower()
+        oid = _read_ref_oid(repo, refname)
+        if not oid:
+            continue
 
         try:
             obj = repo.store.read(oid)
