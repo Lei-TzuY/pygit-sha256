@@ -7,6 +7,7 @@ import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .cat_file import (
+    batch_all_objects,
     batch_format_uses_rest,
     format_batch_object,
     inspect_object,
@@ -75,6 +76,11 @@ def run_cat_file(argv: Sequence[str]) -> int:
         help="read info/contents/flush commands from stdin",
     )
     parser.add_argument(
+        "--batch-all-objects",
+        action="store_true",
+        help="ignore stdin and emit every object known to loose or packed storage",
+    )
+    parser.add_argument(
         "--buffer",
         action="store_true",
         help="buffer batch output until flush or clean end-of-input",
@@ -86,6 +92,8 @@ def run_cat_file(argv: Sequence[str]) -> int:
     is_batch = args.batch or args.batch_check or args.batch_command
     if args.buffer and not is_batch:
         parser.error("--buffer requires --batch, --batch-check, or --batch-command")
+    if args.batch_all_objects and not is_batch:
+        parser.error("--batch-all-objects requires --batch, --batch-check, or --batch-command")
     if is_batch and args.object is not None:
         parser.error("batch modes read object names or commands from stdin")
 
@@ -97,13 +105,28 @@ def run_cat_file(argv: Sequence[str]) -> int:
     elif args.batch_command:
         format_string = formats["batch_command"]
 
-    # Validate before consuming stdin so a bad format cannot produce partial
-    # output before the command eventually fails.
+    # Validate before consuming stdin or enumerating storage so a bad format
+    # cannot produce partial output before the command eventually fails.
     if format_string is not None:
         batch_format_uses_rest(format_string)
 
     repo = _find_repo()
     output = getattr(sys.stdout, "buffer", None)
+
+    if args.batch_all_objects:
+        if output is None:
+            raise RuntimeError("cat-file batch modes require a binary stdout stream")
+        for payload in batch_all_objects(
+            repo,
+            contents=args.batch,
+            format_string=format_string,
+        ):
+            output.write(payload)
+            if not args.buffer:
+                output.flush()
+        if args.buffer:
+            output.flush()
+        return 0
 
     if args.batch_command:
         if output is None:
