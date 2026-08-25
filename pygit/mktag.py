@@ -27,12 +27,10 @@ def _parse_identity(value: str) -> Identity:
     except (ValueError, IndexError) as exc:
         raise ValueError(f"invalid tagger identity: {exc}") from exc
 
-    if not identity.name:
-        raise ValueError("tagger name must not be empty")
+    if not identity.name or any(ch in identity.name for ch in "<>\n\r"):
+        raise ValueError("tagger name is invalid")
     if not identity.email or any(ch in identity.email for ch in "<>\n\r"):
         raise ValueError("tagger email is invalid")
-    if identity.timestamp < 0:
-        raise ValueError("tagger timestamp must be non-negative")
 
     match = _TZ_RE.fullmatch(identity.timezone)
     if match is None:
