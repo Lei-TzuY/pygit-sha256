@@ -76,6 +76,18 @@ def test_prefix_cannot_escape_or_write_inside_metadata(tmp_path: Path) -> None:
         checkout_index(repo, ["a.txt"], prefix=".pygit/export")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is privilege-dependent on Windows")
+def test_symlinked_parent_cannot_escape_worktree(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo.worktree / "escape").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlinked parent"):
+        checkout_index(repo, ["a.txt"], prefix="escape")
+    assert not (outside / "a.txt").exists()
+
+
 def test_executable_mode_is_restored(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     entry = repo.index.get("a.txt")
