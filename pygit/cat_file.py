@@ -69,13 +69,12 @@ def all_object_ids(repo: Repository) -> Tuple[str, ...]:
 
     The object store already merges loose and packed object names. This wrapper
     additionally filters incidental files that merely happen to live beneath a
-    two-character loose-object directory, lowercases valid hexadecimal IDs, and
-    deduplicates loose/packed copies before sorting by object ID.
+    two-character loose-object directory and deduplicates loose/packed copies
+    before sorting by object ID.
     """
 
     oids = set()
-    for raw_oid in repo.store.all_shas():
-        oid = raw_oid.lower()
+    for oid in repo.store.all_shas():
         if len(oid) != 64 or any(char not in _HEX for char in oid):
             continue
         oids.add(oid)
