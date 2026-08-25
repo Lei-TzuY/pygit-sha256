@@ -17,6 +17,7 @@ from .hash_object import hash_object_data, write_object_data
 from .merge_file import merge_file
 from .merge_tree import merge_tree
 from .mktag import make_tag
+from .pack_cli import run_index_pack, run_unpack_objects
 from .remote_query import ls_remote, resolve_remote_url
 from .runtime import main as runtime_main
 
@@ -314,7 +315,16 @@ def _run_ls_remote(argv: Sequence[str]) -> int:
 
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"hash-object", "fsck", "merge-tree", "merge-file", "mktag", "ls-remote"}
+    commands = {
+        "hash-object",
+        "fsck",
+        "merge-tree",
+        "merge-file",
+        "mktag",
+        "ls-remote",
+        "index-pack",
+        "unpack-objects",
+    }
     if not argv or argv[0] not in commands:
         runtime_main()
         return
@@ -330,9 +340,13 @@ def main() -> None:
             code = _run_merge_file(argv[1:])
         elif argv[0] == "mktag":
             code = _run_mktag(argv[1:])
-        else:
+        elif argv[0] == "ls-remote":
             code = _run_ls_remote(argv[1:])
-    except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
+        elif argv[0] == "index-pack":
+            code = run_index_pack(argv[1:])
+        else:
+            code = run_unpack_objects(argv[1:])
+    except (RuntimeError, ValueError, KeyError, FileNotFoundError, FileExistsError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         code = 1
     if code:
