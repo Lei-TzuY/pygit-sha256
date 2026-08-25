@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .cat_file import (
     batch_all_objects,
@@ -27,12 +27,7 @@ _BATCH_FORMAT_OPTIONS = {
 
 
 def _normalize_batch_formats(argv: Sequence[str]) -> Tuple[List[str], Dict[str, Optional[str]]]:
-    """Extract only Git's attached ``--batch*=FORMAT`` optional arguments.
-
-    Using argparse ``nargs='?'`` would incorrectly accept a space-separated
-    format even though Git requires the optional value to stay attached with
-    ``=``. The normalized argv keeps the existing mutually-exclusive booleans.
-    """
+    """Extract only Git's attached ``--batch*=FORMAT`` optional arguments."""
 
     normalized: List[str] = []
     formats: Dict[str, Optional[str]] = {name: None for name in _BATCH_FORMAT_OPTIONS.values()}
@@ -48,6 +43,31 @@ def _normalize_batch_formats(argv: Sequence[str]) -> Tuple[List[str], Dict[str, 
         if not matched:
             normalized.append(token)
     return normalized, formats
+
+
+def _nul_records(stream: BinaryIO, chunk_size: int = 8192) -> Iterable[str]:
+    """Yield UTF-8 records from a NUL-delimited binary stream incrementally.
+
+    The yielded string retains one trailing NUL so lower-level parsers can
+    remove exactly the active protocol delimiter while preserving embedded
+    CR/LF bytes as object-expression data.
+    """
+
+    pending = bytearray()
+    while True:
+        chunk = stream.read(chunk_size)
+        if not chunk:
+            break
+        pending.extend(chunk)
+        while True:
+            boundary = pending.find(0)
+            if boundary < 0:
+                break
+            record = bytes(pending[:boundary])
+            del pending[: boundary + 1]
+            yield record.decode("utf-8") + "\0"
+    if pending:
+        yield bytes(pending).decode("utf-8") + "\0"
 
 
 def run_cat_file(argv: Sequence[str]) -> int:
@@ -85,6 +105,12 @@ def run_cat_file(argv: Sequence[str]) -> int:
         action="store_true",
         help="buffer batch output until flush or clean end-of-input",
     )
+    parser.add_argument(
+        "-Z",
+        action="store_true",
+        dest="zero_framing",
+        help="use NUL rather than newline delimiters for batch input and output",
+    )
     parser.add_argument("object", nargs="?", metavar="OBJECT")
     normalized, formats = _normalize_batch_formats(argv)
     args = parser.parse_args(normalized)
@@ -94,6 +120,8 @@ def run_cat_file(argv: Sequence[str]) -> int:
         parser.error("--buffer requires --batch, --batch-check, or --batch-command")
     if args.batch_all_objects and not is_batch:
         parser.error("--batch-all-objects requires --batch, --batch-check, or --batch-command")
+    if args.zero_framing and not is_batch:
+        parser.error("-Z requires --batch, --batch-check, or --batch-command")
     if is_batch and args.object is not None:
         parser.error("batch modes read object names or commands from stdin")
 
@@ -105,13 +133,13 @@ def run_cat_file(argv: Sequence[str]) -> int:
     elif args.batch_command:
         format_string = formats["batch_command"]
 
-    # Validate before consuming stdin or enumerating storage so a bad format
-    # cannot produce partial output before the command eventually fails.
     if format_string is not None:
         batch_format_uses_rest(format_string)
 
     repo = _find_repo()
     output = getattr(sys.stdout, "buffer", None)
+    output_terminator = b"\0" if args.zero_framing else b"\n"
+    input_terminator = "\0" if args.zero_framing else "\n"
 
     if args.batch_all_objects:
         if output is None:
@@ -120,6 +148,7 @@ def run_cat_file(argv: Sequence[str]) -> int:
             repo,
             contents=args.batch,
             format_string=format_string,
+            record_terminator=output_terminator,
         ):
             output.write(payload)
             if not args.buffer:
@@ -128,14 +157,24 @@ def run_cat_file(argv: Sequence[str]) -> int:
             output.flush()
         return 0
 
+    if args.zero_framing:
+        binary_input = getattr(sys.stdin, "buffer", None)
+        if binary_input is None:
+            raise RuntimeError("cat-file -Z requires a binary stdin stream")
+        input_records: Iterable[str] = _nul_records(binary_input)
+    else:
+        input_records = sys.stdin
+
     if args.batch_command:
         if output is None:
             raise RuntimeError("cat-file batch-command requires a binary stdout stream")
         for chunk in run_batch_commands(
             repo,
-            sys.stdin,
+            input_records,
             buffered=args.buffer,
             format_string=format_string,
+            input_terminator=input_terminator,
+            output_terminator=output_terminator,
         ):
             output.write(chunk)
             output.flush()
@@ -144,8 +183,12 @@ def run_cat_file(argv: Sequence[str]) -> int:
     if args.batch or args.batch_check:
         if output is None:
             raise RuntimeError("cat-file batch modes require a binary stdout stream")
-        for raw in sys.stdin:
-            expression, rest = split_batch_input(raw, format_string)
+        for raw in input_records:
+            expression, rest = split_batch_input(
+                raw,
+                format_string,
+                record_terminator=input_terminator,
+            )
             output.write(
                 format_batch_object(
                     repo,
@@ -153,6 +196,7 @@ def run_cat_file(argv: Sequence[str]) -> int:
                     contents=args.batch,
                     format_string=format_string,
                     rest=rest,
+                    record_terminator=output_terminator,
                 )
             )
             if not args.buffer:
