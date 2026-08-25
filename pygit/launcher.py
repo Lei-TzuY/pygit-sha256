@@ -85,15 +85,41 @@ def _run_merge_tree(argv: Sequence[str]) -> int:
         description="Compute a three-way merge without changing HEAD, index, or worktree.",
     )
     parser.add_argument(
+        "--write-tree",
+        action="store_true",
+        help="accepted for modern Git compatibility; clean merges always write the result tree",
+    )
+    parser.add_argument(
+        "--merge-base",
+        metavar="BASE",
+        help="use an explicit commit-ish merge base instead of auto-detection",
+    )
+    parser.add_argument(
+        "--allow-unrelated-histories",
+        action="store_true",
+        help="allow histories with no common ancestor",
+    )
+    parser.add_argument(
         "--messages",
         action="store_true",
         help="print merge-base and conflict diagnostics in addition to the result",
+    )
+    parser.add_argument(
+        "--name-only",
+        action="store_true",
+        help="print only conflicted path names on an unclean merge",
     )
     parser.add_argument("ours", metavar="OURS")
     parser.add_argument("theirs", metavar="THEIRS")
     args = parser.parse_args(list(argv))
 
-    result = merge_tree(_find_repo(), args.ours, args.theirs)
+    result = merge_tree(
+        _find_repo(),
+        args.ours,
+        args.theirs,
+        base=args.merge_base,
+        allow_unrelated_histories=args.allow_unrelated_histories,
+    )
     if result.clean:
         assert result.tree_oid is not None
         print(result.tree_oid)
@@ -104,8 +130,11 @@ def _run_merge_tree(argv: Sequence[str]) -> int:
 
     if args.messages:
         print(f"base {result.base_oid or '(none)'}")
-    for path in result.conflicts:
-        print(f"CONFLICT\t{path}")
+    for conflict in result.conflicts:
+        if args.name_only:
+            print(conflict.path)
+        else:
+            print(f"CONFLICT ({conflict.reason})\t{conflict.path}")
     return 1
 
 
