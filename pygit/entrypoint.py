@@ -11,14 +11,6 @@ from .cli import main as legacy_main
 from .index_plumbing import ls_files, refresh_index, update_index
 from .plumbing import is_ancestor, list_refs, merge_bases, peel_oid, verify_ref
 from .ref_query import check_ref_format, format_ref, query_refs
-from .ref_transactions import (
-    RefOperation,
-    apply_ref_operations,
-    delete_symbolic_ref,
-    parse_update_ref_records,
-    query_symbolic_ref,
-    set_symbolic_ref,
-)
 from .repo import Repository
 from .tree_plumbing import make_tree, read_tree
 
@@ -32,8 +24,6 @@ _EXTRA_COMMANDS = {
     "read-tree",
     "update-index",
     "ls-files",
-    "update-ref",
-    "symbolic-ref",
 }
 
 
@@ -53,7 +43,11 @@ def _run_merge_base(argv: Sequence[str]) -> int:
         description="Find best common ancestors between two commits.",
     )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--all", action="store_true", help="output all merge bases instead of one")
+    mode.add_argument(
+        "--all",
+        action="store_true",
+        help="output all merge bases instead of one",
+    )
     mode.add_argument(
         "--is-ancestor",
         action="store_true",
@@ -83,9 +77,23 @@ def _run_show_ref(argv: Sequence[str]) -> int:
     parser.add_argument("--head", action="store_true", help="include HEAD")
     parser.add_argument("--heads", action="store_true", help="show local branches only")
     parser.add_argument("--tags", action="store_true", help="show tags only")
-    parser.add_argument("-d", "--dereference", action="store_true", help="dereference annotated tags")
-    parser.add_argument("--verify", action="store_true", help="require exact, fully-qualified ref names")
-    parser.add_argument("-q", "--quiet", action="store_true", help="suppress normal output; useful with --verify")
+    parser.add_argument(
+        "-d",
+        "--dereference",
+        action="store_true",
+        help="dereference annotated tags",
+    )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="require exact, fully-qualified ref names",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="suppress normal output; useful with --verify",
+    )
     parser.add_argument("pattern", nargs="*", metavar="PATTERN")
     args = parser.parse_args(list(argv))
 
@@ -130,7 +138,12 @@ def _run_for_each_ref(argv: Sequence[str]) -> int:
         prog="pygit for-each-ref",
         description="Filter, sort, and format references.",
     )
-    parser.add_argument("--count", type=int, metavar="N", help="show at most N refs after sorting")
+    parser.add_argument(
+        "--count",
+        type=int,
+        metavar="N",
+        help="show at most N refs after sorting",
+    )
     parser.add_argument(
         "--sort",
         action="append",
@@ -144,10 +157,34 @@ def _run_for_each_ref(argv: Sequence[str]) -> int:
         metavar="FORMAT",
         help="format output using %(...)-style ref atoms",
     )
-    parser.add_argument("--contains", nargs="?", const="HEAD", metavar="COMMIT", help="only refs whose tip contains COMMIT (default HEAD)")
-    parser.add_argument("--no-contains", nargs="?", const="HEAD", metavar="COMMIT", help="only refs whose tip does not contain COMMIT")
-    parser.add_argument("--merged", nargs="?", const="HEAD", metavar="COMMIT", help="only refs whose tip is reachable from COMMIT")
-    parser.add_argument("--no-merged", nargs="?", const="HEAD", metavar="COMMIT", help="only refs whose tip is not reachable from COMMIT")
+    parser.add_argument(
+        "--contains",
+        nargs="?",
+        const="HEAD",
+        metavar="COMMIT",
+        help="only refs whose tip contains COMMIT (default HEAD)",
+    )
+    parser.add_argument(
+        "--no-contains",
+        nargs="?",
+        const="HEAD",
+        metavar="COMMIT",
+        help="only refs whose tip does not contain COMMIT",
+    )
+    parser.add_argument(
+        "--merged",
+        nargs="?",
+        const="HEAD",
+        metavar="COMMIT",
+        help="only refs whose tip is reachable from COMMIT",
+    )
+    parser.add_argument(
+        "--no-merged",
+        nargs="?",
+        const="HEAD",
+        metavar="COMMIT",
+        help="only refs whose tip is not reachable from COMMIT",
+    )
     parser.add_argument("pattern", nargs="*", metavar="PATTERN")
     args = parser.parse_args(list(argv))
 
@@ -172,9 +209,21 @@ def _run_check_ref_format(argv: Sequence[str]) -> int:
         prog="pygit check-ref-format",
         description="Validate a reference name.",
     )
-    parser.add_argument("--allow-onelevel", action="store_true", help="permit a refname with no slash")
-    parser.add_argument("--branch", action="store_true", help="validate a branch name (one-level names allowed; leading '-' rejected)")
-    parser.add_argument("--normalize", action="store_true", help="remove leading/repeated slashes before validation and print the result")
+    parser.add_argument(
+        "--allow-onelevel",
+        action="store_true",
+        help="permit a refname with no slash",
+    )
+    parser.add_argument(
+        "--branch",
+        action="store_true",
+        help="validate a branch name (one-level names allowed; leading '-' rejected)",
+    )
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help="remove leading/repeated slashes before validation and print the result",
+    )
     parser.add_argument("refname", metavar="REFNAME")
     args = parser.parse_args(list(argv))
 
@@ -194,8 +243,16 @@ def _run_mktree(argv: Sequence[str]) -> int:
         prog="pygit mktree",
         description="Build a tree object from ls-tree style input on stdin.",
     )
-    parser.add_argument("--missing", action="store_true", help="allow entries that reference objects not present locally")
-    parser.add_argument("-z", action="store_true", help="read NUL-terminated records instead of newline-terminated records")
+    parser.add_argument(
+        "--missing",
+        action="store_true",
+        help="allow entries that reference objects not present locally",
+    )
+    parser.add_argument(
+        "-z",
+        action="store_true",
+        help="read NUL-terminated records instead of newline-terminated records",
+    )
     args = parser.parse_args(list(argv))
 
     raw = sys.stdin.read()
@@ -212,9 +269,22 @@ def _run_read_tree(argv: Sequence[str]) -> int:
         prog="pygit read-tree",
         description="Read tree information into the index.",
     )
-    parser.add_argument("--empty", action="store_true", help="clear the index instead of reading a tree")
-    parser.add_argument("--prefix", metavar="PREFIX", help="add the tree under PREFIX without replacing existing index entries")
-    parser.add_argument("-u", "--update", action="store_true", help="also update the working tree; requires a clean repository")
+    parser.add_argument(
+        "--empty",
+        action="store_true",
+        help="clear the index instead of reading a tree",
+    )
+    parser.add_argument(
+        "--prefix",
+        metavar="PREFIX",
+        help="add the tree under PREFIX without replacing existing index entries",
+    )
+    parser.add_argument(
+        "-u",
+        "--update",
+        action="store_true",
+        help="also update the working tree; requires a clean repository",
+    )
     parser.add_argument("treeish", nargs="?", metavar="TREE-ISH")
     args = parser.parse_args(list(argv))
 
@@ -243,10 +313,27 @@ def _run_update_index(argv: Sequence[str]) -> int:
         description="Register worktree or object-store content in the index.",
     )
     parser.add_argument("--add", action="store_true", help="allow new index entries")
-    parser.add_argument("--remove", action="store_true", help="remove tracked paths that are missing from the worktree")
-    parser.add_argument("--force-remove", action="store_true", help="remove named paths from the index even when they still exist")
-    parser.add_argument("--refresh", action="store_true", help="refresh stat information without staging new content")
-    parser.add_argument("--chmod", choices=("+x", "-x"), metavar="(+|-)x", help="override the executable bit for named regular files")
+    parser.add_argument(
+        "--remove",
+        action="store_true",
+        help="remove tracked paths that are missing from the worktree",
+    )
+    parser.add_argument(
+        "--force-remove",
+        action="store_true",
+        help="remove named paths from the index even when they still exist",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="refresh stat information without staging new content",
+    )
+    parser.add_argument(
+        "--chmod",
+        choices=("+x", "-x"),
+        metavar="(+|-)x",
+        help="override the executable bit for named regular files",
+    )
     parser.add_argument(
         "--cacheinfo",
         action="append",
@@ -255,9 +342,21 @@ def _run_update_index(argv: Sequence[str]) -> int:
         metavar=("MODE", "OBJECT", "PATH"),
         help="insert an object-store entry directly into the index",
     )
-    parser.add_argument("--index-info", action="store_true", help="read MODE OBJECT [STAGE]<TAB>PATH records from stdin")
-    parser.add_argument("--stdin", action="store_true", help="read additional path names from stdin")
-    parser.add_argument("-z", action="store_true", help="use NUL separators for --stdin/--index-info input")
+    parser.add_argument(
+        "--index-info",
+        action="store_true",
+        help="read MODE OBJECT [STAGE]<TAB>PATH records from stdin",
+    )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="read additional path names from stdin",
+    )
+    parser.add_argument(
+        "-z",
+        action="store_true",
+        help="use NUL separators for --stdin/--index-info input",
+    )
     parser.add_argument("path", nargs="*", metavar="PATH")
     args = parser.parse_args(list(argv))
 
@@ -304,7 +403,11 @@ def _run_ls_files(argv: Sequence[str]) -> int:
     parser.add_argument("-s", "--stage", action="store_true", help="show mode, object, stage, and path")
     parser.add_argument("-d", "--deleted", action="store_true", help="show tracked paths deleted from the worktree")
     parser.add_argument("-m", "--modified", action="store_true", help="show tracked paths modified in the worktree")
-    parser.add_argument("--error-unmatch", action="store_true", help="fail if any supplied path pattern matches no index entry")
+    parser.add_argument(
+        "--error-unmatch",
+        action="store_true",
+        help="fail if any supplied path pattern matches no index entry",
+    )
     parser.add_argument("-z", action="store_true", help="terminate records with NUL")
     parser.add_argument("path", nargs="*", metavar="PATH")
     args = parser.parse_args(list(argv))
@@ -322,81 +425,6 @@ def _run_ls_files(argv: Sequence[str]) -> int:
     if lines:
         separator = "\x00" if args.z else "\n"
         sys.stdout.write(separator.join(lines) + separator)
-    return 0
-
-
-def _run_update_ref(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(
-        prog="pygit update-ref",
-        description="Safely update references with optional old-value verification.",
-    )
-    parser.add_argument("-d", "--delete", action="store_true", help="delete the named reference")
-    parser.add_argument("--no-deref", action="store_true", help="update a symbolic ref itself instead of its target")
-    parser.add_argument("--stdin", action="store_true", help="read a batch of update/create/delete/verify commands from stdin")
-    parser.add_argument("-z", action="store_true", help="use NUL separators with --stdin")
-    parser.add_argument("-m", "--message", default="update-ref", metavar="REASON", help="reflog message")
-    parser.add_argument("refname", nargs="?", metavar="REF")
-    parser.add_argument("value", nargs="?", metavar="NEW")
-    parser.add_argument("oldvalue", nargs="?", metavar="OLD")
-    args = parser.parse_args(list(argv))
-
-    repo = _find_repo()
-    if args.stdin:
-        if args.refname or args.value or args.oldvalue or args.delete:
-            parser.error("--stdin cannot be combined with positional or --delete updates")
-        operations = parse_update_ref_records(_stdin_records(args.z))
-    else:
-        if not args.refname:
-            parser.error("a reference name is required")
-        if args.delete:
-            if args.oldvalue is not None:
-                parser.error("delete syntax is: update-ref -d REF [OLD]")
-            operations = [RefOperation("delete", args.refname, None, args.value)]
-        else:
-            if args.value is None:
-                parser.error("update syntax is: update-ref REF NEW [OLD]")
-            operations = [RefOperation("update", args.refname, args.value, args.oldvalue)]
-
-    apply_ref_operations(
-        repo,
-        operations,
-        no_deref=args.no_deref,
-        message=args.message,
-    )
-    return 0
-
-
-def _run_symbolic_ref(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(
-        prog="pygit symbolic-ref",
-        description="Read, set, or delete a symbolic reference.",
-    )
-    parser.add_argument("-q", "--quiet", action="store_true", help="do not diagnose a non-symbolic ref")
-    parser.add_argument("--short", action="store_true", help="shorten refs/heads/* when printing")
-    parser.add_argument("-d", "--delete", action="store_true", help="delete a symbolic reference")
-    parser.add_argument("-m", "--message", default="symbolic-ref", metavar="REASON", help="reflog message")
-    parser.add_argument("name", metavar="NAME")
-    parser.add_argument("target", nargs="?", metavar="REF")
-    args = parser.parse_args(list(argv))
-
-    repo = _find_repo()
-    if args.delete:
-        if args.target is not None:
-            parser.error("-d does not accept a target")
-        delete_symbolic_ref(repo, args.name, message=args.message)
-        return 0
-    if args.target is not None:
-        set_symbolic_ref(repo, args.name, args.target, message=args.message)
-        return 0
-
-    target = query_symbolic_ref(repo, args.name)
-    if target is None:
-        if not args.quiet:
-            print(f"error: ref {args.name!r} is not symbolic", file=sys.stderr)
-        return 1
-    if args.short and target.startswith("refs/heads/"):
-        target = target[len("refs/heads/"):]
-    print(target)
     return 0
 
 
@@ -420,11 +448,7 @@ def dispatch(argv: Sequence[str]) -> Optional[int]:
             return _run_read_tree(argv[1:])
         if argv[0] == "update-index":
             return _run_update_index(argv[1:])
-        if argv[0] == "ls-files":
-            return _run_ls_files(argv[1:])
-        if argv[0] == "update-ref":
-            return _run_update_ref(argv[1:])
-        return _run_symbolic_ref(argv[1:])
+        return _run_ls_files(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
