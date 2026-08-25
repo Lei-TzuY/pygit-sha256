@@ -11,6 +11,7 @@ from .commit_plumbing import commit_tree, read_message_file, write_tree
 from .entrypoint import _find_repo, dispatch as extended_dispatch
 from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
 from .name_rev import abbreviated_oid, name_all, name_revisions
+from .packed_refs import pack_refs
 from .plumbing import is_ancestor
 from .ref_transaction import (
     RefUpdate,
@@ -29,6 +30,7 @@ _COMMANDS = {
     "symbolic-ref",
     "merge-base",
     "name-rev",
+    "pack-refs",
 }
 
 
@@ -244,6 +246,20 @@ def _run_name_rev(argv: Sequence[str]) -> int:
     return 0
 
 
+def _run_pack_refs(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit pack-refs",
+        description="Pack loose references into .pygit/packed-refs.",
+    )
+    parser.add_argument("--all", action="store_true", help="pack all direct refs below refs/, not only tags")
+    parser.add_argument("--no-prune", action="store_true", help="keep loose refs after writing packed-refs")
+    args = parser.parse_args(list(argv))
+
+    repo = _find_repo()
+    pack_refs(repo, all_refs=args.all, prune=not args.no_prune)
+    return 0
+
+
 def dispatch(argv: Sequence[str]) -> Optional[int]:
     if argv and argv[0] in _COMMANDS:
         try:
@@ -257,7 +273,9 @@ def dispatch(argv: Sequence[str]) -> Optional[int]:
                 return _run_symbolic_ref(argv[1:])
             if argv[0] == "merge-base":
                 return _run_merge_base(argv[1:])
-            return _run_name_rev(argv[1:])
+            if argv[0] == "name-rev":
+                return _run_name_rev(argv[1:])
+            return _run_pack_refs(argv[1:])
         except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
