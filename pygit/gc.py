@@ -1,17 +1,16 @@
 """Conservative repository maintenance orchestration for ``pygit gc``.
 
 Phase 74 composes the independently hardened maintenance primitives added in
-Phases 71-73.  The important property is ordering: every destructive phase is
-first exercised in dry-run/preflight mode, so malformed reflogs, corrupt pack
-pairs, or unhealthy object connectivity are discovered before the first real
-mutation.
+Phases 71-73.  Every destructive phase is preflighted before the first real
+mutation, and recovery metadata is never expired in the same pass that its
+historical objects become eligible for deletion.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Set, Tuple
 
 from .fsck import fsck
 from .prune import PruneResult, default_expire_before, prune
@@ -25,6 +24,9 @@ from .repack import RepackResult, repack
 from .repo import Repository
 
 
+_ZERO_OID = "0" * 64
+
+
 @dataclass(frozen=True)
 class GarbageCollectResult:
     """Summary of one coordinated garbage-collection pass."""
@@ -34,6 +36,7 @@ class GarbageCollectResult:
     reflog: Optional[ReflogExpireResult]
     prune: Optional[PruneResult]
     final_reachable: int
+    preserved_expired_roots: Tuple[str, ...]
     dry_run: bool
 
 
@@ -44,6 +47,18 @@ def _healthy(repo: Repository, *, stage: str):
             f"cannot {stage} an unhealthy repository: {report.errors[0].render()}"
         )
     return report
+
+
+def _expired_roots(result: Optional[ReflogExpireResult]) -> Tuple[str, ...]:
+    """Return non-zero OIDs named by reflog records expired in this pass."""
+    if result is None:
+        return ()
+    roots: Set[str] = set()
+    for entry in result.entries:
+        for oid in (entry.old_oid, entry.new_oid):
+            if oid != _ZERO_OID:
+                roots.add(oid)
+    return tuple(sorted(roots))
 
 
 def garbage_collect(
@@ -59,21 +74,22 @@ def garbage_collect(
     """Run verified pack, reflog, and loose-object maintenance as one operation.
 
     The policy clock is frozen once at the beginning so preflight and execution
-    use exactly the same cutoffs.  A full fsck is performed first.  Then every
-    requested phase is dry-planned before any mutation occurs:
+    use identical cutoffs.  Full ``fsck`` runs first, then every requested phase
+    is dry-planned before any mutation occurs.  Execution order is:
 
-    1. full reachable-object repack with redundant-pack cleanup,
-    2. reflog expiry across every log,
-    3. conservative loose-object pruning.
+    1. verified full reachable-object repack and redundant-pack cleanup;
+    2. atomic reflog expiry across every log; and
+    3. grace-aware loose-object pruning.
 
-    Execution uses the same order.  Repacking happens before reflog expiry so
-    the current reachable graph gains a verified packed copy before recovery
-    records are shortened.  A final full fsck verifies the resulting storage.
+    OIDs mentioned by reflog records expired during this same invocation are
+    passed to :func:`pygit.prune.prune` as extra retention roots.  Removing a
+    recovery record therefore cannot delete the corresponding historical object
+    graph in the same command.  A later gc may reclaim it once no recovery root
+    remains and the normal prune age policy permits removal.
 
-    ``dry_run=True`` never writes repository state.  Its prune sub-result is
-    intentionally conservative because reflogs are not actually rewritten in a
-    dry run; objects protected by records that *would* expire can therefore be
-    absent from the dry-run prune candidate list.
+    ``dry_run=True`` never writes repository state.  Because the planned expired
+    roots are also supplied to prune preflight, dry-run and execution share the
+    same conservative recovery boundary.
     """
 
     now = time.time()
@@ -111,12 +127,15 @@ def garbage_collect(
             expire_unreachable_before=unreachable_cutoff,
             dry_run=True,
         )
+    planned_roots = _expired_roots(reflog_plan)
+
     prune_plan: Optional[PruneResult] = None
     if prune_objects:
         prune_plan = prune(
             repo,
             expire_before=prune_cutoff,
             dry_run=True,
+            extra_heads=planned_roots,
         )
 
     if dry_run:
@@ -126,9 +145,11 @@ def garbage_collect(
             reflog=reflog_plan,
             prune=prune_plan,
             final_reachable=len(initial.reachable),
+            preserved_expired_roots=planned_roots,
             dry_run=True,
         )
 
+    # Repack first: a storage-write failure must not shorten recovery metadata.
     repack_result = repack(
         repo,
         all_objects=True,
@@ -145,6 +166,7 @@ def garbage_collect(
             expire_unreachable_before=unreachable_cutoff,
             dry_run=False,
         )
+    actual_roots = _expired_roots(reflog_result)
 
     prune_result: Optional[PruneResult] = None
     if prune_objects:
@@ -152,6 +174,7 @@ def garbage_collect(
             repo,
             expire_before=prune_cutoff,
             dry_run=False,
+            extra_heads=actual_roots,
         )
 
     final = _healthy(repo, stage="finish garbage-collecting")
@@ -161,5 +184,6 @@ def garbage_collect(
         reflog=reflog_result,
         prune=prune_result,
         final_reachable=len(final.reachable),
+        preserved_expired_roots=actual_roots,
         dry_run=False,
     )
