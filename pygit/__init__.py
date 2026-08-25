@@ -25,6 +25,17 @@ from .diff_plumbing import DiffEntry, diff_files, diff_index, diff_tree, format_
 from .fsck import FsckIssue, FsckReport, fsck
 from .merge_file import MergeFileResult, merge_file, merge_file_data
 from .merge_tree import MergeConflict, MergeTreeResult, merge_tree
+from .pack_plumbing import (
+    IndexPackResult,
+    PackEntry,
+    ParsedPack,
+    UnpackResult,
+    build_index_bytes,
+    index_pack,
+    parse_pack,
+    parse_pack_bytes,
+    unpack_objects,
+)
 from .revision import (
     RevisionResult,
     abbreviate_oid,
@@ -74,6 +85,15 @@ __all__ = [
     "MergeConflict",
     "MergeTreeResult",
     "merge_tree",
+    "PackEntry",
+    "ParsedPack",
+    "IndexPackResult",
+    "UnpackResult",
+    "parse_pack_bytes",
+    "parse_pack",
+    "build_index_bytes",
+    "index_pack",
+    "unpack_objects",
     "RevisionResult",
     "resolve_revision",
     "resolve_abbreviation",
