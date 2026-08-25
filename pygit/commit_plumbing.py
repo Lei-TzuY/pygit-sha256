@@ -193,7 +193,10 @@ def commit_tree(
 
     parent_oids = []
     for parent in parents:
-        oid = resolve_commit(repo, parent)
+        try:
+            oid = resolve_commit(repo, parent)
+        except RuntimeError as exc:
+            raise ValueError(f"invalid parent {parent!r}: {exc}") from exc
         if oid in parent_oids:
             raise ValueError(f"duplicate parent commit: {parent!r}")
         parent_oids.append(oid)
