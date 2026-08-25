@@ -16,6 +16,7 @@ from .fsck import fsck
 from .hash_object import hash_object_data, write_object_data
 from .merge_file import merge_file
 from .merge_tree import merge_tree
+from .mktag import make_tag
 from .runtime import main as runtime_main
 
 
@@ -243,9 +244,19 @@ def _run_merge_file(argv: Sequence[str]) -> int:
     return min(result.conflicts, 127)
 
 
+def _run_mktag(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit mktag",
+        description="Validate and create one annotated tag object from stdin.",
+    )
+    parser.parse_args(list(argv))
+    print(make_tag(_find_repo(), _stdin_bytes()))
+    return 0
+
+
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"hash-object", "fsck", "merge-tree", "merge-file"}
+    commands = {"hash-object", "fsck", "merge-tree", "merge-file", "mktag"}
     if not argv or argv[0] not in commands:
         runtime_main()
         return
@@ -257,8 +268,10 @@ def main() -> None:
             code = _run_fsck(argv[1:])
         elif argv[0] == "merge-tree":
             code = _run_merge_tree(argv[1:])
-        else:
+        elif argv[0] == "merge-file":
             code = _run_merge_file(argv[1:])
+        else:
+            code = _run_mktag(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         code = 1
