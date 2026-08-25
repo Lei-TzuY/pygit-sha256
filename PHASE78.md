@@ -42,6 +42,8 @@ Selector lookup reuses the strict Phase 77 reflog reader and the Phase 72 path p
 - a selector whose `new_oid` is the all-zero deletion sentinel is rejected;
 - a selector whose referenced object is no longer present in either loose or packed storage is rejected;
 - packed-only historical objects remain valid because object existence uses the normal packed-aware object store;
+- malformed or incomplete selector syntax and nested selectors such as `HEAD@{1}@{0}` are rejected explicitly;
+- arbitrarily long decimal indices are range-checked as strings before integer conversion, so Python's integer digit limit is not exposed as selector behavior;
 - selector resolution is read-only and does not change refs, reflogs, the index, objects, or the worktree.
 
 `symbolic_refname()` deliberately reports no symbolic name for a reflog selector. A selector denotes a historical object state, not the current symbolic ref target.
@@ -66,7 +68,7 @@ Phase 78 covers:
 - ancestry, typed peeling, and `REV:path` composition;
 - inherited CLI behavior through `rev-parse`, `cat-file`, and modern `ls-tree`;
 - packed-only historical objects after repack;
-- out-of-range and malformed selector syntax;
+- out-of-range, enormous, malformed, and nested selector syntax;
 - zero/missing historical objects;
 - short-name symlink/path safety inherited from Phase 77;
 - Python 3.9 and 3.13 compatibility through the full test matrix.
