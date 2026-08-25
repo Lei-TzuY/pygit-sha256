@@ -201,4 +201,4 @@ def test_short_selector_preserves_reflog_path_fail_closed_semantics(tmp_path: Pa
 
     cli = _run(repo, "rev-parse", "--verify", "linked@{0}")
     assert cli.returncode == 1
-    assert b"reflog path escapes" in cli.stderr or b"symbolic-link" in cli.stderr
+    assert cli.stderr == b"error: bad revision 'linked@{0}'\n"
