@@ -20,19 +20,30 @@ from .repo import Repository
 
 def _safe_target(repo: Repository, relative: str, prefix: str = "") -> Path:
     root = Path(os.path.abspath(str(repo.worktree)))
+    root_real = root.resolve()
     if prefix:
         prefix_path = Path(prefix)
         base = prefix_path if prefix_path.is_absolute() else root / prefix_path
     else:
         base = root
+
     target = Path(os.path.abspath(str(base / relative)))
     try:
         target.relative_to(root)
     except ValueError as exc:
         raise ValueError(f"checkout target is outside the repository: {target}") from exc
+
+    # Resolve the parent only: an existing target may itself be a symlink that
+    # --force is supposed to replace without following it.
+    parent_real = target.parent.resolve(strict=False)
+    try:
+        parent_real.relative_to(root_real)
+    except ValueError as exc:
+        raise ValueError(f"checkout target escapes through a symlinked parent: {target}") from exc
+
     pygit = (root / ".pygit").resolve()
     try:
-        target.resolve(strict=False).relative_to(pygit)
+        parent_real.relative_to(pygit)
     except ValueError:
         pass
     else:
