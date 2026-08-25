@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Sequence
 
 from .entrypoint import _find_repo
-from .ref_query import format_ref, query_refs
+from .ref_query import format_ref, query_refs, read_ref_patterns
 
 
 def run_for_each_ref(argv: Sequence[str]) -> int:
@@ -33,6 +34,33 @@ def run_for_each_ref(argv: Sequence[str]) -> int:
         metavar="FORMAT",
         help="format output using %%(...)-style ref atoms",
     )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="exclude refs matching a full-ref prefix or glob; may be repeated",
+    )
+    parser.add_argument(
+        "--no-exclude",
+        action="store_const",
+        const=[],
+        dest="exclude",
+        help="clear previously supplied --exclude patterns",
+    )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        dest="stdin_patterns",
+        help="read newline-delimited inclusion patterns from stdin",
+    )
+    parser.add_argument(
+        "--no-stdin",
+        action="store_false",
+        dest="stdin_patterns",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(stdin_patterns=False)
     parser.add_argument(
         "--points-at",
         action="append",
@@ -71,9 +99,14 @@ def run_for_each_ref(argv: Sequence[str]) -> int:
     parser.add_argument("pattern", nargs="*", metavar="PATTERN")
     args = parser.parse_args(list(argv))
 
+    if args.stdin_patterns and args.pattern:
+        parser.error("--stdin cannot be combined with positional patterns")
+    patterns = read_ref_patterns(sys.stdin) if args.stdin_patterns else args.pattern
+
     records = query_refs(
         _find_repo(),
-        patterns=args.pattern,
+        patterns=patterns,
+        exclude_patterns=args.exclude,
         sort_keys=args.sort,
         count=args.count,
         points_at=args.points_at,
