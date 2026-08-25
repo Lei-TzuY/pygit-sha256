@@ -10,6 +10,7 @@ import sys
 from typing import Sequence
 
 from .cat_file_cli import run_cat_file
+from .for_each_ref_cli import run_for_each_ref
 from .gc_cli import run_gc
 from .launcher import main as launcher_main
 from .ls_tree_cli import run_ls_tree
@@ -72,6 +73,10 @@ def main() -> None:
 
     if argv and argv[0] == "merge-base":
         _run_safe(run_merge_base, argv[1:])
+        return
+
+    if argv and argv[0] == "for-each-ref":
+        _run_safe(run_for_each_ref, argv[1:])
         return
 
     launcher_main()
