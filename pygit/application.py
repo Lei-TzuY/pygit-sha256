@@ -1,7 +1,7 @@
 """Stable top-level application entrypoint.
 
-Most commands continue through :mod:`pygit.launcher`.  Reflog commands and the
-coordinated ``gc`` pipeline are handled here before the legacy argparse stack;
+Most commands continue through :mod:`pygit.launcher`.  Commands that need a
+modern nested/custom grammar are handled here before the legacy argparse stack;
 reflog show output remains compatible with the previous handler.
 """
 
@@ -14,6 +14,7 @@ from typing import Sequence
 from .entrypoint import _find_repo
 from .gc_cli import run_gc
 from .launcher import main as launcher_main
+from .ls_tree_cli import run_ls_tree
 from .reflog_expire_cli import run_reflog_expire
 
 
@@ -45,27 +46,30 @@ def _finish(code: int) -> None:
         raise SystemExit(code)
 
 
+def _run_safe(handler, argv: Sequence[str]) -> None:
+    try:
+        code = handler(argv)
+    except _ERRORS as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        code = 1
+    _finish(code)
+
+
 def main() -> None:
     argv = sys.argv[1:]
     if argv and argv[0] == "reflog":
-        try:
-            if len(argv) >= 2 and argv[1] == "expire":
-                code = run_reflog_expire(argv[2:])
-            else:
-                code = _run_reflog_show(argv[1:])
-        except _ERRORS as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            code = 1
-        _finish(code)
+        if len(argv) >= 2 and argv[1] == "expire":
+            _run_safe(run_reflog_expire, argv[2:])
+        else:
+            _run_safe(_run_reflog_show, argv[1:])
         return
 
     if argv and argv[0] == "gc":
-        try:
-            code = run_gc(argv[1:])
-        except _ERRORS as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            code = 1
-        _finish(code)
+        _run_safe(run_gc, argv[1:])
+        return
+
+    if argv and argv[0] == "ls-tree":
+        _run_safe(run_ls_tree, argv[1:])
         return
 
     launcher_main()
