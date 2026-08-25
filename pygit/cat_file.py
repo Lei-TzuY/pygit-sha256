@@ -18,6 +18,7 @@ from .revision import resolve_revision
 
 _BATCH_ATOMS = frozenset({"objectname", "objecttype", "objectsize", "rest"})
 _BATCH_INPUT_SEPARATOR_RE = re.compile(r"\s+")
+_HEX = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,23 @@ def object_exists(repo: Repository, expression: str) -> bool:
         return True
     except (KeyError, ValueError, RuntimeError):
         return False
+
+
+def all_object_ids(repo: Repository) -> Tuple[str, ...]:
+    """Return every known canonical SHA-256 object ID in deterministic order.
+
+    The object store already merges loose and packed object names. This wrapper
+    additionally filters incidental files that merely happen to live beneath a
+    two-character loose-object directory and deduplicates loose/packed copies
+    before sorting by object ID.
+    """
+
+    oids = set()
+    for oid in repo.store.all_shas():
+        if len(oid) != 64 or any(char not in _HEX for char in oid):
+            continue
+        oids.add(oid)
+    return tuple(sorted(oids))
 
 
 def _compile_batch_format(format_string: str) -> Tuple[Tuple[str, str], ...]:
@@ -180,6 +198,30 @@ def format_batch_object(
     if not contents:
         return header
     return header + record.content + b"\n"
+
+
+def batch_all_objects(
+    repo: Repository,
+    *,
+    contents: bool = False,
+    format_string: Optional[str] = None,
+) -> Iterable[bytes]:
+    """Yield batch responses for every object known to loose or packed storage.
+
+    Enumeration is independent of refs and reachability, so unreachable objects
+    are included. Custom ``%(rest)`` expands to an empty string because there is
+    no stdin record associated with an all-object query.
+    """
+
+    if format_string is not None:
+        _compile_batch_format(format_string)
+    for oid in all_object_ids(repo):
+        yield format_batch_object(
+            repo,
+            oid,
+            contents=contents,
+            format_string=format_string,
+        )
 
 
 def parse_batch_command(raw: str) -> CatFileBatchCommand:
