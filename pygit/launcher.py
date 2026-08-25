@@ -19,6 +19,7 @@ from .merge_tree import merge_tree
 from .mktag import make_tag
 from .pack_cli import run_index_pack, run_unpack_objects
 from .pack_objects_cli import run_pack_objects
+from .prune_cli import run_prune
 from .prune_packed_cli import run_prune_packed
 from .remote_query import ls_remote, resolve_remote_url
 from .runtime import main as runtime_main
@@ -330,6 +331,7 @@ def main() -> None:
         "pack-objects",
         "show-index",
         "prune-packed",
+        "prune",
     }
     if not argv or argv[0] not in commands:
         runtime_main()
@@ -356,8 +358,10 @@ def main() -> None:
             code = run_pack_objects(argv[1:])
         elif argv[0] == "show-index":
             code = run_show_index(argv[1:])
-        else:
+        elif argv[0] == "prune-packed":
             code = run_prune_packed(argv[1:])
+        else:
+            code = run_prune(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, FileExistsError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         code = 1
