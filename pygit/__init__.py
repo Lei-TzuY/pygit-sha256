@@ -50,6 +50,7 @@ from .reflog_expire import (
     default_reflog_unreachable_before,
     expire_reflogs,
 )
+from .reflog_show import ReflogShowEntry, format_reflog_entry, normalize_reflog_ref, show_reflog
 from .repack import RepackResult, repack
 from .remote_query import LsRemoteResult, RemoteRef, ls_remote, resolve_remote_url
 from .rev_list import RevListEntry, RevListObjectEntry, rev_list, rev_list_objects
@@ -137,6 +138,10 @@ __all__ = [
     "default_reflog_expire_before",
     "default_reflog_unreachable_before",
     "expire_reflogs",
+    "ReflogShowEntry",
+    "normalize_reflog_ref",
+    "show_reflog",
+    "format_reflog_entry",
     "RepackResult",
     "repack",
     "RemoteRef",
