@@ -171,33 +171,11 @@ class PackReader:
         if not self.idx_path.exists() or not self.pack_path.exists():
             return
 
-        data = self.idx_path.read_bytes()
-        if len(data) < 1032 or not data.startswith(b"\xfftOc"):
-            return
+        from .pack_index import parse_index
 
-        total_objs = struct.unpack(">I", data[1028:1032])[0]
-        pos = 1032
-
-        # Read 64-char SHA table
-        shas = []
-        for _ in range(total_objs):
-            sha_str = data[pos : pos + 64].decode("utf-8")
-            shas.append(sha_str)
-            pos += 64
-
-        # Skip CRC32 table
-        pos += total_objs * 4
-
-        # Read offsets table
-        offsets = []
-        for _ in range(total_objs):
-            off = struct.unpack(">I", data[pos : pos + 4])[0]
-            offsets.append(off)
-            pos += 4
-
-        self._shas = shas
-        for sha, off in zip(shas, offsets):
-            self._offsets[sha] = off
+        index = parse_index(self.idx_path)
+        self._shas = [entry.oid for entry in index.entries]
+        self._offsets = {entry.oid: entry.offset for entry in index.entries}
 
     def has_object(self, sha: str) -> bool:
         return sha in self._offsets
