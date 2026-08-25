@@ -41,7 +41,6 @@ def _parse_identity(value: str) -> Identity:
     if hours > 23 or minutes > 59:
         raise ValueError("tagger timezone is out of range")
 
-    # Reject surprising strings accepted by the permissive Identity decoder.
     if identity.encode() != value:
         raise ValueError("tagger identity is not in canonical form")
     return identity
@@ -77,23 +76,23 @@ def parse_tag_payload(payload: bytes) -> Tuple[TagObject, str]:
     target_sha, target_type, tag_name, tagger_value = values
     if _HEX_RE.fullmatch(target_sha) is None:
         raise ValueError("tag object header must contain a 64-hex object ID")
+    if target_sha != target_sha.lower():
+        raise ValueError("tag object ID must use canonical lowercase hex")
     if target_type not in _ALLOWED_TYPES:
         raise ValueError(f"unsupported tag target type: {target_type!r}")
 
-    # A tag object's name should be valid when placed below refs/tags/ even
-    # though mktag itself intentionally does not create that ref.
     check_ref_format(f"refs/tags/{tag_name}")
     tagger = _parse_identity(tagger_value)
 
     return (
         TagObject(
-            target_sha=target_sha.lower(),
+            target_sha=target_sha,
             target_type=target_type.encode("ascii"),
             tag_name=tag_name,
             tagger=tagger,
             message=message,
         ),
-        target_sha.lower(),
+        target_sha,
     )
 
 
