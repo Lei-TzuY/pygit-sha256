@@ -6,7 +6,7 @@ import argparse
 import re
 import sys
 import time
-from typing import Sequence
+from typing import Optional, Sequence
 
 from .entrypoint import _find_repo
 from .prune import default_expire_before, prune
@@ -25,7 +25,7 @@ _SECONDS = {
 }
 
 
-def parse_expire(value: str, *, now: float | None = None) -> float:
+def parse_expire(value: str, *, now: Optional[float] = None) -> float:
     """Parse a small deterministic subset of Git-style expiry expressions."""
     current = time.time() if now is None else float(now)
     text = value.strip().lower()
