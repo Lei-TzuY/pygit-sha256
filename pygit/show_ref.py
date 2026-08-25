@@ -7,11 +7,13 @@ callers can consume structured records without parsing CLI text.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
 from .packed_refs import read_packed_refs
 from .plumbing import list_refs, peel_oid, verify_ref
+from .ref_query import check_ref_format
 from .repo import Repository
 from .revision import abbreviate_oid
 
@@ -23,6 +25,37 @@ class ShowRefEntry:
     oid: str
     refname: str
     dereferenced: bool = False
+
+
+@dataclass(frozen=True)
+class ExcludeExistingResult:
+    """Filtered stdin bytes plus non-fatal malformed-input warnings."""
+
+    output: bytes
+    warnings: Tuple[str, ...]
+
+
+def _stored_refnames(repo: Repository) -> Set[str]:
+    """Inventory exact loose/packed ref records without resolving their OIDs."""
+
+    names = set(read_packed_refs(repo.pygit_dir))
+    refs_root = repo.pygit_dir / "refs"
+    if not refs_root.exists():
+        return names
+    if not refs_root.is_dir():
+        raise RuntimeError("refs storage is not a directory")
+
+    for path in sorted(refs_root.rglob("*"), key=lambda item: item.as_posix()):
+        if path.is_symlink():
+            raise RuntimeError(
+                f"symbolic-link ref storage is not supported: {path.relative_to(repo.pygit_dir)}"
+            )
+        if not path.is_file():
+            continue
+        refname = "refs/" + path.relative_to(refs_root).as_posix()
+        check_ref_format(refname)
+        names.add(refname)
+    return names
 
 
 def ref_exists(repo: Repository, refname: str) -> bool:
@@ -41,6 +74,68 @@ def ref_exists(repo: Repository, refname: str) -> bool:
     if path.is_file():
         return True
     return refname in read_packed_refs(repo.pygit_dir)
+
+
+def _split_line_ending(line: bytes) -> Tuple[bytes, bytes]:
+    if line.endswith(b"\r\n"):
+        return line[:-2], b"\r\n"
+    if line.endswith(b"\n"):
+        return line[:-1], b"\n"
+    return line, b""
+
+
+def exclude_existing_refs(
+    repo: Repository,
+    lines: Iterable[bytes],
+    *,
+    pattern: Optional[str] = None,
+) -> ExcludeExistingResult:
+    """Filter stdin-style ref records to names absent from local ref storage.
+
+    Each line may contain an arbitrary prefix followed by whitespace and a
+    final refname token. A trailing ``^{}`` is stripped before matching and
+    output. ``pattern`` is a literal head-match against that refname. Malformed
+    input names are warned about and skipped; malformed local ref storage fails
+    loudly through the strict packed/loose inventory.
+    """
+
+    existing = _stored_refnames(repo)
+    output: List[bytes] = []
+    warnings: List[str] = []
+
+    for raw_line in lines:
+        if not isinstance(raw_line, bytes):
+            raise TypeError("exclude-existing input records must be bytes")
+        body, ending = _split_line_ending(raw_line)
+        if body.endswith(b"^{}"):
+            body = body[:-3]
+
+        match = re.search(rb"(\S+)$", body)
+        if match is None:
+            warnings.append("warning: malformed ref line ignored")
+            continue
+
+        raw_refname = match.group(1)
+        try:
+            refname = raw_refname.decode("utf-8")
+        except UnicodeDecodeError:
+            warnings.append("warning: non-UTF-8 refname ignored")
+            continue
+
+        if pattern is not None and not refname.startswith(pattern):
+            continue
+
+        try:
+            check_ref_format(refname)
+        except ValueError as exc:
+            warnings.append(f"warning: invalid refname {refname!r} ignored: {exc}")
+            continue
+
+        if refname in existing:
+            continue
+        output.append(body + ending)
+
+    return ExcludeExistingResult(b"".join(output), tuple(warnings))
 
 
 def show_refs(
