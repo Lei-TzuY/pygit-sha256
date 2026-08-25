@@ -55,6 +55,27 @@ def _record(repo: Repository, oid: str, refname: str) -> RefRecord:
     return RefRecord(oid, refname, peeled, type_name, obj)
 
 
+def _points_at_oids(repo: Repository, record: RefRecord) -> set[str]:
+    """Return every object a ref points at while recursively peeling tags.
+
+    Native ``for-each-ref --points-at`` considers intermediate annotated-tag
+    targets too. For ``ref -> tag2 -> tag1 -> commit``, queries for ``tag2``,
+    ``tag1``, or the final commit must therefore all match the ref.
+    """
+    result: set[str] = set()
+    current = record.oid
+    while True:
+        if current in result:
+            raise RuntimeError(f"Tag cycle while peeling {record.oid}")
+        result.add(current)
+        if current == record.peeled_oid:
+            return result
+        obj = repo.store.read(current)
+        if not isinstance(obj, TagObject):
+            return result
+        current = obj.target_sha
+
+
 def _as_commit(repo: Repository, record: RefRecord) -> Optional[str]:
     try:
         obj = repo.store.read(record.peeled_oid)
@@ -79,9 +100,9 @@ def query_refs(
     Return refs after Git-style object, pattern, graph, sort, and count filters.
 
     ``points_at`` accepts arbitrary object-ish expressions. A ref matches when
-    either its stored object ID or the recursively peeled target of an annotated
-    tag equals any requested object. Multiple point targets therefore compose as
-    an OR filter, matching native ``for-each-ref`` behavior.
+    any object in its direct/annotated-tag peel chain equals a requested object.
+    Multiple point targets therefore compose as an OR filter, matching native
+    ``for-each-ref`` behavior including nested annotated tags.
 
     ``contains=X`` keeps refs whose tip contains X in its ancestry.
     ``merged=X`` keeps refs whose tip is already reachable from X.
@@ -102,7 +123,7 @@ def query_refs(
         records = [
             record
             for record in records
-            if record.oid in point_targets or record.peeled_oid in point_targets
+            if point_targets.intersection(_points_at_oids(repo, record))
         ]
 
     contains_sha = resolve_commit(repo, contains) if contains else None
