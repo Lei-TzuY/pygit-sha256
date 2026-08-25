@@ -1,68 +1,136 @@
-"""Side-effect-free three-way tree merge plumbing.
+"""Three-way tree merge plumbing without ref/index/worktree mutation.
 
-``merge_tree`` computes a merge result from two commit-ish revisions and their
-best common ancestor without moving HEAD or touching the index/worktree. Clean
-results are materialized as ordinary SHA-256 blob/tree objects so callers can
-inspect or reuse the resulting tree.
+``merge_tree`` computes a merge from two commit-ish revisions and a merge base.
+Clean results are materialized as ordinary SHA-256 blob/tree objects. Conflicted
+results are reported structurally and do not write a result tree or pending
+auto-merged blobs.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Set, Tuple
 
-from .objects import BlobObject, CommitObject, TreeEntry, TreeObject
-from .plumbing import merge_bases, resolve_commit
+from .diff_plumbing import Snapshot, tree_snapshot
+from .objects import BlobObject, CommitObject, TagObject, TreeEntry, TreeObject
+from .plumbing import merge_bases
 from .repo import Repository
-from .tree_plumbing import flatten_tree
+from .revision import resolve_revision
 
 
-Entry = Tuple[str, str]  # (oid, mode)
-Snapshot = Dict[str, Entry]
-_MERGEABLE_BLOB_MODES = {"100644", "100755", "120000"}
+Entry = Tuple[str, str]
+_REGULAR_MODES = {"100644", "100755"}
+
+
+@dataclass(frozen=True)
+class MergeConflict:
+    """One path that cannot be merged automatically."""
+
+    path: str
+    reason: str
+    base_oid: Optional[str] = None
+    ours_oid: Optional[str] = None
+    theirs_oid: Optional[str] = None
+    base_mode: Optional[str] = None
+    ours_mode: Optional[str] = None
+    theirs_mode: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class MergeTreeResult:
-    """Result of a side-effect-free tree merge."""
+    """Structured result of a tree-only three-way merge."""
 
     tree_oid: Optional[str]
     base_oid: Optional[str]
     ours_oid: str
     theirs_oid: str
-    conflicts: Tuple[str, ...]
+    conflicts: Tuple[MergeConflict, ...]
+    changed_paths: Tuple[str, ...]
 
     @property
     def clean(self) -> bool:
-        return not self.conflicts
+        return self.tree_oid is not None and not self.conflicts
 
 
-def _commit_snapshot(repo: Repository, oid: str) -> Snapshot:
-    obj = repo.store.read(oid)
-    if not isinstance(obj, CommitObject):
-        raise RuntimeError(f"Object {oid} in merge ancestry is not a commit")
-    return dict(flatten_tree(repo, obj.tree))
+@dataclass(frozen=True)
+class _MergedEntry:
+    mode: str
+    oid: Optional[str] = None
+    data: Optional[bytes] = None
+
+    def object_id(self) -> str:
+        if self.oid is not None:
+            return self.oid
+        assert self.data is not None
+        return BlobObject(self.data).hash()
 
 
-def _blob_bytes(repo: Repository, entry: Optional[Entry]) -> bytes:
+def _commit_oid(repo: Repository, expression: str) -> str:
+    """Resolve through the shared revision layer and peel tags to a commit."""
+    oid = resolve_revision(repo, expression)
+    seen: Set[str] = set()
+    while True:
+        if oid in seen:
+            raise RuntimeError(f"tag cycle while resolving {expression!r}")
+        seen.add(oid)
+        obj = repo.store.read(oid)
+        if isinstance(obj, CommitObject):
+            return oid
+        if isinstance(obj, TagObject):
+            oid = obj.target_sha.lower()
+            continue
+        raise ValueError(f"{expression!r} does not resolve to a commit")
+
+
+def _conflict(
+    path: str,
+    reason: str,
+    base: Optional[Entry],
+    ours: Optional[Entry],
+    theirs: Optional[Entry],
+) -> MergeConflict:
+    return MergeConflict(
+        path=path,
+        reason=reason,
+        base_oid=base[0] if base else None,
+        ours_oid=ours[0] if ours else None,
+        theirs_oid=theirs[0] if theirs else None,
+        base_mode=base[1] if base else None,
+        ours_mode=ours[1] if ours else None,
+        theirs_mode=theirs[1] if theirs else None,
+    )
+
+
+def _existing(entry: Optional[Entry]) -> Optional[_MergedEntry]:
     if entry is None:
-        return b""
-    oid, mode = entry
-    if mode not in _MERGEABLE_BLOB_MODES:
-        raise ValueError(f"mode {mode} is not a mergeable blob mode")
-    obj = repo.store.read(oid)
+        return None
+    return _MergedEntry(mode=entry[1], oid=entry[0])
+
+
+def _kind(mode: str) -> str:
+    if mode in _REGULAR_MODES:
+        return "file"
+    if mode == "120000":
+        return "symlink"
+    if mode == "160000":
+        return "gitlink"
+    return mode
+
+
+def _blob_bytes(repo: Repository, entry: Entry, path: str) -> bytes:
+    obj = repo.store.read(entry[0])
     if not isinstance(obj, BlobObject):
-        raise ValueError(f"object {oid} for mode {mode} is not a blob")
+        raise ValueError(f"tree entry {path!r} does not reference a blob")
     return obj.data
 
 
-def _merged_mode(base: Optional[Entry], ours: Entry, theirs: Entry) -> Optional[str]:
-    if ours[1] == theirs[1]:
-        return ours[1]
-    if base is not None and ours[1] == base[1]:
-        return theirs[1]
-    if base is not None and theirs[1] == base[1]:
-        return ours[1]
+def _merged_mode(base: str, ours: str, theirs: str) -> Optional[str]:
+    if ours == theirs:
+        return ours
+    if ours == base:
+        return theirs
+    if theirs == base:
+        return ours
     return None
 
 
@@ -72,116 +140,214 @@ def _merge_entry(
     base: Optional[Entry],
     ours: Optional[Entry],
     theirs: Optional[Entry],
-) -> Tuple[Optional[Entry], bool]:
-    # Identical results, including both sides deleting the path.
+    their_label: str,
+) -> Tuple[Optional[_MergedEntry], Optional[MergeConflict]]:
+    # Exact agreement, including both sides deleting the path.
     if ours == theirs:
-        return ours, False
-    # One side unchanged from the base: take the other side verbatim.
+        return _existing(ours), None
+    # One side is unchanged from the base: take the other side verbatim.
     if ours == base:
-        return theirs, False
+        return _existing(theirs), None
     if theirs == base:
-        return ours, False
+        return _existing(ours), None
 
-    # Remaining delete/modify and add/add-different cases need content merging;
-    # a deletion on either side cannot participate safely.
+    # Both histories introduced different objects at the same new path.
+    if base is None:
+        return None, _conflict(path, "add/add", base, ours, theirs)
+    # Remaining missing-side cases are modify/delete conflicts.
     if ours is None or theirs is None:
-        return None, True
-    if ours[1] not in _MERGEABLE_BLOB_MODES or theirs[1] not in _MERGEABLE_BLOB_MODES:
-        return None, True
-    if base is not None and base[1] not in _MERGEABLE_BLOB_MODES:
-        return None, True
+        return None, _conflict(path, "modify/delete", base, ours, theirs)
 
-    mode = _merged_mode(base, ours, theirs)
+    base_kind = _kind(base[1])
+    our_kind = _kind(ours[1])
+    their_kind = _kind(theirs[1])
+    if base_kind != our_kind or base_kind != their_kind:
+        return None, _conflict(path, "type", base, ours, theirs)
+
+    # Symlink targets and gitlinks are atomic. The one-side-unchanged cases were
+    # handled above, so two differing changes are conflicts rather than text.
+    if our_kind == "symlink":
+        return None, _conflict(path, "symlink", base, ours, theirs)
+    if our_kind == "gitlink":
+        return None, _conflict(path, "gitlink", base, ours, theirs)
+    if our_kind != "file":
+        return None, _conflict(path, "type", base, ours, theirs)
+
+    mode = _merged_mode(base[1], ours[1], theirs[1])
     if mode is None:
-        return None, True
+        return None, _conflict(path, "mode", base, ours, theirs)
 
-    base_bytes = _blob_bytes(repo, base)
-    ours_bytes = _blob_bytes(repo, ours)
-    theirs_bytes = _blob_bytes(repo, theirs)
+    if ours[0] == theirs[0]:
+        return _MergedEntry(mode=mode, oid=ours[0]), None
+    if ours[0] == base[0]:
+        return _MergedEntry(mode=mode, oid=theirs[0]), None
+    if theirs[0] == base[0]:
+        return _MergedEntry(mode=mode, oid=ours[0]), None
 
-    # Avoid lossy text decoding for binary data. Exact/one-side-unchanged cases
-    # were already handled above.
-    if b"\x00" in base_bytes or b"\x00" in ours_bytes or b"\x00" in theirs_bytes:
-        return None, True
+    base_data = _blob_bytes(repo, base, path)
+    our_data = _blob_bytes(repo, ours, path)
+    their_data = _blob_bytes(repo, theirs, path)
+    if b"\x00" in base_data or b"\x00" in our_data or b"\x00" in their_data:
+        return None, _conflict(path, "binary", base, ours, theirs)
 
     merged, has_conflict = Repository._merge_lines_three_way(
-        base_bytes, ours_bytes, theirs_bytes, path
+        base_data,
+        our_data,
+        their_data,
+        their_label,
     )
     if has_conflict:
-        return None, True
-    oid = repo.store.write(BlobObject(merged))
-    return (oid, mode), False
+        return None, _conflict(path, "content", base, ours, theirs)
+    return _MergedEntry(mode=mode, data=merged), None
 
 
-def _write_tree(repo: Repository, snapshot: Mapping[str, Entry]) -> str:
-    """Materialize a flat path snapshot as nested tree objects."""
+def _directory_file_conflicts(snapshot: Mapping[str, _MergedEntry]) -> Set[str]:
+    paths = set(snapshot)
+    result: Set[str] = set()
+    for path in paths:
+        parts = path.split("/")
+        for index in range(1, len(parts)):
+            parent = "/".join(parts[:index])
+            if parent in paths:
+                result.add(parent)
+    return result
 
-    def build(prefix: str) -> str:
-        files: Dict[str, Entry] = {}
-        dirs = set()
-        prefix_with_slash = f"{prefix}/" if prefix else ""
-        for path, entry in snapshot.items():
-            if prefix and not path.startswith(prefix_with_slash):
-                continue
-            rest = path[len(prefix_with_slash) :]
-            if "/" in rest:
-                dirs.add(rest.split("/", 1)[0])
-            elif rest:
-                files[rest] = entry
 
-        entries: List[TreeEntry] = [
-            TreeEntry(mode=mode, name=name, sha=oid)
-            for name, (oid, mode) in sorted(files.items())
-        ]
-        for name in sorted(dirs):
-            child_prefix = f"{prefix}/{name}" if prefix else name
-            entries.append(TreeEntry(mode="040000", name=name, sha=build(child_prefix)))
+def _materialize_snapshot(
+    repo: Repository,
+    pending: Mapping[str, _MergedEntry],
+) -> Snapshot:
+    snapshot: Snapshot = {}
+    for path, entry in pending.items():
+        if entry.oid is not None:
+            oid = entry.oid
+        else:
+            assert entry.data is not None
+            oid = repo.store.write(BlobObject(entry.data))
+        snapshot[path] = (oid, entry.mode)
+    return snapshot
+
+
+def _write_snapshot_tree(repo: Repository, snapshot: Mapping[str, Entry]) -> str:
+    root: Dict[str, object] = {}
+    for path, entry in sorted(snapshot.items()):
+        parts = path.split("/")
+        node = root
+        for part in parts[:-1]:
+            child = node.setdefault(part, {})
+            if not isinstance(child, dict):
+                raise RuntimeError(f"tree path conflict at {path!r}")
+            node = child
+        if parts[-1] in node:
+            raise RuntimeError(f"duplicate tree path: {path!r}")
+        node[parts[-1]] = entry
+
+    def write_node(node: Mapping[str, object]) -> str:
+        entries: List[TreeEntry] = []
+        for name in sorted(node):
+            value = node[name]
+            if isinstance(value, dict):
+                entries.append(TreeEntry("040000", name, write_node(value)))
+            else:
+                oid, mode = value  # type: ignore[misc]
+                entries.append(TreeEntry(mode, name, oid))
         return repo.store.write(TreeObject(entries))
 
-    return build("")
+    return write_node(root)
 
 
-def merge_tree(repo: Repository, ours: str, theirs: str) -> MergeTreeResult:
-    """Merge two commit-ish revisions without changing repository state.
+def merge_tree(
+    repo: Repository,
+    ours: str,
+    theirs: str,
+    *,
+    base: Optional[str] = None,
+    allow_unrelated_histories: bool = False,
+) -> MergeTreeResult:
+    """Merge two commit-ish values without changing refs, index, or worktree.
 
-    The best common ancestor is selected using the same graph plumbing as
-    ``merge-base``. Criss-cross histories with multiple equally-good bases are
-    rejected rather than silently choosing an arbitrary virtual base.
+    The unique best merge base is selected when ``base`` is omitted. Multiple
+    best bases are rejected rather than silently choosing a wrong virtual base.
+    Unrelated histories require an explicit opt-in.
     """
-    ours_oid = resolve_commit(repo, ours)
-    theirs_oid = resolve_commit(repo, theirs)
-    bases = merge_bases(repo, ours_oid, theirs_oid)
-    if len(bases) > 1:
-        raise RuntimeError(
-            "merge-tree does not yet support multiple merge bases; "
-            f"found {len(bases)}"
-        )
-    base_oid = bases[0] if bases else None
+    ours_oid = _commit_oid(repo, ours)
+    theirs_oid = _commit_oid(repo, theirs)
 
-    base_snapshot = _commit_snapshot(repo, base_oid) if base_oid else {}
-    ours_snapshot = _commit_snapshot(repo, ours_oid)
-    theirs_snapshot = _commit_snapshot(repo, theirs_oid)
+    if base is not None:
+        base_oid: Optional[str] = _commit_oid(repo, base)
+    else:
+        bases = merge_bases(repo, ours_oid, theirs_oid)
+        if len(bases) > 1:
+            raise RuntimeError(
+                "multiple merge bases found; pass an explicit merge base"
+            )
+        if not bases:
+            if not allow_unrelated_histories:
+                raise RuntimeError(
+                    "refusing to merge unrelated histories without "
+                    "--allow-unrelated-histories"
+                )
+            base_oid = None
+        else:
+            base_oid = bases[0]
 
-    merged: Snapshot = {}
-    conflicts: List[str] = []
-    for path in sorted(set(base_snapshot) | set(ours_snapshot) | set(theirs_snapshot)):
+    base_snapshot: Snapshot = tree_snapshot(repo, base_oid) if base_oid else {}
+    our_snapshot: Snapshot = tree_snapshot(repo, ours_oid)
+    their_snapshot: Snapshot = tree_snapshot(repo, theirs_oid)
+
+    pending: Dict[str, _MergedEntry] = {}
+    conflicts: List[MergeConflict] = []
+    changed: Set[str] = set()
+    all_paths = sorted(set(base_snapshot) | set(our_snapshot) | set(their_snapshot))
+
+    for path in all_paths:
+        base_entry = base_snapshot.get(path)
+        our_entry = our_snapshot.get(path)
+        their_entry = their_snapshot.get(path)
         entry, conflict = _merge_entry(
             repo,
             path,
-            base_snapshot.get(path),
-            ours_snapshot.get(path),
-            theirs_snapshot.get(path),
+            base_entry,
+            our_entry,
+            their_entry,
+            theirs,
         )
-        if conflict:
-            conflicts.append(path)
-        elif entry is not None:
-            merged[path] = entry
+        if conflict is not None:
+            conflicts.append(conflict)
+            changed.add(path)
+            continue
+        if entry is not None:
+            pending[path] = entry
+            merged_identity: Optional[Entry] = (entry.object_id(), entry.mode)
+        else:
+            merged_identity = None
+        if merged_identity != our_entry:
+            changed.add(path)
 
-    tree_oid = None if conflicts else _write_tree(repo, merged)
+    for path in sorted(_directory_file_conflicts(pending)):
+        if not any(item.path == path for item in conflicts):
+            conflicts.append(
+                _conflict(
+                    path,
+                    "directory/file",
+                    base_snapshot.get(path),
+                    our_snapshot.get(path),
+                    their_snapshot.get(path),
+                )
+            )
+        changed.add(path)
+
+    conflicts.sort(key=lambda item: (item.path, item.reason))
+    if conflicts:
+        tree_oid = None
+    else:
+        tree_oid = _write_snapshot_tree(repo, _materialize_snapshot(repo, pending))
+
     return MergeTreeResult(
         tree_oid=tree_oid,
         base_oid=base_oid,
         ours_oid=ours_oid,
         theirs_oid=theirs_oid,
         conflicts=tuple(conflicts),
+        changed_paths=tuple(sorted(changed)),
     )
