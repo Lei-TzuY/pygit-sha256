@@ -113,6 +113,20 @@ def test_overlapping_edit_returns_structured_content_conflict(tmp_path: Path) ->
     assert set(repo.store.all_shas()) == objects_before
 
 
+def test_invalid_utf8_changes_are_binary_conflicts_without_lossy_merge(tmp_path: Path) -> None:
+    repo = Repository.init(str(tmp_path / "r"))
+    base = _commit(repo, {"f.bin": b"\xff\none\nthree\n"}, message="base")
+    ours = _commit(repo, {"f.bin": b"\xff\nONE\nthree\n"}, parents=[base], message="ours")
+    theirs = _commit(repo, {"f.bin": b"\xff\none\nTHREE\n"}, parents=[base], message="theirs")
+    objects_before = set(repo.store.all_shas())
+
+    result = merge_tree(repo, ours, theirs)
+
+    assert result.tree_oid is None
+    assert [(c.path, c.reason) for c in result.conflicts] == [("f.bin", "binary")]
+    assert set(repo.store.all_shas()) == objects_before
+
+
 def test_add_add_and_modify_delete_are_not_guessed(tmp_path: Path) -> None:
     repo = Repository.init(str(tmp_path / "r"))
     base = _commit(repo, {}, message="base")
