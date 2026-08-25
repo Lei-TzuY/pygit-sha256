@@ -22,6 +22,7 @@ from .cat_file import CatFileRecord, inspect_object, object_exists, resolve_obje
 from .checkout_index import checkout_index
 from .hash_object import hash_object_data, hash_path, object_envelope, write_object_data
 from .diff_plumbing import DiffEntry, diff_files, diff_index, diff_tree, format_diff_entries
+from .merge_tree import MergeTreeResult, merge_tree
 from .revision import (
     RevisionResult,
     abbreviate_oid,
@@ -62,6 +63,8 @@ __all__ = [
     "diff_index",
     "diff_files",
     "format_diff_entries",
+    "MergeTreeResult",
+    "merge_tree",
     "RevisionResult",
     "resolve_revision",
     "resolve_abbreviation",
