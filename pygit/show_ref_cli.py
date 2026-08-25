@@ -7,7 +7,7 @@ import sys
 from typing import List, Sequence
 
 from .entrypoint import _find_repo
-from .show_ref import format_show_refs, show_refs
+from .show_ref import format_show_refs, ref_exists, show_refs
 
 
 _DEFAULT_ABBREV = 12
@@ -37,7 +37,7 @@ def _write_stdout(data: bytes) -> None:
 def run_show_ref(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pygit show-ref",
-        description="List or verify local loose and packed references.",
+        description="List, verify, or test local loose and packed references.",
     )
     parser.add_argument("--head", action="store_true", help="include HEAD even with namespace filters")
     branches = parser.add_mutually_exclusive_group()
@@ -66,7 +66,13 @@ def run_show_ref(argv: Sequence[str]) -> int:
         metavar="N",
         help=f"abbreviate displayed object IDs (default length: {_DEFAULT_ABBREV})",
     )
-    parser.add_argument("--verify", action="store_true", help="require exact fully-qualified refs/... names")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--verify", action="store_true", help="require exact fully-qualified refs/... names")
+    modes.add_argument(
+        "--exists",
+        action="store_true",
+        help="test whether one exact ref record exists without resolving its object",
+    )
     parser.add_argument(
         "-q",
         "--quiet",
@@ -77,6 +83,22 @@ def run_show_ref(argv: Sequence[str]) -> int:
     args = parser.parse_args(_normalize_optional_lengths(argv))
 
     branches_only = args.branches or args.heads
+    if args.exists:
+        if len(args.pattern) != 1:
+            parser.error("--exists requires exactly one reference")
+        if (
+            args.head
+            or branches_only
+            or args.tags
+            or args.dereference
+            or args.hash_only
+            or args.hash_length is not None
+            or args.abbrev is not None
+            or args.quiet
+        ):
+            parser.error("--exists cannot be combined with listing, formatting, or quiet options")
+        return 0 if ref_exists(_find_repo(), args.pattern[0]) else 2
+
     if args.verify:
         if not args.pattern:
             parser.error("--verify requires at least one reference")
