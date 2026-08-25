@@ -1,21 +1,19 @@
 """Stable top-level application entrypoint.
 
 Most commands continue through :mod:`pygit.launcher`.  Commands that need a
-modern nested/custom grammar are handled here before the legacy argparse stack;
-reflog show output remains compatible with the previous handler.
+modern nested/custom grammar are handled here before the legacy argparse stack.
 """
 
 from __future__ import annotations
 
-import argparse
 import sys
 from typing import Sequence
 
-from .entrypoint import _find_repo
 from .gc_cli import run_gc
 from .launcher import main as launcher_main
 from .ls_tree_cli import run_ls_tree
 from .reflog_expire_cli import run_reflog_expire
+from .reflog_show_cli import run_reflog_show
 
 
 _ERRORS = (
@@ -27,18 +25,6 @@ _ERRORS = (
     IsADirectoryError,
     OSError,
 )
-
-
-def _run_reflog_show(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(
-        prog="pygit reflog",
-        description="Show recorded ref movements.",
-    )
-    parser.add_argument("ref", nargs="?", default="HEAD", metavar="REF")
-    args = parser.parse_args(list(argv))
-    for index, entry in enumerate(_find_repo().reflog(args.ref)):
-        print(f"{entry.new_sha[:12]} {args.ref}@{{{index}}}: {entry.message}")
-    return 0
 
 
 def _finish(code: int) -> None:
@@ -61,7 +47,8 @@ def main() -> None:
         if len(argv) >= 2 and argv[1] == "expire":
             _run_safe(run_reflog_expire, argv[2:])
         else:
-            _run_safe(_run_reflog_show, argv[1:])
+            show_argv = argv[2:] if len(argv) >= 2 and argv[1] == "show" else argv[1:]
+            _run_safe(run_reflog_show, show_argv)
         return
 
     if argv and argv[0] == "gc":
