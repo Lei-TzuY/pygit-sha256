@@ -21,12 +21,15 @@ from .packed_refs import PackedRef, pack_refs, read_packed_refs
 from .cat_file import (
     CatFileBatchCommand,
     CatFileRecord,
+    batch_format_uses_rest,
     format_batch_object,
+    format_batch_record,
     inspect_object,
     object_exists,
     parse_batch_command,
     resolve_object,
     run_batch_commands,
+    split_batch_input,
 )
 from .checkout_index import checkout_index
 from .hash_object import hash_object_data, hash_path, object_envelope, write_object_data
@@ -103,6 +106,9 @@ __all__ = [
     "inspect_object",
     "object_exists",
     "format_batch_object",
+    "format_batch_record",
+    "batch_format_uses_rest",
+    "split_batch_input",
     "parse_batch_command",
     "run_batch_commands",
     "checkout_index",
