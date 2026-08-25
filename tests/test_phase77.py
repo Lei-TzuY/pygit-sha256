@@ -178,6 +178,25 @@ def test_all_refs_refuses_symlinked_logs(tmp_path: Path) -> None:
         show_reflog(repo, all_refs=True)
 
 
+def test_short_ref_does_not_hide_unsafe_symlinked_reflog(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    outside = tmp_path / "outside-short.log"
+    outside.write_text(_line(ZERO, ONE, 100, "outside"), encoding="utf-8")
+    link = repo.pygit_dir / "logs" / "refs" / "heads" / "linked"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable")
+
+    with pytest.raises((ValueError, RuntimeError), match="escapes logs|symbolic-link"):
+        show_reflog(repo, "linked")
+
+    result = _run(repo, "reflog", "show", "linked")
+    assert result.returncode == 1
+    assert b"escapes logs" in result.stderr or b"symbolic-link" in result.stderr
+
+
 def test_show_is_read_only_and_cli_options_match_api(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     _write_log(
