@@ -13,7 +13,7 @@ import heapq
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from .objects import CommitObject
+from .objects import CommitObject, TagObject
 from .plumbing import list_refs
 from .repo import Repository
 from .revision import resolve_revision
@@ -130,15 +130,29 @@ def _topological_order(repo: Repository, selected: Set[str]) -> List[str]:
     return ordered
 
 
+def _ref_commit_tip(repo: Repository, refname: str) -> Optional[str]:
+    """Peel one ref to a commit, returning None only for a valid non-commit tip."""
+    oid = resolve_revision(repo, refname)
+    seen: Set[str] = set()
+    while True:
+        if oid in seen:
+            raise RuntimeError(f"Tag cycle while resolving {refname!r}")
+        seen.add(oid)
+        obj = repo.store.read(oid)
+        if isinstance(obj, CommitObject):
+            return oid
+        if isinstance(obj, TagObject):
+            oid = obj.target_sha.lower()
+            continue
+        return None
+
+
 def _all_ref_tips(repo: Repository) -> List[str]:
     tips: List[str] = []
     seen: Set[str] = set()
     for _, refname in list_refs(repo):
-        try:
-            oid = _resolve_commitish(repo, refname)
-        except RuntimeError:
-            # Non-commit refs (for example a tag to a blob) do not contribute
-            # anything to a rev-list commit walk.
+        oid = _ref_commit_tip(repo, refname)
+        if oid is None:
             continue
         if oid not in seen:
             seen.add(oid)
