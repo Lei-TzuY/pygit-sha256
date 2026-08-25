@@ -25,6 +25,7 @@ from .diff_plumbing import DiffEntry, diff_files, diff_index, diff_tree, format_
 from .fsck import FsckIssue, FsckReport, fsck
 from .merge_file import MergeFileResult, merge_file, merge_file_data
 from .merge_tree import MergeConflict, MergeTreeResult, merge_tree
+from .remote_query import LsRemoteResult, RemoteRef, ls_remote, resolve_remote_url
 from .revision import (
     RevisionResult,
     abbreviate_oid,
@@ -74,6 +75,10 @@ __all__ = [
     "MergeConflict",
     "MergeTreeResult",
     "merge_tree",
+    "RemoteRef",
+    "LsRemoteResult",
+    "resolve_remote_url",
+    "ls_remote",
     "RevisionResult",
     "resolve_revision",
     "resolve_abbreviation",
