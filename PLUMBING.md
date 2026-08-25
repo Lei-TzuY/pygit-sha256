@@ -4,7 +4,8 @@ Phase 46 adds low-level graph/reference commands backed by reusable Python
 helpers in `pygit.plumbing`. Phase 47 extends the same layer with structured ref
 querying, formatting, graph filters, and refname validation in
 `pygit.ref_query`. Phase 48 adds tree-object construction and index loading in
-`pygit.tree_plumbing`.
+`pygit.tree_plumbing`. Phase 49 adds direct index mutation and inspection in
+`pygit.index_plumbing`.
 
 ## `pygit merge-base`
 
@@ -137,9 +138,61 @@ tracked worktree paths.
 Tree traversal verifies every entry's mode/object-type relationship before the
 index is written, so malformed trees are rejected rather than silently staged.
 
+## `pygit update-index`
+
+Manipulate the staging index directly without porcelain `add`/`rm` behavior:
+
+```text
+pygit update-index tracked.txt
+pygit update-index --add new.txt
+pygit update-index --remove deleted.txt
+pygit update-index --force-remove generated.txt
+pygit update-index --chmod=+x scripts/tool
+pygit update-index --cacheinfo 100644 <blob-oid> virtual.txt
+pygit update-index --index-info < index.records
+pygit update-index --stdin < paths.txt
+pygit update-index --refresh
+```
+
+Existing tracked paths are rehashed from the worktree. New paths require
+`--add`; missing tracked paths require `--remove`; `--force-remove` drops an
+entry even if the worktree file remains. Symlinks are stored as link-target
+bytes with mode `120000`, and `--chmod` changes only the index mode.
+
+`--cacheinfo` inserts an existing blob/commit object by mode and object ID;
+`--index-info` accepts `MODE OBJECT [STAGE]<TAB>PATH` records and mode `0` removes
+an entry. Pygit's index currently represents only stage 0, so higher unmerged
+stages are rejected explicitly. Object type, path traversal, `.pygit` metadata,
+and file/directory index collisions are validated before the index is saved.
+
+`--refresh` does not stage content. It only refreshes cached stat metadata for
+entries whose current blob and mode still match, printing `needs update` and
+returning status 1 for dirty/deleted entries.
+
+## `pygit ls-files`
+
+Inspect the index and its relationship to the working tree:
+
+```text
+pygit ls-files
+pygit ls-files --stage
+pygit ls-files --deleted
+pygit ls-files --modified
+pygit ls-files --stage src/
+pygit ls-files --error-unmatch README.md
+pygit ls-files -z
+```
+
+The default is cached index paths. `--stage` emits
+`MODE OBJECT 0<TAB>PATH`; `--deleted` selects tracked paths absent from the
+worktree; `--modified` selects tracked paths whose blob content or mode differs.
+Literal path arguments match exact paths or directory prefixes, while `*`, `?`,
+and `[` enable shell-style matching. `-z` emits NUL-delimited records.
+
 ## Python API
 
 ```python
+from pygit.index_plumbing import ls_files, refresh_index, update_index
 from pygit.plumbing import is_ancestor, list_refs, merge_bases
 from pygit.ref_query import check_ref_format, format_ref, query_refs
 from pygit.tree_plumbing import make_tree, read_tree, resolve_treeish
@@ -155,6 +208,10 @@ checked = check_ref_format("refs/heads/topic")
 tree_oid = make_tree(repo, [f"100644 blob {blob_oid}\tREADME.md"])
 read_tree(repo, tree_oid)
 resolved_tree = resolve_treeish(repo, "HEAD~1")
+
+update_index(repo, ["README.md"])
+dirty = refresh_index(repo)
+staged = ls_files(repo, stage=True)
 ```
 
 These helpers intentionally live outside the large porcelain `Repository`
