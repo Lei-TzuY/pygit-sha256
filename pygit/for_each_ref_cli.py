@@ -101,7 +101,17 @@ def run_for_each_ref(argv: Sequence[str]) -> int:
 
     if args.stdin_patterns and args.pattern:
         parser.error("--stdin cannot be combined with positional patterns")
-    patterns = read_ref_patterns(sys.stdin) if args.stdin_patterns else args.pattern
+    if args.stdin_patterns:
+        stdin_lines = list(sys.stdin)
+        patterns = read_ref_patterns(stdin_lines)
+        # Native Git distinguishes true EOF (zero pattern records => select all)
+        # from one or more blank records (patterns that match no refs). The
+        # normalization helper intentionally drops blanks, so preserve that
+        # source-level distinction here with an empty-pattern sentinel.
+        if stdin_lines and not patterns:
+            patterns = [""]
+    else:
+        patterns = args.pattern
 
     records = query_refs(
         _find_repo(),
