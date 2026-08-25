@@ -149,6 +149,7 @@ def test_stdout_pack_is_binary_round_trip_and_creates_no_persistent_pack(tmp_pat
 
 def test_cli_file_mode_reads_stdin_and_prints_pack_hash(tmp_path: Path, monkeypatch, capsys) -> None:
     repo, ids = _history(tmp_path)
+    capsys.readouterr()
     monkeypatch.chdir(repo.worktree)
     monkeypatch.setattr("sys.stdin", io.StringIO(ids["tip_blob"] + "\n"))
     prefix = tmp_path / "cli" / "objects"
