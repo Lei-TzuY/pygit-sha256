@@ -17,6 +17,7 @@ from .repo import Repository
 from .plumbing import is_ancestor, list_refs, merge_bases
 from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
 from .name_rev import NameRevResult, name_all, name_revision, name_revisions
+from .packed_refs import PackedRef, pack_refs, read_packed_refs
 
 __all__ = [
     "Repository",
@@ -30,5 +31,8 @@ __all__ = [
     "name_revision",
     "name_revisions",
     "name_all",
+    "PackedRef",
+    "pack_refs",
+    "read_packed_refs",
 ]
 __version__ = "0.1.0"
