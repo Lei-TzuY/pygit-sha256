@@ -16,7 +16,7 @@ from .repo import Repository
 from .revision import resolve_revision
 
 
-_BATCH_ATOMS = frozenset({"objectname", "objecttype", "objectsize", "rest"})
+_BATCH_ATOMS = frozenset({"objectname", "objecttype", "objectsize", "objectsize:disk", "rest"})
 _BATCH_INPUT_SEPARATOR_RE = re.compile(r"\s+")
 _HEX = frozenset("0123456789abcdef")
 
@@ -28,6 +28,7 @@ class CatFileRecord:
     type_name: str
     size: int
     content: bytes
+    disk_size: int
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,36 @@ def resolve_object(repo: Repository, expression: str) -> str:
     return resolve_revision(repo, expression)
 
 
+def object_disk_size(repo: Repository, oid: str) -> int:
+    """Return the number of bytes used by the selected on-disk object copy.
+
+    Loose objects use the compressed loose-file size. Packed objects use the
+    exact encoded pack-entry width, including the entry header and compressed
+    payload but excluding neighboring entries and the pack trailer. The lookup
+    order mirrors :meth:`ObjectStore.read`: a loose copy wins over packed copies;
+    when multiple packed copies exist, the first pack in deterministic path
+    order is selected.
+    """
+
+    loose_path = repo.store.root / oid[:2] / oid[2:]
+    if loose_path.is_file():
+        return loose_path.stat().st_size
+
+    from .pack import PackReader
+
+    pack_dir = repo.store.root / "pack"
+    if pack_dir.is_dir():
+        for idx_file in sorted(pack_dir.glob("*.idx")):
+            reader = PackReader(idx_file)
+            if not reader.has_object(oid):
+                continue
+            _, payload_end = reader._load_pack_image()
+            offset = reader._offsets[oid]
+            return reader._entry_end(offset, payload_end) - offset
+
+    raise KeyError(f"Object not found: {oid}")
+
+
 def inspect_object(repo: Repository, expression: str) -> CatFileRecord:
     oid = resolve_revision(repo, expression)
     obj: GitObject = repo.store.read(oid)
@@ -53,6 +84,7 @@ def inspect_object(repo: Repository, expression: str) -> CatFileRecord:
         type_name=obj.type_name.decode("ascii"),
         size=len(content),
         content=content,
+        disk_size=object_disk_size(repo, oid),
     )
 
 
@@ -178,6 +210,7 @@ def format_batch_record(
         "objectname": record.oid,
         "objecttype": record.type_name,
         "objectsize": str(record.size),
+        "objectsize:disk": str(record.disk_size),
         "rest": rest,
     }
     rendered = "".join(
