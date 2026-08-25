@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .objects import CommitObject
+from .packed_refs import (
+    packed_ref_value,
+    packed_refs_path,
+    remove_packed_refs,
+)
 from .ref_query import check_ref_format
 from .repo import Repository
 from .refs import ZERO_SHA
@@ -48,10 +53,13 @@ def _ref_path(repo: Repository, refname: str) -> Path:
 
 
 def _raw_value(repo: Repository, refname: str) -> Optional[str]:
+    """Return a loose symbolic/direct value or the packed direct value."""
     path = repo.pygit_dir / "HEAD" if refname == "HEAD" else _ref_path(repo, refname)
-    if not path.exists():
-        return None
-    return path.read_text(encoding="utf-8").strip()
+    if path.exists():
+        return path.read_text(encoding="utf-8").strip()
+    if refname != "HEAD":
+        return packed_ref_value(repo.pygit_dir, refname)
+    return None
 
 
 def symbolic_target(repo: Repository, refname: str) -> Optional[str]:
@@ -179,11 +187,11 @@ def update_refs(
     message: str = "update-ref",
     deref: bool = True,
 ) -> None:
-    """Validate an entire ref transaction before changing any reference.
+    """Validate and publish a ref transaction atomically across loose/packed refs.
 
-    Replacement files are prepared first. The publish phase snapshots both ref
-    and reflog files; if any filesystem operation fails, all touched files are
-    restored so callers do not observe a half-applied transaction.
+    New values are always materialized as loose refs, shadowing any packed value.
+    Deletion removes both loose and packed representations so an old packed value
+    cannot reappear after the loose file is removed.
     """
     planned = []
     touched = set()
@@ -212,6 +220,14 @@ def update_refs(
         else:
             raise ValueError(f"unsupported ref action: {update.action!r}")
 
+    packed_deletes = [
+        refname
+        for refname, _, new_oid in planned
+        if new_oid is None
+        and refname != "HEAD"
+        and packed_ref_value(repo.pygit_dir, refname) is not None
+    ]
+
     prepared = []
     snapshots: Dict[Path, Optional[bytes]] = {}
     try:
@@ -224,21 +240,34 @@ def update_refs(
             fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent), text=True)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(new_oid + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
             prepared.append((refname, path, old_oid, new_oid, Path(tmp_name)))
 
-        for refname, path, old_oid, new_oid, _ in prepared:
+        for refname, path, _, _, _ in prepared:
             snapshots.setdefault(path, _snapshot_file(path))
             snapshots.setdefault(_log_path(repo, refname), _snapshot_file(_log_path(repo, refname)))
             if refname.startswith("refs/heads/") and repo.refs.get_head() == f"ref: {refname}":
                 snapshots.setdefault(_log_path(repo, "HEAD"), _snapshot_file(_log_path(repo, "HEAD")))
+        if packed_deletes:
+            packed_path = packed_refs_path(repo.pygit_dir)
+            snapshots.setdefault(packed_path, _snapshot_file(packed_path))
 
-        for refname, path, old_oid, new_oid, temp in prepared:
+        # Publish all loose ref files first.
+        for _, path, _, new_oid, temp in prepared:
             if new_oid is None:
                 if path.exists():
                     path.unlink()
             else:
                 assert temp is not None
                 os.replace(temp, path)
+
+        # Then remove packed backing values for deletions before reflogs are
+        # emitted. If this rewrite fails the snapshot rollback restores both.
+        if packed_deletes:
+            remove_packed_refs(repo.pygit_dir, packed_deletes)
+
+        for refname, _, old_oid, new_oid, _ in prepared:
             repo.refs._append_reflog(refname, old_oid, new_oid, message)
             if refname.startswith("refs/heads/") and repo.refs.get_head() == f"ref: {refname}":
                 repo.refs._append_reflog("HEAD", old_oid, new_oid, message)
@@ -287,10 +316,26 @@ def set_symbolic_ref(repo: Repository, name: str, target: str, *, message: str =
 
     old_oid = _resolve_direct(repo, name, deref=True)[1]
     path = repo.pygit_dir / "HEAD" if name == "HEAD" else _ref_path(repo, name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"ref: {target}\n", encoding="utf-8")
-    new_oid = _resolve_direct(repo, name, deref=True)[1]
-    repo.refs._append_reflog(name, old_oid, new_oid, message, force=True)
+    log_path = _log_path(repo, name)
+    packed_path = packed_refs_path(repo.pygit_dir)
+    path_snapshot = _snapshot_file(path)
+    log_snapshot = _snapshot_file(log_path)
+    packed_snapshot = _snapshot_file(packed_path) if name != "HEAD" else None
+    had_packed = name != "HEAD" and packed_ref_value(repo.pygit_dir, name) is not None
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"ref: {target}\n", encoding="utf-8")
+        if had_packed:
+            remove_packed_refs(repo.pygit_dir, [name])
+        new_oid = _resolve_direct(repo, name, deref=True)[1]
+        repo.refs._append_reflog(name, old_oid, new_oid, message, force=True)
+    except OSError:
+        _restore_file(path, path_snapshot)
+        _restore_file(log_path, log_snapshot)
+        if name != "HEAD":
+            _restore_file(packed_path, packed_snapshot)
+        raise
 
 
 def delete_symbolic_ref(repo: Repository, name: str, *, message: str = "symbolic-ref -d") -> None:
@@ -300,7 +345,21 @@ def delete_symbolic_ref(repo: Repository, name: str, *, message: str = "symbolic
     target = symbolic_target(repo, name)
     if target is None:
         raise RuntimeError(f"ref {name!r} is not a symbolic ref")
+
     old_oid = _resolve_direct(repo, name, deref=True)[1]
     path = _ref_path(repo, name)
-    path.unlink()
-    repo.refs._append_reflog(name, old_oid, None, message, force=True)
+    log_path = _log_path(repo, name)
+    packed_path = packed_refs_path(repo.pygit_dir)
+    path_snapshot = _snapshot_file(path)
+    log_snapshot = _snapshot_file(log_path)
+    packed_snapshot = _snapshot_file(packed_path)
+
+    try:
+        path.unlink()
+        remove_packed_refs(repo.pygit_dir, [name])
+        repo.refs._append_reflog(name, old_oid, None, message, force=True)
+    except OSError:
+        _restore_file(path, path_snapshot)
+        _restore_file(log_path, log_snapshot)
+        _restore_file(packed_path, packed_snapshot)
+        raise
