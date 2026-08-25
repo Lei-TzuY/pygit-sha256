@@ -24,6 +24,7 @@ from .hash_object import hash_object_data, hash_path, object_envelope, write_obj
 from .diff_plumbing import DiffEntry, diff_files, diff_index, diff_tree, format_diff_entries
 from .fsck import FsckIssue, FsckReport, fsck
 from .gc import GarbageCollectResult, garbage_collect
+from .ls_tree import LsTreeEntry, format_ls_tree, ls_tree
 from .merge_file import MergeFileResult, merge_file, merge_file_data
 from .merge_tree import MergeConflict, MergeTreeResult, merge_tree
 from .mktag import make_tag, parse_tag_payload, validate_tag_payload
@@ -96,6 +97,9 @@ __all__ = [
     "fsck",
     "GarbageCollectResult",
     "garbage_collect",
+    "LsTreeEntry",
+    "ls_tree",
+    "format_ls_tree",
     "MergeFileResult",
     "merge_file_data",
     "merge_file",
