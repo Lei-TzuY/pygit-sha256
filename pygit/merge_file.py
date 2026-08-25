@@ -1,7 +1,7 @@
 """Standalone three-way file merge plumbing.
 
 The helpers in this module deliberately operate on bytes and filesystem paths
-without requiring a pygit repository.  Clean exact/one-side-unchanged cases
+without requiring a pygit repository. Clean exact/one-side-unchanged cases
 remain safe for arbitrary binary data; when both sides changed, automatic
 line merging is limited to lossless UTF-8 text so content is never rewritten
 through replacement characters.
@@ -53,6 +53,24 @@ def _marker(char: str, size: int, label: Optional[str] = None) -> str:
     return char * size + suffix + "\n"
 
 
+def _overlaps(edit: Edit, start: int, end: int) -> bool:
+    """Match the launcher's existing rule that touching hunks are independent."""
+    return edit[0] < end and edit[1] > start
+
+
+def _render_cluster(base: Sequence[str], start: int, end: int, edits: Sequence[Edit]) -> List[str]:
+    rendered: List[str] = []
+    position = start
+    for edit_start, edit_end, replacement in edits:
+        if edit_start < position:
+            raise RuntimeError("overlapping edits on the same merge-file side")
+        rendered.extend(base[position:edit_start])
+        rendered.extend(replacement)
+        position = edit_end
+    rendered.extend(base[position:end])
+    return rendered
+
+
 def merge_file_data(
     current: bytes,
     base: bytes,
@@ -64,7 +82,7 @@ def merge_file_data(
 ) -> MergeFileResult:
     """Three-way merge *current* and *other* relative to *base*.
 
-    ``style`` accepts ``"merge"`` or ``"diff3"``.  The return value always
+    ``style`` accepts ``"merge"`` or ``"diff3"``. The return value always
     contains the would-be merged bytes; conflicted results include conflict
     markers and report how many conflict regions were emitted.
     """
@@ -99,60 +117,75 @@ def merge_file_data(
         current_edit = current_edits[ci] if ci < len(current_edits) else None
         other_edit = other_edits[oi] if oi < len(other_edits) else None
 
-        if current_edit and other_edit:
-            if current_edit[1] <= other_edit[0]:
-                result.extend(base_lines[base_pos:current_edit[0]])
-                result.extend(current_edit[2])
-                base_pos = current_edit[1]
-                ci += 1
-                continue
-            if other_edit[1] <= current_edit[0]:
-                result.extend(base_lines[base_pos:other_edit[0]])
-                result.extend(other_edit[2])
-                base_pos = other_edit[1]
-                oi += 1
-                continue
-            if (
-                current_edit[0] == other_edit[0]
-                and current_edit[1] == other_edit[1]
-                and current_edit[2] == other_edit[2]
-            ):
-                result.extend(base_lines[base_pos:current_edit[0]])
-                result.extend(current_edit[2])
-                base_pos = current_edit[1]
-                ci += 1
-                oi += 1
-                continue
-
-            conflicts += 1
-            start = min(current_edit[0], other_edit[0])
-            end = max(current_edit[1], other_edit[1])
-            result.extend(base_lines[base_pos:start])
-            result.append(_marker("<", marker_size, labels[0]))
-            result.extend(current_edit[2])
-            if style == "diff3":
-                result.append(_marker("|", marker_size, labels[1]))
-                result.extend(base_lines[start:end])
-            result.append(_marker("=", marker_size))
+        if current_edit is None:
+            assert other_edit is not None
+            result.extend(base_lines[base_pos:other_edit[0]])
             result.extend(other_edit[2])
-            result.append(_marker(">", marker_size, labels[2]))
-            base_pos = end
-            ci += 1
+            base_pos = other_edit[1]
             oi += 1
             continue
-
-        if current_edit:
+        if other_edit is None:
             result.extend(base_lines[base_pos:current_edit[0]])
             result.extend(current_edit[2])
             base_pos = current_edit[1]
             ci += 1
             continue
 
-        assert other_edit is not None
-        result.extend(base_lines[base_pos:other_edit[0]])
-        result.extend(other_edit[2])
-        base_pos = other_edit[1]
-        oi += 1
+        if current_edit[1] <= other_edit[0]:
+            result.extend(base_lines[base_pos:current_edit[0]])
+            result.extend(current_edit[2])
+            base_pos = current_edit[1]
+            ci += 1
+            continue
+        if other_edit[1] <= current_edit[0]:
+            result.extend(base_lines[base_pos:other_edit[0]])
+            result.extend(other_edit[2])
+            base_pos = other_edit[1]
+            oi += 1
+            continue
+
+        # The next edits overlap. Consume the whole transitive cluster before
+        # deciding whether the two resulting versions agree or conflict.
+        start = min(current_edit[0], other_edit[0])
+        end = max(current_edit[1], other_edit[1])
+        current_cluster: List[Edit] = []
+        other_cluster: List[Edit] = []
+
+        while True:
+            added = False
+            while ci < len(current_edits) and _overlaps(current_edits[ci], start, end):
+                edit = current_edits[ci]
+                current_cluster.append(edit)
+                start = min(start, edit[0])
+                end = max(end, edit[1])
+                ci += 1
+                added = True
+            while oi < len(other_edits) and _overlaps(other_edits[oi], start, end):
+                edit = other_edits[oi]
+                other_cluster.append(edit)
+                start = min(start, edit[0])
+                end = max(end, edit[1])
+                oi += 1
+                added = True
+            if not added:
+                break
+
+        current_chunk = _render_cluster(base_lines, start, end, current_cluster)
+        other_chunk = _render_cluster(base_lines, start, end, other_cluster)
+        result.extend(base_lines[base_pos:start])
+        if current_chunk == other_chunk:
+            result.extend(current_chunk)
+        else:
+            conflicts += 1
+            result.append(_marker("<", marker_size, labels[0]))
+            result.extend(current_chunk)
+            if style == "diff3":
+                result.append(_marker("|", marker_size, labels[1]))
+                result.extend(base_lines[start:end])
+            result.append(_marker("=", marker_size))
+            result.extend(other_chunk)
+            result.append(_marker(">", marker_size, labels[2]))
+        base_pos = end
 
     result.extend(base_lines[base_pos:])
     return MergeFileResult("".join(result).encode("utf-8"), conflicts)
