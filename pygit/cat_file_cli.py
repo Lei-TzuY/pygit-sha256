@@ -7,6 +7,7 @@ import sys
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .cat_file import (
+    batch_all_objects,
     batch_format_uses_rest,
     format_batch_object,
     inspect_object,
@@ -17,22 +18,10 @@ from .cat_file import (
 from .entrypoint import _find_repo
 from .objects import CommitObject, TreeObject
 
-
-_BATCH_FORMAT_OPTIONS = {
-    "--batch": "batch",
-    "--batch-check": "batch_check",
-    "--batch-command": "batch_command",
-}
+_BATCH_FORMAT_OPTIONS = {"--batch": "batch", "--batch-check": "batch_check", "--batch-command": "batch_command"}
 
 
 def _normalize_batch_formats(argv: Sequence[str]) -> Tuple[List[str], Dict[str, Optional[str]]]:
-    """Extract only Git's attached ``--batch*=FORMAT`` optional arguments.
-
-    Using argparse ``nargs='?'`` would incorrectly accept a space-separated
-    format even though Git requires the optional value to stay attached with
-    ``=``. The normalized argv keeps the existing mutually-exclusive booleans.
-    """
-
     normalized: List[str] = []
     formats: Dict[str, Optional[str]] = {name: None for name in _BATCH_FORMAT_OPTIONS.values()}
     for token in argv:
@@ -40,7 +29,7 @@ def _normalize_batch_formats(argv: Sequence[str]) -> Tuple[List[str], Dict[str, 
         for option, name in _BATCH_FORMAT_OPTIONS.items():
             prefix = option + "="
             if token.startswith(prefix):
-                formats[name] = token[len(prefix) :]
+                formats[name] = token[len(prefix):]
                 normalized.append(option)
                 matched = True
                 break
@@ -50,35 +39,17 @@ def _normalize_batch_formats(argv: Sequence[str]) -> Tuple[List[str], Dict[str, 
 
 
 def run_cat_file(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(
-        prog="pygit cat-file",
-        description="Inspect SHA-256 objects and stream batch queries.",
-    )
+    parser = argparse.ArgumentParser(prog="pygit cat-file", description="Inspect SHA-256 objects and stream batch queries.")
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("-t", "--type", action="store_true", help="show object type")
-    mode.add_argument("-s", "--size", action="store_true", help="show object size")
-    mode.add_argument("-p", "--pretty", action="store_true", help="pretty-print object content")
-    mode.add_argument("-e", "--exists", action="store_true", help="test whether OBJECT exists")
-    mode.add_argument(
-        "--batch",
-        action="store_true",
-        help="read object names from stdin and emit metadata plus raw content",
-    )
-    mode.add_argument(
-        "--batch-check",
-        action="store_true",
-        help="read object names from stdin and emit metadata only",
-    )
-    mode.add_argument(
-        "--batch-command",
-        action="store_true",
-        help="read info/contents/flush commands from stdin",
-    )
-    parser.add_argument(
-        "--buffer",
-        action="store_true",
-        help="buffer batch output until flush or clean end-of-input",
-    )
+    mode.add_argument("-t", "--type", action="store_true")
+    mode.add_argument("-s", "--size", action="store_true")
+    mode.add_argument("-p", "--pretty", action="store_true")
+    mode.add_argument("-e", "--exists", action="store_true")
+    mode.add_argument("--batch", action="store_true")
+    mode.add_argument("--batch-check", action="store_true")
+    mode.add_argument("--batch-command", action="store_true")
+    parser.add_argument("--batch-all-objects", action="store_true", help="ignore stdin and emit every loose or packed object")
+    parser.add_argument("--buffer", action="store_true")
     parser.add_argument("object", nargs="?", metavar="OBJECT")
     normalized, formats = _normalize_batch_formats(argv)
     args = parser.parse_args(normalized)
@@ -86,6 +57,8 @@ def run_cat_file(argv: Sequence[str]) -> int:
     is_batch = args.batch or args.batch_check or args.batch_command
     if args.buffer and not is_batch:
         parser.error("--buffer requires --batch, --batch-check, or --batch-command")
+    if args.batch_all_objects and not is_batch:
+        parser.error("--batch-all-objects requires --batch, --batch-check, or --batch-command")
     if is_batch and args.object is not None:
         parser.error("batch modes read object names or commands from stdin")
 
@@ -96,24 +69,27 @@ def run_cat_file(argv: Sequence[str]) -> int:
         format_string = formats["batch_check"]
     elif args.batch_command:
         format_string = formats["batch_command"]
-
-    # Validate before consuming stdin so a bad format cannot produce partial
-    # output before the command eventually fails.
     if format_string is not None:
         batch_format_uses_rest(format_string)
 
     repo = _find_repo()
     output = getattr(sys.stdout, "buffer", None)
 
+    if args.batch_all_objects:
+        if output is None:
+            raise RuntimeError("cat-file batch modes require a binary stdout stream")
+        for payload in batch_all_objects(repo, contents=args.batch, format_string=format_string):
+            output.write(payload)
+            if not args.buffer:
+                output.flush()
+        if args.buffer:
+            output.flush()
+        return 0
+
     if args.batch_command:
         if output is None:
             raise RuntimeError("cat-file batch-command requires a binary stdout stream")
-        for chunk in run_batch_commands(
-            repo,
-            sys.stdin,
-            buffered=args.buffer,
-            format_string=format_string,
-        ):
+        for chunk in run_batch_commands(repo, sys.stdin, buffered=args.buffer, format_string=format_string):
             output.write(chunk)
             output.flush()
         return 0
@@ -123,15 +99,7 @@ def run_cat_file(argv: Sequence[str]) -> int:
             raise RuntimeError("cat-file batch modes require a binary stdout stream")
         for raw in sys.stdin:
             expression, rest = split_batch_input(raw, format_string)
-            output.write(
-                format_batch_object(
-                    repo,
-                    expression,
-                    contents=args.batch,
-                    format_string=format_string,
-                    rest=rest,
-                )
-            )
+            output.write(format_batch_object(repo, expression, contents=args.batch, format_string=format_string, rest=rest))
             if not args.buffer:
                 output.flush()
         return 0
@@ -140,7 +108,6 @@ def run_cat_file(argv: Sequence[str]) -> int:
         parser.error("single-object modes require OBJECT")
     if args.exists:
         return 0 if object_exists(repo, args.object) else 1
-
     record = inspect_object(repo, args.object)
     if args.type:
         print(record.type_name)
@@ -148,7 +115,6 @@ def run_cat_file(argv: Sequence[str]) -> int:
     if args.size:
         print(record.size)
         return 0
-
     obj = repo.store.read(record.oid)
     if isinstance(obj, CommitObject):
         print(obj.pretty_print(record.oid))
@@ -156,9 +122,8 @@ def run_cat_file(argv: Sequence[str]) -> int:
         for entry in obj.entries:
             kind = "tree" if entry.is_dir else "blob"
             print(f"{entry.mode} {kind} {entry.sha}\t{entry.name}")
+    elif output is None:
+        sys.stdout.write(record.content.decode("utf-8"))
     else:
-        if output is None:
-            sys.stdout.write(record.content.decode("utf-8"))
-        else:
-            output.write(record.content)
+        output.write(record.content)
     return 0
