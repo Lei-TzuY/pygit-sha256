@@ -20,6 +20,7 @@ from .name_rev import NameRevResult, name_all, name_revision, name_revisions
 from .packed_refs import PackedRef, pack_refs, read_packed_refs
 from .cat_file import CatFileRecord, inspect_object, object_exists, resolve_object
 from .checkout_index import checkout_index
+from .hash_object import hash_object_data, hash_path, object_envelope, write_object_data
 from .revision import (
     RevisionResult,
     abbreviate_oid,
@@ -51,6 +52,10 @@ __all__ = [
     "inspect_object",
     "object_exists",
     "checkout_index",
+    "hash_object_data",
+    "write_object_data",
+    "hash_path",
+    "object_envelope",
     "RevisionResult",
     "resolve_revision",
     "resolve_abbreviation",
