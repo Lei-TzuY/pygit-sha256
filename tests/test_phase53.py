@@ -104,8 +104,9 @@ class TestNameRevAPI:
         root, _, tip = _linear(repo)
         set_symbolic_ref(repo, "refs/aliases/current", "refs/heads/main")
         tree_oid = repo.store.write(TreeObject())
-        repo.refs._path_under(repo.refs.refs_dir, "misc/tree").parent.mkdir(parents=True, exist_ok=True)
-        repo.refs._path_under(repo.refs.refs_dir, "misc/tree").write_text(tree_oid + "\n", encoding="utf-8")
+        tree_ref = repo.pygit_dir / "refs" / "misc" / "tree"
+        tree_ref.parent.mkdir(parents=True, exist_ok=True)
+        tree_ref.write_text(tree_oid + "\n", encoding="utf-8")
 
         result = name_revisions(repo, [root, tip])
         assert result[0].name == "main~2"
