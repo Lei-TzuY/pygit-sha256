@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .cli import main as legacy_main
+from .index_plumbing import ls_files, refresh_index, update_index
 from .plumbing import is_ancestor, list_refs, merge_bases, peel_oid, verify_ref
 from .ref_query import check_ref_format, format_ref, query_refs
 from .repo import Repository
@@ -21,6 +22,8 @@ _EXTRA_COMMANDS = {
     "check-ref-format",
     "mktree",
     "read-tree",
+    "update-index",
+    "ls-files",
 }
 
 
@@ -296,6 +299,135 @@ def _run_read_tree(argv: Sequence[str]) -> int:
     return 0
 
 
+def _stdin_records(nul_terminated: bool) -> list[str]:
+    raw = sys.stdin.read()
+    records = raw.split("\x00") if nul_terminated else raw.splitlines()
+    if nul_terminated and records and records[-1] == "":
+        records.pop()
+    return records
+
+
+def _run_update_index(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit update-index",
+        description="Register worktree or object-store content in the index.",
+    )
+    parser.add_argument("--add", action="store_true", help="allow new index entries")
+    parser.add_argument(
+        "--remove",
+        action="store_true",
+        help="remove tracked paths that are missing from the worktree",
+    )
+    parser.add_argument(
+        "--force-remove",
+        action="store_true",
+        help="remove named paths from the index even when they still exist",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="refresh stat information without staging new content",
+    )
+    parser.add_argument(
+        "--chmod",
+        choices=("+x", "-x"),
+        metavar="(+|-)x",
+        help="override the executable bit for named regular files",
+    )
+    parser.add_argument(
+        "--cacheinfo",
+        action="append",
+        nargs=3,
+        default=[],
+        metavar=("MODE", "OBJECT", "PATH"),
+        help="insert an object-store entry directly into the index",
+    )
+    parser.add_argument(
+        "--index-info",
+        action="store_true",
+        help="read MODE OBJECT [STAGE]<TAB>PATH records from stdin",
+    )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="read additional path names from stdin",
+    )
+    parser.add_argument(
+        "-z",
+        action="store_true",
+        help="use NUL separators for --stdin/--index-info input",
+    )
+    parser.add_argument("path", nargs="*", metavar="PATH")
+    args = parser.parse_args(list(argv))
+
+    if args.index_info and args.stdin:
+        parser.error("--index-info and --stdin are mutually exclusive")
+    if args.refresh and any(
+        (args.add, args.remove, args.force_remove, args.chmod, args.cacheinfo, args.index_info)
+    ):
+        parser.error("--refresh cannot be combined with index mutation options")
+
+    paths = list(args.path)
+    index_records = []
+    if args.index_info:
+        index_records = _stdin_records(args.z)
+    elif args.stdin:
+        paths.extend(_stdin_records(args.z))
+
+    repo = _find_repo()
+    if args.refresh:
+        dirty = refresh_index(repo, paths)
+        for path in dirty:
+            print(f"{path}: needs update", file=sys.stderr)
+        return 1 if dirty else 0
+
+    update_index(
+        repo,
+        paths,
+        add=args.add,
+        remove=args.remove,
+        force_remove=args.force_remove,
+        chmod=args.chmod,
+        cache_info=[tuple(spec) for spec in args.cacheinfo],
+        index_info=index_records,
+    )
+    return 0
+
+
+def _run_ls_files(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit ls-files",
+        description="Show information about files in the index and working tree.",
+    )
+    parser.add_argument("-c", "--cached", action="store_true", help="show cached paths")
+    parser.add_argument("-s", "--stage", action="store_true", help="show mode, object, stage, and path")
+    parser.add_argument("-d", "--deleted", action="store_true", help="show tracked paths deleted from the worktree")
+    parser.add_argument("-m", "--modified", action="store_true", help="show tracked paths modified in the worktree")
+    parser.add_argument(
+        "--error-unmatch",
+        action="store_true",
+        help="fail if any supplied path pattern matches no index entry",
+    )
+    parser.add_argument("-z", action="store_true", help="terminate records with NUL")
+    parser.add_argument("path", nargs="*", metavar="PATH")
+    args = parser.parse_args(list(argv))
+
+    repo = _find_repo()
+    lines = ls_files(
+        repo,
+        cached=args.cached,
+        stage=args.stage,
+        deleted=args.deleted,
+        modified=args.modified,
+        patterns=args.path,
+        error_unmatch=args.error_unmatch,
+    )
+    if lines:
+        separator = "\x00" if args.z else "\n"
+        sys.stdout.write(separator.join(lines) + separator)
+    return 0
+
+
 def dispatch(argv: Sequence[str]) -> Optional[int]:
     """Run an extended command, or return ``None`` for the legacy CLI."""
     if not argv or argv[0] not in _EXTRA_COMMANDS:
@@ -312,7 +444,11 @@ def dispatch(argv: Sequence[str]) -> Optional[int]:
             return _run_check_ref_format(argv[1:])
         if argv[0] == "mktree":
             return _run_mktree(argv[1:])
-        return _run_read_tree(argv[1:])
+        if argv[0] == "read-tree":
+            return _run_read_tree(argv[1:])
+        if argv[0] == "update-index":
+            return _run_update_index(argv[1:])
+        return _run_ls_files(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
