@@ -20,6 +20,7 @@ from .name_rev import NameRevResult, name_all, name_revision, name_revisions
 from .packed_refs import PackedRef, pack_refs, read_packed_refs
 from .cat_file import CatFileRecord, inspect_object, object_exists, resolve_object
 from .checkout_index import checkout_index
+from .diff_plumbing import DiffEntry, diff_files, diff_index, diff_tree, format_diff_entries
 from .revision import (
     RevisionResult,
     abbreviate_oid,
@@ -51,6 +52,11 @@ __all__ = [
     "inspect_object",
     "object_exists",
     "checkout_index",
+    "DiffEntry",
+    "diff_tree",
+    "diff_index",
+    "diff_files",
+    "format_diff_entries",
     "RevisionResult",
     "resolve_revision",
     "resolve_abbreviation",
