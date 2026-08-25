@@ -7,12 +7,17 @@ rev-parse agree on refs, packed refs, abbreviated SHA-256 IDs, ancestry,
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 from .objects import GitObject
 from .repo import Repository
 from .revision import resolve_revision
+
+
+_BATCH_ATOMS = frozenset({"objectname", "objecttype", "objectsize", "rest"})
+_BATCH_INPUT_SEPARATOR_RE = re.compile(r"\s+")
 
 
 @dataclass(frozen=True)
@@ -58,26 +63,120 @@ def object_exists(repo: Repository, expression: str) -> bool:
         return False
 
 
+def _compile_batch_format(format_string: str) -> Tuple[Tuple[str, str], ...]:
+    """Tokenize one batch format while validating supported atoms.
+
+    ``%%`` is the only special non-atom escape in Git's batch format grammar;
+    other percent sequences are preserved literally.
+    """
+
+    tokens = []
+    literal = []
+    index = 0
+    while index < len(format_string):
+        char = format_string[index]
+        if char != "%":
+            literal.append(char)
+            index += 1
+            continue
+        if index + 1 < len(format_string) and format_string[index + 1] == "%":
+            literal.append("%")
+            index += 2
+            continue
+        if index + 1 < len(format_string) and format_string[index + 1] == "(":
+            close = format_string.find(")", index + 2)
+            if close < 0:
+                raise ValueError("unterminated cat-file batch format atom")
+            atom = format_string[index + 2 : close]
+            if atom not in _BATCH_ATOMS:
+                raise ValueError(f"unsupported cat-file batch format atom: %({atom})")
+            if literal:
+                tokens.append(("literal", "".join(literal)))
+                literal.clear()
+            tokens.append(("atom", atom))
+            index = close + 1
+            continue
+        literal.append("%")
+        index += 1
+    if literal:
+        tokens.append(("literal", "".join(literal)))
+    return tuple(tokens)
+
+
+def batch_format_uses_rest(format_string: Optional[str]) -> bool:
+    """Return whether a custom batch format requests Git's ``%(rest)`` input split."""
+
+    if format_string is None:
+        return False
+    return any(kind == "atom" and value == "rest" for kind, value in _compile_batch_format(format_string))
+
+
+def split_batch_input(raw: str, format_string: Optional[str] = None) -> Tuple[str, str]:
+    """Split one batch input record into object expression and ``%(rest)`` text.
+
+    Without ``%(rest)`` the entire newline-stripped record is the object-ish,
+    preserving spaces in revision paths. When ``%(rest)`` is requested, Git
+    treats the first whitespace run as the separator and removes that run while
+    preserving the remainder verbatim.
+    """
+
+    line = raw.rstrip("\r\n")
+    if not batch_format_uses_rest(format_string):
+        return line, ""
+    match = _BATCH_INPUT_SEPARATOR_RE.search(line)
+    if match is None:
+        return line, ""
+    return line[: match.start()], line[match.end() :]
+
+
+def format_batch_record(
+    record: CatFileRecord,
+    format_string: str,
+    *,
+    rest: str = "",
+) -> bytes:
+    """Render one successful object record with a validated custom batch format."""
+
+    values = {
+        "objectname": record.oid,
+        "objecttype": record.type_name,
+        "objectsize": str(record.size),
+        "rest": rest,
+    }
+    rendered = "".join(
+        value if kind == "literal" else values[value]
+        for kind, value in _compile_batch_format(format_string)
+    )
+    return (rendered + "\n").encode("utf-8")
+
+
 def format_batch_object(
     repo: Repository,
     expression: str,
     *,
     contents: bool = False,
+    format_string: Optional[str] = None,
+    rest: str = "",
 ) -> bytes:
-    """Render one default-format batch response.
+    """Render one batch response using the default or a custom header format.
 
     Missing or malformed object expressions are record-local failures and use
-    Git's ``<input> missing`` form. Storage/I/O failures are intentionally not
-    swallowed so callers can distinguish repository corruption from a missing
-    object name.
+    Git's canonical ``<input> missing`` form regardless of custom formatting.
+    Storage/I/O failures are intentionally not swallowed so callers can
+    distinguish repository corruption from a missing object name.
     """
 
+    if format_string is not None:
+        _compile_batch_format(format_string)
     try:
         record = inspect_object(repo, expression)
     except (KeyError, ValueError, RuntimeError):
         return expression.encode("utf-8") + b" missing\n"
 
-    header = f"{record.oid} {record.type_name} {record.size}\n".encode("ascii")
+    if format_string is None:
+        header = f"{record.oid} {record.type_name} {record.size}\n".encode("ascii")
+    else:
+        header = format_batch_record(record, format_string, rest=rest)
     if not contents:
         return header
     return header + record.content + b"\n"
@@ -119,6 +218,7 @@ def run_batch_commands(
     commands: Iterable[str],
     *,
     buffered: bool = False,
+    format_string: Optional[str] = None,
 ) -> Iterable[bytes]:
     """Execute ``--batch-command`` input and yield output flush chunks.
 
@@ -126,9 +226,13 @@ def run_batch_commands(
     ``buffered=True`` responses accumulate until ``flush``; pending data is also
     yielded at clean end-of-input, as process exit flushes Git's buffered
     output. If parsing fails before a flush, pending buffered responses are not
-    yielded.
+    yielded. ``%(rest)`` is rendered as empty in command mode because the
+    command protocol treats the complete text after ``info ``/``contents `` as
+    the object expression rather than applying the batch-input rest split.
     """
 
+    if format_string is not None:
+        _compile_batch_format(format_string)
     pending = bytearray()
     for raw in commands:
         command = parse_batch_command(raw)
@@ -144,6 +248,7 @@ def run_batch_commands(
             repo,
             command.expression,
             contents=command.action == "contents",
+            format_string=format_string,
         )
         if buffered:
             pending.extend(payload)

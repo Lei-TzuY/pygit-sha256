@@ -4,11 +4,49 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from .cat_file import format_batch_object, inspect_object, object_exists, run_batch_commands
+from .cat_file import (
+    batch_format_uses_rest,
+    format_batch_object,
+    inspect_object,
+    object_exists,
+    run_batch_commands,
+    split_batch_input,
+)
 from .entrypoint import _find_repo
 from .objects import CommitObject, TreeObject
+
+
+_BATCH_FORMAT_OPTIONS = {
+    "--batch": "batch",
+    "--batch-check": "batch_check",
+    "--batch-command": "batch_command",
+}
+
+
+def _normalize_batch_formats(argv: Sequence[str]) -> Tuple[List[str], Dict[str, Optional[str]]]:
+    """Extract only Git's attached ``--batch*=FORMAT`` optional arguments.
+
+    Using argparse ``nargs='?'`` would incorrectly accept a space-separated
+    format even though Git requires the optional value to stay attached with
+    ``=``. The normalized argv keeps the existing mutually-exclusive booleans.
+    """
+
+    normalized: List[str] = []
+    formats: Dict[str, Optional[str]] = {name: None for name in _BATCH_FORMAT_OPTIONS.values()}
+    for token in argv:
+        matched = False
+        for option, name in _BATCH_FORMAT_OPTIONS.items():
+            prefix = option + "="
+            if token.startswith(prefix):
+                formats[name] = token[len(prefix) :]
+                normalized.append(option)
+                matched = True
+                break
+        if not matched:
+            normalized.append(token)
+    return normalized, formats
 
 
 def run_cat_file(argv: Sequence[str]) -> int:
@@ -42,7 +80,8 @@ def run_cat_file(argv: Sequence[str]) -> int:
         help="buffer batch output until flush or clean end-of-input",
     )
     parser.add_argument("object", nargs="?", metavar="OBJECT")
-    args = parser.parse_args(list(argv))
+    normalized, formats = _normalize_batch_formats(argv)
+    args = parser.parse_args(normalized)
 
     is_batch = args.batch or args.batch_check or args.batch_command
     if args.buffer and not is_batch:
@@ -50,13 +89,31 @@ def run_cat_file(argv: Sequence[str]) -> int:
     if is_batch and args.object is not None:
         parser.error("batch modes read object names or commands from stdin")
 
+    format_string: Optional[str] = None
+    if args.batch:
+        format_string = formats["batch"]
+    elif args.batch_check:
+        format_string = formats["batch_check"]
+    elif args.batch_command:
+        format_string = formats["batch_command"]
+
+    # Validate before consuming stdin so a bad format cannot produce partial
+    # output before the command eventually fails.
+    if format_string is not None:
+        batch_format_uses_rest(format_string)
+
     repo = _find_repo()
     output = getattr(sys.stdout, "buffer", None)
 
     if args.batch_command:
         if output is None:
             raise RuntimeError("cat-file batch-command requires a binary stdout stream")
-        for chunk in run_batch_commands(repo, sys.stdin, buffered=args.buffer):
+        for chunk in run_batch_commands(
+            repo,
+            sys.stdin,
+            buffered=args.buffer,
+            format_string=format_string,
+        ):
             output.write(chunk)
             output.flush()
         return 0
@@ -65,12 +122,14 @@ def run_cat_file(argv: Sequence[str]) -> int:
         if output is None:
             raise RuntimeError("cat-file batch modes require a binary stdout stream")
         for raw in sys.stdin:
-            expression = raw.rstrip("\r\n")
+            expression, rest = split_batch_input(raw, format_string)
             output.write(
                 format_batch_object(
                     repo,
                     expression,
                     contents=args.batch,
+                    format_string=format_string,
+                    rest=rest,
                 )
             )
             if not args.buffer:
