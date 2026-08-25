@@ -10,6 +10,7 @@ from .cli import main as legacy_main
 from .commit_plumbing import commit_tree, read_message_file, write_tree
 from .entrypoint import _find_repo, dispatch as extended_dispatch
 from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
+from .name_rev import abbreviated_oid, name_all, name_revisions
 from .plumbing import is_ancestor
 from .ref_transaction import (
     RefUpdate,
@@ -21,7 +22,14 @@ from .ref_transaction import (
     update_refs,
 )
 
-_COMMANDS = {"write-tree", "commit-tree", "update-ref", "symbolic-ref", "merge-base"}
+_COMMANDS = {
+    "write-tree",
+    "commit-tree",
+    "update-ref",
+    "symbolic-ref",
+    "merge-base",
+    "name-rev",
+}
 
 
 def _stdin_records() -> list[str]:
@@ -185,6 +193,57 @@ def _run_merge_base(argv: Sequence[str]) -> int:
     return 0
 
 
+def _run_name_rev(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit name-rev",
+        description="Find symbolic names for commits from refs and ancestry paths.",
+    )
+    parser.add_argument("--all", action="store_true", help="name every commit reachable from selected refs")
+    parser.add_argument("--tags", action="store_true", help="use only refs/tags/* as naming anchors")
+    parser.add_argument(
+        "--refs",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="limit naming anchors by glob pattern; may be supplied repeatedly",
+    )
+    parser.add_argument("--name-only", action="store_true", help="print only the symbolic name")
+    parser.add_argument("--no-undefined", action="store_true", help="fail if any requested commit cannot be named")
+    parser.add_argument("--always", action="store_true", help="fall back to a 12-hex object abbreviation")
+    parser.add_argument("commit", nargs="*", metavar="COMMIT")
+    args = parser.parse_args(list(argv))
+
+    if args.all and args.commit:
+        parser.error("--all cannot be combined with explicit commits")
+    if not args.all and not args.commit:
+        parser.error("name-rev requires at least one commit or --all")
+    if args.no_undefined and args.always:
+        parser.error("--no-undefined and --always are mutually exclusive")
+
+    repo = _find_repo()
+    records = (
+        name_all(repo, tags_only=args.tags, ref_patterns=args.refs)
+        if args.all
+        else name_revisions(repo, args.commit, tags_only=args.tags, ref_patterns=args.refs)
+    )
+
+    unnamed = [record for record in records if record.name is None]
+    if unnamed and args.no_undefined:
+        raise RuntimeError(f"cannot describe commit {unnamed[0].oid}")
+
+    for record in records:
+        rendered = record.name
+        if rendered is None:
+            rendered = abbreviated_oid(record.oid) if args.always else "undefined"
+        if args.name_only:
+            print(rendered)
+        elif args.all:
+            print(f"{record.oid} {rendered}")
+        else:
+            print(f"{record.revision} {rendered}")
+    return 0
+
+
 def dispatch(argv: Sequence[str]) -> Optional[int]:
     if argv and argv[0] in _COMMANDS:
         try:
@@ -196,7 +255,9 @@ def dispatch(argv: Sequence[str]) -> Optional[int]:
                 return _run_update_ref(argv[1:])
             if argv[0] == "symbolic-ref":
                 return _run_symbolic_ref(argv[1:])
-            return _run_merge_base(argv[1:])
+            if argv[0] == "merge-base":
+                return _run_merge_base(argv[1:])
+            return _run_name_rev(argv[1:])
         except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
