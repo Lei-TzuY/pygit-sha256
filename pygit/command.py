@@ -9,6 +9,8 @@ from typing import Optional, Sequence
 from .cli import main as legacy_main
 from .commit_plumbing import commit_tree, read_message_file, write_tree
 from .entrypoint import _find_repo, dispatch as extended_dispatch
+from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
+from .plumbing import is_ancestor
 from .ref_transaction import (
     RefUpdate,
     delete_symbolic_ref,
@@ -19,7 +21,7 @@ from .ref_transaction import (
     update_refs,
 )
 
-_COMMANDS = {"write-tree", "commit-tree", "update-ref", "symbolic-ref"}
+_COMMANDS = {"write-tree", "commit-tree", "update-ref", "symbolic-ref", "merge-base"}
 
 
 def _stdin_records() -> list[str]:
@@ -126,6 +128,63 @@ def _run_symbolic_ref(argv: Sequence[str]) -> int:
     return 0
 
 
+def _run_merge_base(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit merge-base",
+        description="Find best common ancestors across commit graphs.",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--is-ancestor",
+        action="store_true",
+        help="test whether the first commit is an ancestor of the second",
+    )
+    mode.add_argument(
+        "--octopus",
+        action="store_true",
+        help="find common ancestors shared by every supplied commit",
+    )
+    mode.add_argument(
+        "--independent",
+        action="store_true",
+        help="print commits not reachable from any other supplied commit",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="print all best merge bases instead of only the first",
+    )
+    parser.add_argument("commit", nargs="+", metavar="COMMIT")
+    args = parser.parse_args(list(argv))
+
+    repo = _find_repo()
+    if args.is_ancestor:
+        if args.all or len(args.commit) != 2:
+            parser.error("--is-ancestor requires exactly two commits and cannot use --all")
+        return 0 if is_ancestor(repo, args.commit[0], args.commit[1]) else 1
+
+    if args.independent:
+        if args.all:
+            parser.error("--independent cannot be combined with --all")
+        for oid in independent_commits(repo, args.commit):
+            print(oid)
+        return 0
+
+    if len(args.commit) < 2:
+        parser.error("merge-base requires at least two commits")
+
+    bases = (
+        octopus_merge_bases(repo, args.commit)
+        if args.octopus
+        else merge_bases_many(repo, args.commit)
+    )
+    if not bases:
+        return 1
+    for oid in bases if args.all else bases[:1]:
+        print(oid)
+    return 0
+
+
 def dispatch(argv: Sequence[str]) -> Optional[int]:
     if argv and argv[0] in _COMMANDS:
         try:
@@ -135,7 +194,9 @@ def dispatch(argv: Sequence[str]) -> Optional[int]:
                 return _run_commit_tree(argv[1:])
             if argv[0] == "update-ref":
                 return _run_update_ref(argv[1:])
-            return _run_symbolic_ref(argv[1:])
+            if argv[0] == "symbolic-ref":
+                return _run_symbolic_ref(argv[1:])
+            return _run_merge_base(argv[1:])
         except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
