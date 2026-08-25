@@ -22,6 +22,8 @@ from .packed_refs import PackedRef, pack_refs, read_packed_refs
 from .cat_file import (
     CatFileBatchCommand,
     CatFileRecord,
+    all_object_ids,
+    batch_all_objects,
     batch_format_uses_rest,
     format_batch_object,
     format_batch_record,
@@ -107,6 +109,8 @@ __all__ = [
     "resolve_object",
     "inspect_object",
     "object_exists",
+    "all_object_ids",
+    "batch_all_objects",
     "format_batch_object",
     "format_batch_record",
     "batch_format_uses_rest",
