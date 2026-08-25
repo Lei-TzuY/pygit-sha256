@@ -78,7 +78,7 @@ def test_checksum_and_exact_length_corruption_are_rejected() -> None:
     valid = _index_bytes([(oid, 1, 12)])
 
     damaged = bytearray(valid)
-    damaged[100] ^= 0x01
+    damaged[-1] ^= 0x01
     with pytest.raises(ValueError, match="checksum"):
         parse_index_bytes(bytes(damaged))
 
