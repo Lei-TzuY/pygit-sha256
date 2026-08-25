@@ -5,7 +5,7 @@ Graph and reference plumbing that is useful independently of the porcelain
 Repository methods.
 
 The helpers here intentionally operate on pygit's SHA-256 object database and
-``.pygit/refs`` namespace.  They do not assume native Git's SHA-1 object size.
+``.pygit/refs`` namespace. They do not assume native Git's SHA-1 object size.
 """
 
 from __future__ import annotations
@@ -25,23 +25,105 @@ def _is_oid(value: str) -> bool:
     return len(value) == 64 and all(ch in _HEX for ch in value.lower())
 
 
-def resolve_commit(repo: Repository, revision: str) -> str:
-    """Resolve *revision* and peel annotated tags until a commit is reached."""
-    sha = repo.rev_parse(revision)
+def _resolve_object_id(repo: Repository, name: str) -> str:
+    """Resolve a ref name or SHA prefix without requiring a commit object."""
+    oid = repo.refs.resolve(name)
+    if oid:
+        return oid
+
+    if name.startswith("refs/"):
+        refs_root = (repo.pygit_dir / "refs").resolve()
+        path = (repo.pygit_dir / name).resolve()
+        try:
+            path.relative_to(refs_root)
+        except ValueError as exc:
+            raise ValueError(f"Invalid ref name: {name!r}") from exc
+        if path.is_file():
+            value = path.read_text(encoding="utf-8").strip()
+            if not _is_oid(value):
+                raise RuntimeError(f"Malformed ref {name}: expected a 64-hex object ID")
+            return value
+
+    oid = repo.store.resolve_prefix(name)
+    if oid:
+        return oid
+    raise KeyError(f"Unknown revision: {name!r}")
+
+
+def _peel_to_commit(repo: Repository, oid: str, display: str) -> str:
+    """Peel annotated tags until *oid* names a commit."""
+    current = oid
     seen: Set[str] = set()
-
     while True:
-        if sha in seen:
-            raise RuntimeError(f"Tag cycle while resolving {revision!r}")
-        seen.add(sha)
+        if current in seen:
+            raise RuntimeError(f"Tag cycle while resolving {display!r}")
+        seen.add(current)
 
-        obj = repo.store.read(sha)
+        obj = repo.store.read(current)
         if isinstance(obj, CommitObject):
-            return sha
+            return current
         if isinstance(obj, TagObject):
-            sha = obj.target_sha
+            current = obj.target_sha
             continue
-        raise RuntimeError(f"Revision {revision!r} does not name a commit")
+        raise RuntimeError(f"Revision {display!r} does not name a commit")
+
+
+def _commit(repo: Repository, oid: str) -> CommitObject:
+    obj = repo.store.read(oid)
+    if not isinstance(obj, CommitObject):
+        raise RuntimeError(f"Object {oid} in commit ancestry is not a commit")
+    return obj
+
+
+def resolve_commit(repo: Repository, revision: str) -> str:
+    """
+    Resolve a commit-ish revision and peel annotated tags.
+
+    ``~N`` and ``^N`` suffixes are interpreted after tag peeling, so expressions
+    such as ``v2~1`` work even though the ref itself points at a tag object.
+    """
+    split_at = len(revision)
+    for marker in ("~", "^"):
+        pos = revision.find(marker)
+        if pos >= 0:
+            split_at = min(split_at, pos)
+    base = revision[:split_at]
+    suffix = revision[split_at:]
+    if not base:
+        raise ValueError(f"Invalid revision: {revision!r}")
+
+    sha = _peel_to_commit(repo, _resolve_object_id(repo, base), revision)
+
+    while suffix:
+        operator = suffix[0]
+        if operator not in {"~", "^"}:
+            raise ValueError(f"Invalid revision suffix in {revision!r}")
+        suffix = suffix[1:]
+
+        digits = []
+        while suffix and suffix[0].isdigit():
+            digits.append(suffix[0])
+            suffix = suffix[1:]
+        number = int("".join(digits)) if digits else 1
+
+        if operator == "~":
+            for _ in range(number):
+                commit = _commit(repo, sha)
+                if not commit.parents:
+                    raise ValueError(f"Revision {revision!r} walks past a root commit")
+                sha = commit.parents[0]
+        else:
+            if number == 0:
+                continue
+            commit = _commit(repo, sha)
+            if number > len(commit.parents):
+                raise ValueError(
+                    f"Revision {revision!r} requests parent {number}, "
+                    f"but commit has {len(commit.parents)} parent(s)"
+                )
+            sha = commit.parents[number - 1]
+
+    return sha
 
 
 def _shallow_boundaries(repo: Repository) -> Set[str]:
@@ -72,10 +154,7 @@ def ancestor_distances(repo: Repository, start: str) -> Dict[str, int]:
         if sha in shallow:
             continue
 
-        obj = repo.store.read(sha)
-        if not isinstance(obj, CommitObject):
-            raise RuntimeError(f"Object {sha} in commit ancestry is not a commit")
-        for parent in obj.parents:
+        for parent in _commit(repo, sha).parents:
             queue.append((parent, distance + 1))
 
     return distances
@@ -86,7 +165,7 @@ def merge_bases(repo: Repository, left: str, right: str) -> List[str]:
     Return all *best* common ancestors of two revisions.
 
     A common ancestor is discarded when it is itself an ancestor of another
-    common ancestor.  The remaining commits are Git's merge-base candidates.
+    common ancestor. The remaining commits are Git's merge-base candidates.
     Results are ordered deterministically by graph distance and then object ID.
     """
     left_sha = resolve_commit(repo, left)
