@@ -51,6 +51,7 @@ from .reflog_expire import (
 )
 from .repack import RepackResult, repack
 from .remote_query import LsRemoteResult, RemoteRef, ls_remote, resolve_remote_url
+from .rev_list import RevListEntry, RevListObjectEntry, rev_list, rev_list_objects
 from .revision import (
     RevisionResult,
     abbreviate_oid,
@@ -138,6 +139,10 @@ __all__ = [
     "LsRemoteResult",
     "resolve_remote_url",
     "ls_remote",
+    "RevListEntry",
+    "RevListObjectEntry",
+    "rev_list",
+    "rev_list_objects",
     "RevisionResult",
     "resolve_revision",
     "resolve_abbreviation",
