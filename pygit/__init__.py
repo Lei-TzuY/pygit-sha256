@@ -18,7 +18,16 @@ from .plumbing import is_ancestor, list_refs, merge_bases
 from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
 from .name_rev import NameRevResult, name_all, name_revision, name_revisions
 from .packed_refs import PackedRef, pack_refs, read_packed_refs
-from .cat_file import CatFileRecord, inspect_object, object_exists, resolve_object
+from .cat_file import (
+    CatFileBatchCommand,
+    CatFileRecord,
+    format_batch_object,
+    inspect_object,
+    object_exists,
+    parse_batch_command,
+    resolve_object,
+    run_batch_commands,
+)
 from .checkout_index import checkout_index
 from .hash_object import hash_object_data, hash_path, object_envelope, write_object_data
 from .diff_plumbing import DiffEntry, diff_files, diff_index, diff_tree, format_diff_entries
@@ -82,9 +91,13 @@ __all__ = [
     "pack_refs",
     "read_packed_refs",
     "CatFileRecord",
+    "CatFileBatchCommand",
     "resolve_object",
     "inspect_object",
     "object_exists",
+    "format_batch_object",
+    "parse_batch_command",
+    "run_batch_commands",
     "checkout_index",
     "hash_object_data",
     "write_object_data",
