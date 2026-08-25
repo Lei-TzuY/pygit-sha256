@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import sys
+from typing import Optional
 
 import pytest
 
@@ -14,14 +15,18 @@ from pygit.revision import resolve_revision, symbolic_refname
 
 
 ZERO = "0" * 64
-IDENT = Identity("Tester", "tester@example.com", 1, "+0000")
 
 
 def _repo(tmp_path: Path) -> Repository:
     return Repository.init(str(tmp_path / "r"))
 
 
-def _commit(repo: Repository, payload: bytes, parent: str | None, timestamp: int) -> tuple[str, str, str]:
+def _commit(
+    repo: Repository,
+    payload: bytes,
+    parent: Optional[str],
+    timestamp: int,
+) -> tuple[str, str, str]:
     blob = repo.store.write(BlobObject(payload))
     tree = repo.store.write(TreeObject([TreeEntry("100644", "file.txt", blob)]))
     identity = Identity("Tester", "tester@example.com", timestamp, "+0000")
