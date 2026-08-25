@@ -26,6 +26,17 @@ from .fsck import FsckIssue, FsckReport, fsck
 from .merge_file import MergeFileResult, merge_file, merge_file_data
 from .merge_tree import MergeConflict, MergeTreeResult, merge_tree
 from .mktag import make_tag, parse_tag_payload, validate_tag_payload
+from .pack_plumbing import (
+    IndexPackResult,
+    PackEntry,
+    ParsedPack,
+    UnpackResult,
+    build_index_bytes,
+    index_pack,
+    parse_pack,
+    parse_pack_bytes,
+    unpack_objects,
+)
 from .remote_query import LsRemoteResult, RemoteRef, ls_remote, resolve_remote_url
 from .revision import (
     RevisionResult,
@@ -79,6 +90,15 @@ __all__ = [
     "parse_tag_payload",
     "validate_tag_payload",
     "make_tag",
+    "PackEntry",
+    "ParsedPack",
+    "IndexPackResult",
+    "UnpackResult",
+    "parse_pack_bytes",
+    "parse_pack",
+    "build_index_bytes",
+    "index_pack",
+    "unpack_objects",
     "RemoteRef",
     "LsRemoteResult",
     "resolve_remote_url",
