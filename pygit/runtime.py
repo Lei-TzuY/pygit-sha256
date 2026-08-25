@@ -14,6 +14,7 @@ from .command import main as command_main
 from .entrypoint import _find_repo
 from .objects import CommitObject, TreeObject
 from .plumbing import list_refs
+from .rev_list_cli import run_rev_list
 from .revision import (
     abbreviate_oid,
     glob_refs,
@@ -386,6 +387,8 @@ def main() -> None:
             code = _run_checkout_index(argv[1:])
         elif argv and argv[0] == "rev-parse":
             code = _run_rev_parse(argv[1:])
+        elif argv and argv[0] == "rev-list":
+            code = run_rev_list(argv[1:])
         else:
             command_main()
             return
