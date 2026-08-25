@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 from typing import Sequence
 
+from .fork_point_cli import run_fork_point
 from .gc_cli import run_gc
 from .launcher import main as launcher_main
 from .ls_tree_cli import run_ls_tree
@@ -62,6 +63,10 @@ def main() -> None:
 
     if argv and argv[0] == "show-ref":
         _run_safe(run_show_ref, argv[1:])
+        return
+
+    if argv and argv[0] == "merge-base" and "--fork-point" in argv[1:]:
+        _run_safe(run_fork_point, argv[1:])
         return
 
     launcher_main()
