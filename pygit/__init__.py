@@ -41,6 +41,13 @@ from .pack_plumbing import (
 )
 from .prune import PruneResult, default_expire_before, prune
 from .prune_packed import PrunePackedResult, prune_packed
+from .reflog_expire import (
+    ReflogExpireEntry,
+    ReflogExpireResult,
+    default_reflog_expire_before,
+    default_reflog_unreachable_before,
+    expire_reflogs,
+)
 from .remote_query import LsRemoteResult, RemoteRef, ls_remote, resolve_remote_url
 from .revision import (
     RevisionResult,
@@ -116,6 +123,11 @@ __all__ = [
     "prune",
     "PrunePackedResult",
     "prune_packed",
+    "ReflogExpireEntry",
+    "ReflogExpireResult",
+    "default_reflog_expire_before",
+    "default_reflog_unreachable_before",
+    "expire_reflogs",
     "RemoteRef",
     "LsRemoteResult",
     "resolve_remote_url",
