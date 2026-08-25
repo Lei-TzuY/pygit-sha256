@@ -44,12 +44,24 @@ def _shallow_boundaries(repo: Repository) -> Set[str]:
     return result
 
 
-def reachable_objects(repo: Repository, roots: Iterable[str]) -> Set[str]:
-    """Return every object reachable from *roots* using pygit's object graph.
+def reachable_objects(
+    repo: Repository,
+    roots: Iterable[str],
+    *,
+    follow_commit_parents: bool = True,
+    first_parent: bool = False,
+) -> Set[str]:
+    """Return objects reachable from *roots* using pygit's object graph.
 
-    Commit parents are not traversed beyond entries listed in ``.pygit/shallow``.
+    By default commit ancestry is followed exactly as it was for the original
+    ``pack-objects`` implementation.  ``follow_commit_parents=False`` expands
+    the selected commit objects only through their trees; this is useful for a
+    caller that has already performed its own commit-set selection.  When
+    ancestry is followed, ``first_parent=True`` limits each commit to its first
+    parent.  Commit traversal never crosses entries listed in ``.pygit/shallow``.
+
     Missing referenced objects are reported as errors rather than silently
-    producing an incomplete pack.
+    producing an incomplete object set.
     """
 
     shallow = _shallow_boundaries(repo)
@@ -65,8 +77,9 @@ def reachable_objects(repo: Repository, roots: Iterable[str]) -> Set[str]:
 
         if isinstance(obj, CommitObject):
             pending.append(obj.tree.lower())
-            if oid not in shallow:
-                pending.extend(parent.lower() for parent in obj.parents)
+            if follow_commit_parents and oid not in shallow:
+                parents = obj.parents[:1] if first_parent else obj.parents
+                pending.extend(parent.lower() for parent in parents)
         elif isinstance(obj, TreeObject):
             pending.extend(entry.sha.lower() for entry in obj.entries)
         elif isinstance(obj, TagObject):

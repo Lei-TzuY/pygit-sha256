@@ -1,10 +1,10 @@
-"""Commit-set traversal for script-facing ``rev-list`` plumbing.
+"""Commit-set and object traversal for script-facing ``rev-list`` plumbing.
 
 The historical CLI supported only one start revision plus a small symmetric
 range special case.  This module provides a reusable, read-only graph engine
 for positive/negative revisions, two-dot and three-dot ranges, all-ref walks,
 first-parent traversal, shallow boundaries, deterministic date/topological
-ordering, and left/right symmetric-difference markers.
+ordering, left/right symmetric-difference markers, and object enumeration.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .objects import CommitObject, TagObject
+from .pack_objects import reachable_objects
 from .plumbing import list_refs
 from .repo import Repository
 from .revision import resolve_revision
@@ -25,6 +26,14 @@ class RevListEntry:
 
     oid: str
     side: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RevListObjectEntry:
+    """One object selected by ``rev-list --objects`` style traversal."""
+
+    oid: str
+    type_name: str
 
 
 def _is_oid(value: str) -> bool:
@@ -192,6 +201,35 @@ def _normal_revisions(repo: Repository, revisions: Sequence[str]) -> Tuple[List[
     return positive, negative
 
 
+def _object_exclusion_roots(
+    repo: Repository,
+    revisions: Sequence[str],
+    *,
+    first_parent: bool,
+) -> Tuple[str, ...]:
+    """Return commit roots whose complete object closure is uninteresting.
+
+    For ordinary revision sets these are the explicit negative roots.  For one
+    symmetric range, the common ancestry is uninteresting to both sides; using
+    that ancestry as exclusion roots also removes trees/blobs already available
+    through the common history rather than merely hiding the common commits.
+    """
+    symmetric = [token for token in revisions if "..." in token]
+    if symmetric:
+        if len(revisions) != 1:
+            raise ValueError("a symmetric A...B range cannot be mixed with other revisions")
+        left, right = _split_range(symmetric[0], "...")
+        left_tip = _resolve_commitish(repo, left)
+        right_tip = _resolve_commitish(repo, right)
+        common = _walk(repo, [left_tip], first_parent=first_parent) & _walk(
+            repo, [right_tip], first_parent=first_parent
+        )
+        return tuple(sorted(common))
+
+    _, negative = _normal_revisions(repo, revisions)
+    return tuple(negative)
+
+
 def rev_list(
     repo: Repository,
     revisions: Sequence[str] = (),
@@ -255,3 +293,78 @@ def rev_list(
         ordered.reverse()
 
     return tuple(RevListEntry(oid=oid, side=sides.get(oid) if left_right else None) for oid in ordered)
+
+
+def rev_list_objects(
+    repo: Repository,
+    revisions: Sequence[str] = (),
+    *,
+    all_refs: bool = False,
+    first_parent: bool = False,
+    topo_order: bool = False,
+    reverse: bool = False,
+    skip: int = 0,
+    max_count: int = 0,
+) -> Tuple[RevListObjectEntry, ...]:
+    """Enumerate the object closure required by a selected commit set.
+
+    Commit selection, ordering, shallow handling, first-parent traversal, skip,
+    and max-count are delegated to :func:`rev_list`.  Only the selected commits'
+    tree/object closure is then expanded, so limiting the commit output cannot
+    accidentally pull omitted parent commits back into the object set.
+
+    Negative revisions subtract their complete object closure.  For ``A...B``,
+    the complete common-ancestry closure is subtracted, including shared trees
+    and blobs.  Selected commits are returned first in rev-list order; remaining
+    objects follow in deterministic OID order.  Pathname annotations are
+    intentionally not synthesized by this API.
+    """
+    commits = rev_list(
+        repo,
+        revisions,
+        all_refs=all_refs,
+        first_parent=first_parent,
+        topo_order=topo_order,
+        reverse=reverse,
+        skip=skip,
+        max_count=max_count,
+        left_right=False,
+    )
+    commit_oids = [entry.oid for entry in commits]
+    if not commit_oids:
+        return ()
+
+    selected = reachable_objects(
+        repo,
+        commit_oids,
+        follow_commit_parents=False,
+    )
+    exclusion_roots = _object_exclusion_roots(
+        repo,
+        revisions,
+        first_parent=first_parent,
+    )
+    if exclusion_roots:
+        selected.difference_update(
+            reachable_objects(
+                repo,
+                exclusion_roots,
+                follow_commit_parents=True,
+                first_parent=first_parent,
+            )
+        )
+
+    ordered_oids = [oid for oid in commit_oids if oid in selected]
+    commit_set = set(ordered_oids)
+    ordered_oids.extend(sorted(selected - commit_set))
+
+    result: List[RevListObjectEntry] = []
+    for oid in ordered_oids:
+        obj = repo.store.read(oid)
+        result.append(
+            RevListObjectEntry(
+                oid=oid,
+                type_name=obj.type_name.decode("ascii"),
+            )
+        )
+    return tuple(result)
