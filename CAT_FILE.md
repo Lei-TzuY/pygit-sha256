@@ -1,6 +1,6 @@
 # Advanced `cat-file` plumbing
 
-Phase 55 extends object inspection beyond the original single-object `-t`, `-s`, and `-p` modes. Phase 82 adds the interactive command-oriented batch protocol used by long-lived tooling. Phase 84 adds Git-style custom headers for every batch mode.
+Phase 55 extends object inspection beyond the original single-object `-t`, `-s`, and `-p` modes. Phase 82 adds the interactive command-oriented batch protocol used by long-lived tooling. Phase 84 adds Git-style custom headers for every batch mode. Phase 88 adds storage-wide object enumeration.
 
 ## Object expressions
 
@@ -87,10 +87,28 @@ With `--buffer`, responses are accumulated until a `flush` command is received. 
 
 The command delimiter is one ASCII space; everything after that first space belongs to the object expression, so additional leading spaces are preserved rather than normalized.
 
+## All-object enumeration
+
+`--batch-all-objects` changes a batch mode from stdin-driven lookup to storage-wide enumeration:
+
+```console
+pygit cat-file --batch-check --batch-all-objects
+pygit cat-file '--batch-check=%(objectname) %(objecttype)' --batch-all-objects
+pygit cat-file --batch --batch-all-objects > object-stream.bin
+```
+
+The command ignores stdin completely and emits every canonical object ID known to the local loose or packed object store. Enumeration is independent of refs and reachability, so unreachable objects are included. A loose object duplicated in a pack appears only once, and packed-only objects remain visible.
+
+Default output order is deterministic lexical SHA-256 object-ID order. Incidental files under `.pygit/objects` whose names are not canonical lowercase 64-hex IDs are ignored. If a canonical object name exists but its stored object fails normal object verification, the existing batch missing/corruption behavior is preserved rather than silently treating arbitrary storage as valid.
+
+Custom formats work unchanged. Because no stdin record exists for enumeration, `%(rest)` expands to the empty string. `--batch` emits raw contents after each formatted header; `--batch-check` and `--batch-command` emit metadata only. `--buffer` is accepted and flushes the accumulated stream at completion. `--unordered` remains separate work.
+
 ## Python API
 
 ```python
 from pygit import (
+    all_object_ids,
+    batch_all_objects,
     format_batch_object,
     format_batch_record,
     inspect_object,
@@ -121,7 +139,9 @@ chunks = list(
         format_string="%(objectname) %(objecttype)",
     )
 )
+object_ids = all_object_ids(repo)
+all_headers = list(batch_all_objects(repo, format_string="%(objectname) %(objecttype)"))
 header = format_batch_object(repo, "HEAD")
 ```
 
-All-object enumeration, `--unordered`, symlink following, `objectsize:disk`/delta-base atoms, text conversion/filters, mailmap toggling, and NUL-framed input remain separate work rather than being approximated here.
+`--unordered`, symlink following, `objectsize:disk`/delta-base atoms, text conversion/filters, mailmap toggling, and NUL-framed input remain separate work rather than being approximated here.
