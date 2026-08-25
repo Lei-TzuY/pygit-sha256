@@ -73,7 +73,14 @@ from .revision import (
     resolve_revision,
     symbolic_refname,
 )
-from .show_ref import ShowRefEntry, format_show_refs, ref_exists, show_refs
+from .show_ref import (
+    ExcludeExistingResult,
+    ShowRefEntry,
+    exclude_existing_refs,
+    format_show_refs,
+    ref_exists,
+    show_refs,
+)
 
 __all__ = [
     "Repository",
@@ -178,5 +185,7 @@ __all__ = [
     "show_refs",
     "ref_exists",
     "format_show_refs",
+    "ExcludeExistingResult",
+    "exclude_existing_refs",
 ]
 __version__ = "0.1.0"

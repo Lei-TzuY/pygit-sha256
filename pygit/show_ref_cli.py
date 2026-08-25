@@ -7,7 +7,7 @@ import sys
 from typing import List, Sequence
 
 from .entrypoint import _find_repo
-from .show_ref import format_show_refs, ref_exists, show_refs
+from .show_ref import exclude_existing_refs, format_show_refs, ref_exists, show_refs
 
 
 _DEFAULT_ABBREV = 12
@@ -21,6 +21,10 @@ def _normalize_optional_lengths(argv: Sequence[str]) -> List[str]:
             normalized.append("--hash=64")
         elif token == "--abbrev":
             normalized.append(f"--abbrev={_DEFAULT_ABBREV}")
+        elif token == "--exclude-existing":
+            # Git documents this optional value as --exclude-existing[=<pattern>].
+            # Keep a following positional token from being consumed as the value.
+            normalized.append("--exclude-existing=")
         else:
             normalized.append(token)
     return normalized
@@ -34,10 +38,17 @@ def _write_stdout(data: bytes) -> None:
         sys.stdout.write(data.decode("utf-8"))
 
 
+def _read_stdin_lines() -> List[bytes]:
+    stream = getattr(sys.stdin, "buffer", None)
+    if stream is not None:
+        return list(stream.readlines())
+    return [line.encode("utf-8") for line in sys.stdin.readlines()]
+
+
 def run_show_ref(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pygit show-ref",
-        description="List, verify, or test local loose and packed references.",
+        description="List, verify, test, or filter local loose and packed references.",
     )
     parser.add_argument("--head", action="store_true", help="include HEAD even with namespace filters")
     branches = parser.add_mutually_exclusive_group()
@@ -73,6 +84,14 @@ def run_show_ref(argv: Sequence[str]) -> int:
         action="store_true",
         help="test whether one exact ref record exists without resolving its object",
     )
+    modes.add_argument(
+        "--exclude-existing",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PATTERN",
+        help="filter stdin to well-formed refs absent from local storage",
+    )
     parser.add_argument(
         "-q",
         "--quiet",
@@ -98,6 +117,32 @@ def run_show_ref(argv: Sequence[str]) -> int:
         ):
             parser.error("--exists cannot be combined with listing, formatting, or quiet options")
         return 0 if ref_exists(_find_repo(), args.pattern[0]) else 2
+
+    if args.exclude_existing is not None:
+        if args.pattern:
+            parser.error("--exclude-existing reads references from stdin and takes no positional refs")
+        if (
+            args.head
+            or branches_only
+            or args.tags
+            or args.dereference
+            or args.hash_only
+            or args.hash_length is not None
+            or args.abbrev is not None
+            or args.quiet
+        ):
+            parser.error(
+                "--exclude-existing cannot be combined with listing, formatting, or quiet options"
+            )
+        result = exclude_existing_refs(
+            _find_repo(),
+            _read_stdin_lines(),
+            pattern=args.exclude_existing or None,
+        )
+        for warning in result.warnings:
+            print(warning, file=sys.stderr)
+        _write_stdout(result.output)
+        return 0
 
     if args.verify:
         if not args.pattern:
