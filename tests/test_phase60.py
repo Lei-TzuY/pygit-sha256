@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Mapping, Sequence, Tuple
+from typing import Dict, Mapping, Sequence
 
 import pytest
 
@@ -110,6 +110,20 @@ def test_overlapping_edit_returns_structured_content_conflict(tmp_path: Path) ->
     assert conflict.base_oid is not None
     assert conflict.ours_oid is not None
     assert conflict.theirs_oid is not None
+    assert set(repo.store.all_shas()) == objects_before
+
+
+def test_invalid_utf8_changes_are_binary_conflicts_without_lossy_merge(tmp_path: Path) -> None:
+    repo = Repository.init(str(tmp_path / "r"))
+    base = _commit(repo, {"f.bin": b"\xff\none\nthree\n"}, message="base")
+    ours = _commit(repo, {"f.bin": b"\xff\nONE\nthree\n"}, parents=[base], message="ours")
+    theirs = _commit(repo, {"f.bin": b"\xff\none\nTHREE\n"}, parents=[base], message="theirs")
+    objects_before = set(repo.store.all_shas())
+
+    result = merge_tree(repo, ours, theirs)
+
+    assert result.tree_oid is None
+    assert [(c.path, c.reason) for c in result.conflicts] == [("f.bin", "binary")]
     assert set(repo.store.all_shas()) == objects_before
 
 
