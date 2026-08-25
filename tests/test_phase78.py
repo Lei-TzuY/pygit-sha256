@@ -98,6 +98,7 @@ def test_numeric_selectors_resolve_head_short_and_full_ref_names(tmp_path: Path)
     assert resolve_revision(repo, "HEAD@{0}") == h["tip"]
     assert resolve_revision(repo, "HEAD@{1}") == h["middle"]
     assert resolve_revision(repo, "HEAD@{2}") == h["root"]
+    assert resolve_revision(repo, "HEAD@{0001}") == h["middle"]
     assert resolve_revision(repo, "main@{1}") == h["middle"]
     assert resolve_revision(repo, "refs/heads/main@{2}") == h["root"]
 
@@ -152,12 +153,18 @@ def test_selector_index_and_syntax_fail_loudly(tmp_path: Path) -> None:
 
     with pytest.raises(KeyError, match="out of range"):
         resolve_revision(repo, "HEAD@{3}")
+    with pytest.raises(KeyError, match="out of range"):
+        resolve_revision(repo, "HEAD@{" + "9" * 5000 + "}")
     with pytest.raises(ValueError, match="numeric reflog selectors"):
         resolve_revision(repo, "HEAD@{-1}")
     with pytest.raises(ValueError, match="numeric reflog selectors"):
         resolve_revision(repo, "HEAD@{yesterday}")
     with pytest.raises(ValueError, match="Invalid reflog selector"):
         resolve_revision(repo, "@{0}")
+    with pytest.raises(ValueError, match="Nested reflog selectors"):
+        resolve_revision(repo, "HEAD@{1}@{0}")
+    with pytest.raises(ValueError, match="Malformed reflog selector"):
+        resolve_revision(repo, "HEAD@{1")
 
 
 def test_missing_reflog_zero_oid_and_missing_object_are_not_valid_revisions(tmp_path: Path) -> None:
