@@ -63,6 +63,7 @@ class TestGraphPlumbing:
         repo.refs.set_tag("v2", tag_sha)
 
         assert resolve_commit(repo, "v2") == second
+        assert resolve_commit(repo, "v2~1") == first
         assert resolve_commit(repo, "HEAD~1") == first
         assert peel_oid(repo, tag_sha) == second
         assert merge_bases(repo, "v2", "HEAD~1") == [first]
