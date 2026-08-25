@@ -127,6 +127,33 @@ def _diff_snapshots(
     return result
 
 
+def _peel_commit(repo: Repository, oid: str, display: str) -> Tuple[str, CommitObject]:
+    seen = set()
+    current = oid
+    while True:
+        if current in seen:
+            raise RuntimeError(f"tag cycle while resolving {display!r}")
+        seen.add(current)
+        obj = repo.store.read(current)
+        if isinstance(obj, CommitObject):
+            return current, obj
+        if isinstance(obj, TagObject):
+            current = obj.target_sha
+            continue
+        raise ValueError(f"{display!r} does not resolve to a commit")
+
+
+def _is_shallow_boundary(repo: Repository, oid: str) -> bool:
+    path = repo.pygit_dir / "shallow"
+    if not path.exists():
+        return False
+    return oid.lower() in {
+        line.strip().lower()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    }
+
+
 def tree_snapshot(repo: Repository, treeish: str) -> Snapshot:
     """Resolve a tree-ish through the shared revision layer and flatten it."""
     oid = resolve_revision(repo, treeish)
@@ -226,15 +253,11 @@ def diff_tree(
             patterns=patterns,
         )
 
-    oid = resolve_revision(repo, left)
-    obj = repo.store.read(oid)
-    if not isinstance(obj, CommitObject):
-        raise ValueError("single-argument diff-tree requires a commit")
+    resolved = resolve_revision(repo, left)
+    oid, obj = _peel_commit(repo, resolved, left)
     new = dict(flatten_tree(repo, obj.tree))
-    if obj.parents:
-        parent = repo.store.read(obj.parents[0])
-        if not isinstance(parent, CommitObject):
-            raise ValueError(f"commit {oid} has a non-commit parent")
+    if obj.parents and not _is_shallow_boundary(repo, oid):
+        _, parent = _peel_commit(repo, obj.parents[0], obj.parents[0])
         old = dict(flatten_tree(repo, parent.tree))
     elif root:
         old = {}
