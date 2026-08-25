@@ -21,6 +21,7 @@ from .pack_cli import run_index_pack, run_unpack_objects
 from .pack_objects_cli import run_pack_objects
 from .remote_query import ls_remote, resolve_remote_url
 from .runtime import main as runtime_main
+from .show_index_cli import run_show_index
 
 
 def _stdin_bytes() -> bytes:
@@ -326,6 +327,7 @@ def main() -> None:
         "index-pack",
         "unpack-objects",
         "pack-objects",
+        "show-index",
     }
     if not argv or argv[0] not in commands:
         runtime_main()
@@ -348,8 +350,10 @@ def main() -> None:
             code = run_index_pack(argv[1:])
         elif argv[0] == "unpack-objects":
             code = run_unpack_objects(argv[1:])
-        else:
+        elif argv[0] == "pack-objects":
             code = run_pack_objects(argv[1:])
+        else:
+            code = run_show_index(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, FileExistsError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         code = 1
