@@ -6,13 +6,15 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
+from .objects import CommitObject
 from .ref_query import check_ref_format
 from .repo import Repository
 from .refs import ZERO_SHA
 
 _HEX = frozenset("0123456789abcdef")
+_MAX_SYMREF_DEPTH = 32
 
 
 @dataclass(frozen=True)
@@ -66,7 +68,7 @@ def _resolve_direct(repo: Repository, refname: str, *, deref: bool = True) -> Tu
     _validate_refname(refname)
     current = refname
     seen = set()
-    while True:
+    for _ in range(_MAX_SYMREF_DEPTH):
         if current in seen:
             raise RuntimeError(f"symbolic-ref cycle while resolving {refname!r}")
         seen.add(current)
@@ -82,6 +84,7 @@ def _resolve_direct(repo: Repository, refname: str, *, deref: bool = True) -> Tu
         if not _is_oid(value):
             raise RuntimeError(f"malformed ref {current}: expected a 64-hex object ID")
         return current, value.lower()
+    raise RuntimeError(f"symbolic-ref chain is too deep while resolving {refname!r}")
 
 
 def _resolve_new_oid(repo: Repository, value: str) -> str:
@@ -92,10 +95,14 @@ def _resolve_new_oid(repo: Repository, value: str) -> str:
         if not repo.store.exists(oid):
             raise KeyError(f"Object not found: {oid}")
         return oid
+    if value == "HEAD" or value.startswith("refs/"):
+        _, oid = _resolve_direct(repo, value, deref=True)
+        if oid and repo.store.exists(oid):
+            return oid
     oid = repo.refs.resolve(value) or repo.store.resolve_prefix(value)
-    if not oid or not repo.store.exists(oid):
+    if not oid or not _is_oid(oid) or not repo.store.exists(oid):
         raise KeyError(f"Unknown object: {value!r}")
-    return oid
+    return oid.lower()
 
 
 def _expected_old(repo: Repository, value: Optional[str]) -> Optional[str]:
@@ -114,6 +121,15 @@ def _check_old(refname: str, current: Optional[str], expected: Optional[str]) ->
         raise RuntimeError(
             f"cannot lock ref {refname!r}: expected {expected}, current value is {actual}"
         )
+
+
+def _validate_target(repo: Repository, physical_refname: str, oid: str) -> None:
+    obj = repo.store.read(oid)
+    if physical_refname == "HEAD" or physical_refname.startswith("refs/heads/"):
+        if not isinstance(obj, CommitObject):
+            raise ValueError(
+                f"trying to write non-commit object {oid} to branch-like ref {physical_refname!r}"
+            )
 
 
 def parse_update_records(records: Sequence[str]) -> List[RefUpdate]:
@@ -139,6 +155,23 @@ def parse_update_records(records: Sequence[str]) -> List[RefUpdate]:
     return updates
 
 
+def _snapshot_file(path: Path) -> Optional[bytes]:
+    return path.read_bytes() if path.exists() else None
+
+
+def _restore_file(path: Path, snapshot: Optional[bytes]) -> None:
+    if snapshot is None:
+        if path.exists():
+            path.unlink()
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(snapshot)
+
+
+def _log_path(repo: Repository, refname: str) -> Path:
+    return repo.pygit_dir / "logs" / ("HEAD" if refname == "HEAD" else refname)
+
+
 def update_refs(
     repo: Repository,
     updates: Sequence[RefUpdate],
@@ -146,7 +179,12 @@ def update_refs(
     message: str = "update-ref",
     deref: bool = True,
 ) -> None:
-    """Validate an entire ref transaction before changing any reference."""
+    """Validate an entire ref transaction before changing any reference.
+
+    Replacement files are prepared first. The publish phase snapshots both ref
+    and reflog files; if any filesystem operation fails, all touched files are
+    restored so callers do not observe a half-applied transaction.
+    """
     planned = []
     touched = set()
 
@@ -167,14 +205,15 @@ def update_refs(
             new_oid = _resolve_new_oid(repo, update.new_oid)
             if new_oid == ZERO_SHA:
                 raise ValueError("zero object ID is not valid for update/create")
+            _validate_target(repo, physical, new_oid)
             planned.append((physical, current, new_oid))
         elif update.action == "delete":
             planned.append((physical, current, None))
         else:
             raise ValueError(f"unsupported ref action: {update.action!r}")
 
-    # Prepare replacement files first, then publish with atomic os.replace.
     prepared = []
+    snapshots: Dict[Path, Optional[bytes]] = {}
     try:
         for refname, old_oid, new_oid in planned:
             path = repo.pygit_dir / "HEAD" if refname == "HEAD" else _ref_path(repo, refname)
@@ -187,6 +226,12 @@ def update_refs(
                 handle.write(new_oid + "\n")
             prepared.append((refname, path, old_oid, new_oid, Path(tmp_name)))
 
+        for refname, path, old_oid, new_oid, _ in prepared:
+            snapshots.setdefault(path, _snapshot_file(path))
+            snapshots.setdefault(_log_path(repo, refname), _snapshot_file(_log_path(repo, refname)))
+            if refname.startswith("refs/heads/") and repo.refs.get_head() == f"ref: {refname}":
+                snapshots.setdefault(_log_path(repo, "HEAD"), _snapshot_file(_log_path(repo, "HEAD")))
+
         for refname, path, old_oid, new_oid, temp in prepared:
             if new_oid is None:
                 if path.exists():
@@ -197,6 +242,10 @@ def update_refs(
             repo.refs._append_reflog(refname, old_oid, new_oid, message)
             if refname.startswith("refs/heads/") and repo.refs.get_head() == f"ref: {refname}":
                 repo.refs._append_reflog("HEAD", old_oid, new_oid, message)
+    except OSError:
+        for path, snapshot in snapshots.items():
+            _restore_file(path, snapshot)
+        raise
     finally:
         for _, _, _, _, temp in prepared:
             if temp is not None and temp.exists():
@@ -220,6 +269,22 @@ def update_ref(
 def set_symbolic_ref(repo: Repository, name: str, target: str, *, message: str = "symbolic-ref") -> None:
     _validate_refname(name)
     _validate_refname(target, allow_head=False)
+    if name == target:
+        raise ValueError("a symbolic ref cannot point to itself")
+
+    current = target
+    seen = {name}
+    for _ in range(_MAX_SYMREF_DEPTH):
+        if current in seen:
+            raise RuntimeError("symbolic-ref update would create a cycle")
+        seen.add(current)
+        next_target = symbolic_target(repo, current)
+        if next_target is None:
+            break
+        current = next_target
+    else:
+        raise RuntimeError("symbolic-ref chain is too deep")
+
     old_oid = _resolve_direct(repo, name, deref=True)[1]
     path = repo.pygit_dir / "HEAD" if name == "HEAD" else _ref_path(repo, name)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,10 +295,12 @@ def set_symbolic_ref(repo: Repository, name: str, target: str, *, message: str =
 
 def delete_symbolic_ref(repo: Repository, name: str, *, message: str = "symbolic-ref -d") -> None:
     _validate_refname(name)
+    if name == "HEAD":
+        raise ValueError("deleting 'HEAD' is not allowed")
     target = symbolic_target(repo, name)
     if target is None:
         raise RuntimeError(f"ref {name!r} is not a symbolic ref")
     old_oid = _resolve_direct(repo, name, deref=True)[1]
-    path = repo.pygit_dir / "HEAD" if name == "HEAD" else _ref_path(repo, name)
+    path = _ref_path(repo, name)
     path.unlink()
     repo.refs._append_reflog(name, old_oid, None, message, force=True)
