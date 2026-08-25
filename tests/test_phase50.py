@@ -50,7 +50,7 @@ class TestWriteTree:
         assert src_entry.mode == "040000"
         src = repo.store.read(src_entry.sha)
         assert isinstance(src, TreeObject)
-        assert [e.name for e in src.entries] == ["main.py", "lib"]
+        assert [e.name for e in src.entries] == ["lib", "main.py"]
         assert [(e.path, e.sha, e.mode) for e in repo.index.all_entries()] == before
 
     def test_empty_index_produces_empty_tree(self, tmp_path: Path) -> None:
@@ -65,7 +65,7 @@ class TestWriteTree:
         oid = write_tree(repo, prefix="src")
         tree = repo.store.read(oid)
         assert isinstance(tree, TreeObject)
-        assert [e.name for e in tree.entries] == ["main.py", "lib"]
+        assert [e.name for e in tree.entries] == ["lib", "main.py"]
         with pytest.raises(KeyError, match="no index entries"):
             write_tree(repo, prefix="missing")
 
