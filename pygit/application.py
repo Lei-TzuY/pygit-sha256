@@ -13,6 +13,7 @@ from .cat_file_cli import run_cat_file
 from .gc_cli import run_gc
 from .launcher import main as launcher_main
 from .ls_tree_cli import run_ls_tree
+from .merge_base_cli import run_merge_base
 from .reflog_expire_cli import run_reflog_expire
 from .reflog_show_cli import run_reflog_show
 from .show_ref_cli import run_show_ref
@@ -67,6 +68,10 @@ def main() -> None:
 
     if argv and argv[0] == "cat-file":
         _run_safe(run_cat_file, argv[1:])
+        return
+
+    if argv and argv[0] == "merge-base":
+        _run_safe(run_merge_base, argv[1:])
         return
 
     launcher_main()
