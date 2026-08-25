@@ -48,6 +48,7 @@ from .reflog_expire import (
     default_reflog_unreachable_before,
     expire_reflogs,
 )
+from .repack import RepackResult, repack
 from .remote_query import LsRemoteResult, RemoteRef, ls_remote, resolve_remote_url
 from .revision import (
     RevisionResult,
@@ -128,6 +129,8 @@ __all__ = [
     "default_reflog_expire_before",
     "default_reflog_unreachable_before",
     "expire_reflogs",
+    "RepackResult",
+    "repack",
     "RemoteRef",
     "LsRemoteResult",
     "resolve_remote_url",
