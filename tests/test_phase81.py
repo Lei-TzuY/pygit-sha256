@@ -8,9 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from pygit import Repository
+from pygit import ExcludeExistingResult, Repository, exclude_existing_refs
 from pygit.packed_refs import PackedRef, write_packed_refs
-from pygit.show_ref import exclude_existing_refs
 
 
 FAKE_OID = "a" * 64
@@ -57,6 +56,7 @@ def test_api_filters_storage_records_without_resolving_objects(tmp_path: Path) -
         ],
     )
 
+    assert isinstance(result, ExcludeExistingResult)
     assert result.output == b"three refs/heads/new\n"
     assert result.warnings == ()
     assert not repo.store.exists(FAKE_OID)
