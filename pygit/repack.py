@@ -184,7 +184,7 @@ def repack(
     )
     removed_names = tuple(pair.pack_path.name for pair in removable)
     packed_after = packed_before | selected_set
-    loose_candidates = _loose_candidates(repo, packed_after)
+    loose_candidates = _loose_candidates(repo, packed_after) if delete_redundant else ()
 
     if dry_run:
         return RepackResult(
@@ -211,7 +211,7 @@ def repack(
     if delete_redundant and selected:
         assert final_pack is not None
         final_stem = final_pack.stem
-        # Revalidate immediately before each destructive step.  Delete the index
+        # Revalidate immediately before each destructive step. Delete the index
         # first so an interrupted removal can leave only an ignored orphan pack.
         for pair in removable:
             if pair.stem == final_stem:
@@ -223,7 +223,7 @@ def repack(
             pair.pack_path.unlink()
             actually_removed.append(pair.pack_path.name)
 
-    prune_result = prune_packed(repo) if selected else None
+    prune_result = prune_packed(repo) if delete_redundant and selected else None
     return RepackResult(
         reachable=len(reachable),
         already_packed=len(reachable & packed_before),
