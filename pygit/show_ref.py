@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence, Tuple
 
+from .packed_refs import read_packed_refs
 from .plumbing import list_refs, peel_oid, verify_ref
 from .repo import Repository
 from .revision import abbreviate_oid
@@ -22,6 +23,24 @@ class ShowRefEntry:
     oid: str
     refname: str
     dereferenced: bool = False
+
+
+def ref_exists(repo: Repository, refname: str) -> bool:
+    """Return whether one exact local ref record exists.
+
+    This intentionally does not resolve the ref or inspect its target object.
+    A loose ref shadows packed storage and counts as existing even when its
+    recorded OID is missing or a symbolic target is dangling. Packed storage is
+    parsed strictly so corruption remains distinguishable from a missing ref.
+    """
+
+    if not refname.startswith("refs/"):
+        raise ValueError("--exists requires an exact ref name beginning with 'refs/'")
+    relative = refname[len("refs/") :]
+    path = repo.refs._path_under(repo.pygit_dir / "refs", relative)
+    if path.is_file():
+        return True
+    return refname in read_packed_refs(repo.pygit_dir)
 
 
 def show_refs(
