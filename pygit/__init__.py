@@ -41,6 +41,7 @@ from .pack_plumbing import (
 )
 from .prune import PruneResult, default_expire_before, prune
 from .prune_packed import PrunePackedResult, prune_packed
+from .repack import RepackResult, repack
 from .remote_query import LsRemoteResult, RemoteRef, ls_remote, resolve_remote_url
 from .revision import (
     RevisionResult,
@@ -116,6 +117,8 @@ __all__ = [
     "prune",
     "PrunePackedResult",
     "prune_packed",
+    "RepackResult",
+    "repack",
     "RemoteRef",
     "LsRemoteResult",
     "resolve_remote_url",
