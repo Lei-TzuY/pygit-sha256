@@ -9,7 +9,7 @@ import sys
 import pytest
 
 from pygit import Repository
-from pygit.objects import BlobObject, CommitObject, Identity, TreeEntry, TreeObject
+from pygit.objects import BlobObject, CommitObject, Identity, TagObject, TreeEntry, TreeObject
 from pygit.rev_list import rev_list
 
 
@@ -93,6 +93,23 @@ def test_multiple_positive_tips_and_all_refs(tmp_path: Path) -> None:
     assert two_tips == {h["left"], h["right"], h["root"]}
     assert every_ref == {h["tip"], h["merge"], h["left"], h["right"], h["root"], h["orphan"]}
     assert h["blob"] not in every_ref
+
+
+def test_all_refs_surfaces_broken_annotated_tag_targets(tmp_path: Path) -> None:
+    repo, h = _graph(tmp_path)
+    broken = repo.store.write(
+        TagObject(
+            target_sha="0" * 64,
+            target_type=b"commit",
+            tag_name="broken",
+            tagger=Identity("Tagger", "tagger@example.com", 1, "+0000"),
+            message="broken target",
+        )
+    )
+    repo.refs.set_tag("broken", broken)
+
+    with pytest.raises(KeyError, match="Object not found"):
+        rev_list(repo, all_refs=True)
 
 
 def test_symmetric_range_and_left_right_markers(tmp_path: Path) -> None:
