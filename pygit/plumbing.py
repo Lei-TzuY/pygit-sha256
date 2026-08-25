@@ -5,16 +5,17 @@ Graph and reference plumbing that is useful independently of the porcelain
 Repository methods.
 
 The helpers here intentionally operate on pygit's SHA-256 object database and
-``.pygit/refs`` namespace. They do not assume native Git's SHA-1 object size.
+its loose/packed reference namespace. They do not assume native Git's SHA-1
+object size.
 """
 
 from __future__ import annotations
 
 from collections import deque
-from pathlib import Path
 from typing import Dict, List, Sequence, Set, Tuple
 
 from .objects import CommitObject, TagObject
+from .packed_refs import read_packed_refs
 from .repo import Repository
 
 
@@ -30,20 +31,6 @@ def _resolve_object_id(repo: Repository, name: str) -> str:
     oid = repo.refs.resolve(name)
     if oid:
         return oid
-
-    if name.startswith("refs/"):
-        refs_root = (repo.pygit_dir / "refs").resolve()
-        path = (repo.pygit_dir / name).resolve()
-        try:
-            path.relative_to(refs_root)
-        except ValueError as exc:
-            raise ValueError(f"Invalid ref name: {name!r}") from exc
-        if path.is_file():
-            value = path.read_text(encoding="utf-8").strip()
-            if not _is_oid(value):
-                raise RuntimeError(f"Malformed ref {name}: expected a 64-hex object ID")
-            return value
-
     oid = repo.store.resolve_prefix(name)
     if oid:
         return oid
@@ -76,12 +63,7 @@ def _commit(repo: Repository, oid: str) -> CommitObject:
 
 
 def resolve_commit(repo: Repository, revision: str) -> str:
-    """
-    Resolve a commit-ish revision and peel annotated tags.
-
-    ``~N`` and ``^N`` suffixes are interpreted after tag peeling, so expressions
-    such as ``v2~1`` work even though the ref itself points at a tag object.
-    """
+    """Resolve a commit-ish revision and peel annotated tags."""
     split_at = len(revision)
     for marker in ("~", "^"):
         pos = revision.find(marker)
@@ -127,7 +109,6 @@ def resolve_commit(repo: Repository, revision: str) -> str:
 
 
 def _shallow_boundaries(repo: Repository) -> Set[str]:
-    """Return commit IDs that must be treated as roots in a shallow clone."""
     path = repo.pygit_dir / "shallow"
     if not path.exists():
         return set()
@@ -161,13 +142,7 @@ def ancestor_distances(repo: Repository, start: str) -> Dict[str, int]:
 
 
 def merge_bases(repo: Repository, left: str, right: str) -> List[str]:
-    """
-    Return all *best* common ancestors of two revisions.
-
-    A common ancestor is discarded when it is itself an ancestor of another
-    common ancestor. The remaining commits are Git's merge-base candidates.
-    Results are ordered deterministically by graph distance and then object ID.
-    """
+    """Return all best common ancestors of two revisions."""
     left_sha = resolve_commit(repo, left)
     right_sha = resolve_commit(repo, right)
     left_dist = ancestor_distances(repo, left_sha)
@@ -176,7 +151,6 @@ def merge_bases(repo: Repository, left: str, right: str) -> List[str]:
     if not common:
         return []
 
-    # Mark common ancestors that are dominated by a newer common ancestor.
     dominated: Set[str] = set()
     for candidate in common:
         candidate_ancestors = ancestor_distances(repo, candidate)
@@ -194,18 +168,28 @@ def merge_bases(repo: Repository, left: str, right: str) -> List[str]:
 
 
 def is_ancestor(repo: Repository, ancestor: str, descendant: str) -> bool:
-    """Return whether *ancestor* is reachable from *descendant* via parents."""
     ancestor_sha = resolve_commit(repo, ancestor)
     descendant_sha = resolve_commit(repo, descendant)
     return ancestor_sha in ancestor_distances(repo, descendant_sha)
 
 
 def _matches_ref_pattern(refname: str, pattern: str) -> bool:
-    """Match Git show-ref style suffix patterns on complete path components."""
     pattern = pattern.strip("/")
     return bool(pattern) and (
         refname == pattern or refname.endswith("/" + pattern)
     )
+
+
+def _all_refnames(repo: Repository) -> Set[str]:
+    names = set(read_packed_refs(repo.pygit_dir))
+    refs_root = repo.pygit_dir / "refs"
+    if refs_root.exists():
+        names.update(
+            "refs/" + path.relative_to(refs_root).as_posix()
+            for path in refs_root.rglob("*")
+            if path.is_file()
+        )
+    return names
 
 
 def list_refs(
@@ -216,13 +200,10 @@ def list_refs(
     tags: bool = False,
     patterns: Sequence[str] = (),
 ) -> List[Tuple[str, str]]:
-    """
-    Return ``(oid, refname)`` pairs from the repository ref namespace.
+    """Return ``(oid, refname)`` pairs across loose and packed storage.
 
-    With neither *heads* nor *tags*, all refs below ``refs/`` are returned.
-    Supplying either filter restricts output to the selected namespaces.
-    Patterns follow ``git show-ref`` suffix semantics rather than substring
-    matching (``main`` matches ``refs/heads/main`` but not ``domain``).
+    Loose direct or symbolic refs shadow packed entries of the same name. Broken
+    symbolic refs are omitted; malformed direct or packed refs fail loudly.
     """
     result: List[Tuple[str, str]] = []
 
@@ -231,52 +212,48 @@ def list_refs(
         if head and (not patterns or any(_matches_ref_pattern("HEAD", p) for p in patterns)):
             result.append((head, "HEAD"))
 
-    refs_root = repo.pygit_dir / "refs"
-    if not refs_root.exists():
-        return result
-
     selected_namespaces: Set[str] = set()
     if heads:
         selected_namespaces.add("heads")
     if tags:
         selected_namespaces.add("tags")
 
-    for path in sorted(p for p in refs_root.rglob("*") if p.is_file()):
-        relative = path.relative_to(refs_root).as_posix()
+    for refname in sorted(_all_refnames(repo)):
+        relative = refname[len("refs/") :]
         namespace = relative.split("/", 1)[0]
         if selected_namespaces and namespace not in selected_namespaces:
             continue
-
-        refname = f"refs/{relative}"
-        if patterns and not any(_matches_ref_pattern(refname, p) for p in patterns):
+        if patterns and not any(_matches_ref_pattern(refname, pattern) for pattern in patterns):
             continue
 
-        oid = path.read_text(encoding="utf-8").strip()
+        oid = repo.refs.resolve(refname)
+        if oid is None:
+            continue
         if not _is_oid(oid):
             raise RuntimeError(f"Malformed ref {refname}: expected a 64-hex object ID")
-        result.append((oid, refname))
+        result.append((oid.lower(), refname))
 
     return result
 
 
 def verify_ref(repo: Repository, refname: str) -> Tuple[str, str]:
-    """Resolve one exact, fully-qualified ``refs/...`` name."""
+    """Resolve one exact, fully-qualified loose or packed ref name."""
     if not refname.startswith("refs/"):
         raise ValueError("--verify requires an exact ref name beginning with 'refs/'")
 
-    refs_root = (repo.pygit_dir / "refs").resolve()
-    path = (repo.pygit_dir / refname).resolve()
-    try:
-        path.relative_to(refs_root)
-    except ValueError as exc:
-        raise ValueError(f"Invalid ref name: {refname!r}") from exc
+    # Force traversal validation through RefStore even when a malicious path does
+    # not currently exist.
+    relative = refname[len("refs/") :]
+    repo.refs._path_under(repo.pygit_dir / "refs", relative)
 
-    if not path.is_file():
+    if refname not in _all_refnames(repo):
         raise KeyError(refname)
-    oid = path.read_text(encoding="utf-8").strip()
+    oid = repo.refs.resolve(refname)
+    if oid is None:
+        raise KeyError(refname)
     if not _is_oid(oid):
         raise RuntimeError(f"Malformed ref {refname}: expected a 64-hex object ID")
-    return oid, refname
+    return oid.lower(), refname
 
 
 def peel_oid(repo: Repository, oid: str) -> str:
