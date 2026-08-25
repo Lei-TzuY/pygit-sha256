@@ -11,7 +11,7 @@ from __future__ import annotations
 import fnmatch
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Union
+from typing import Iterable, List, Optional, Sequence, Union
 
 from .objects import CommitObject, TagObject
 from .plumbing import ancestor_distances, is_ancestor, list_refs, peel_oid, resolve_commit
@@ -46,6 +46,22 @@ def _match_pattern(refname: str, pattern: str) -> bool:
         return fnmatch.fnmatchcase(refname, pattern)
     pattern = pattern.rstrip("/")
     return refname == pattern or refname.startswith(pattern + "/")
+
+
+def read_ref_patterns(lines: Iterable[str]) -> List[str]:
+    """Read newline-delimited ``for-each-ref --stdin`` patterns.
+
+    Only the record terminator is removed; leading/trailing spaces remain part
+    of the pattern. Empty records are ignored, matching native Git's stdin
+    pattern mode.
+    """
+
+    patterns: List[str] = []
+    for raw in lines:
+        pattern = raw.rstrip("\r\n")
+        if pattern:
+            patterns.append(pattern)
+    return patterns
 
 
 def _record(repo: Repository, oid: str, refname: str) -> RefRecord:
@@ -88,6 +104,7 @@ def query_refs(
     repo: Repository,
     *,
     patterns: Sequence[str] = (),
+    exclude_patterns: Sequence[str] = (),
     sort_keys: Sequence[str] = (),
     count: Optional[int] = None,
     points_at: Sequence[str] = (),
@@ -98,6 +115,12 @@ def query_refs(
 ) -> List[RefRecord]:
     """
     Return refs after Git-style object, pattern, graph, sort, and count filters.
+
+    ``patterns`` are inclusive full-ref prefix/glob selectors. Repeated
+    ``exclude_patterns`` use the same matcher and remove matching refs after
+    inclusion but before object inspection, graph predicates, sorting, or count
+    limiting. Exclusions therefore compose as an OR filter without forcing
+    excluded broken-object refs through metadata loading.
 
     ``points_at`` accepts arbitrary object-ish expressions. A ref matches when
     any object in its direct/annotated-tag peel chain equals a requested object.
@@ -115,7 +138,8 @@ def query_refs(
     records = [
         _record(repo, oid, refname)
         for oid, refname in list_refs(repo)
-        if not patterns or any(_match_pattern(refname, p) for p in patterns)
+        if (not patterns or any(_match_pattern(refname, p) for p in patterns))
+        and not any(_match_pattern(refname, p) for p in exclude_patterns)
     ]
 
     point_targets = {resolve_revision(repo, expression) for expression in points_at}
