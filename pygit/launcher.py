@@ -22,6 +22,7 @@ from .pack_objects_cli import run_pack_objects
 from .prune_cli import run_prune
 from .prune_packed_cli import run_prune_packed
 from .remote_query import ls_remote, resolve_remote_url
+from .repack_cli import run_repack
 from .runtime import main as runtime_main
 from .show_index_cli import run_show_index
 
@@ -332,6 +333,7 @@ def main() -> None:
         "show-index",
         "prune-packed",
         "prune",
+        "repack",
     }
     if not argv or argv[0] not in commands:
         runtime_main()
@@ -360,8 +362,10 @@ def main() -> None:
             code = run_show_index(argv[1:])
         elif argv[0] == "prune-packed":
             code = run_prune_packed(argv[1:])
-        else:
+        elif argv[0] == "prune":
             code = run_prune(argv[1:])
+        else:
+            code = run_repack(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, FileExistsError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         code = 1
