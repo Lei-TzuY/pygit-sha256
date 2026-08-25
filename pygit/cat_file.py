@@ -129,16 +129,33 @@ def batch_format_uses_rest(format_string: Optional[str]) -> bool:
     return any(kind == "atom" and value == "rest" for kind, value in _compile_batch_format(format_string))
 
 
-def split_batch_input(raw: str, format_string: Optional[str] = None) -> Tuple[str, str]:
+def _strip_record_terminator(raw: str, record_terminator: str) -> str:
+    if record_terminator not in {"\n", "\0"}:
+        raise ValueError("record terminator must be newline or NUL")
+    if record_terminator == "\0":
+        return raw[:-1] if raw.endswith("\0") else raw
+    return raw.rstrip("\r\n")
+
+
+def _validate_output_terminator(record_terminator: bytes) -> None:
+    if record_terminator not in {b"\n", b"\0"}:
+        raise ValueError("record terminator must be newline or NUL")
+
+
+def split_batch_input(
+    raw: str,
+    format_string: Optional[str] = None,
+    *,
+    record_terminator: str = "\n",
+) -> Tuple[str, str]:
     """Split one batch input record into object expression and ``%(rest)`` text.
 
-    Without ``%(rest)`` the entire newline-stripped record is the object-ish,
-    preserving spaces in revision paths. When ``%(rest)`` is requested, Git
-    treats the first whitespace run as the separator and removes that run while
-    preserving the remainder verbatim.
+    Without ``%(rest)`` the complete delimiter-stripped record is the object-ish.
+    With ``%(rest)``, the first whitespace run separates the object expression
+    from rest text. Under NUL framing embedded newlines remain ordinary data.
     """
 
-    line = raw.rstrip("\r\n")
+    line = _strip_record_terminator(raw, record_terminator)
     if not batch_format_uses_rest(format_string):
         return line, ""
     match = _BATCH_INPUT_SEPARATOR_RE.search(line)
@@ -152,9 +169,11 @@ def format_batch_record(
     format_string: str,
     *,
     rest: str = "",
+    record_terminator: bytes = b"\n",
 ) -> bytes:
     """Render one successful object record with a validated custom batch format."""
 
+    _validate_output_terminator(record_terminator)
     values = {
         "objectname": record.oid,
         "objecttype": record.type_name,
@@ -165,7 +184,7 @@ def format_batch_record(
         value if kind == "literal" else values[value]
         for kind, value in _compile_batch_format(format_string)
     )
-    return (rendered + "\n").encode("utf-8")
+    return rendered.encode("utf-8") + record_terminator
 
 
 def format_batch_object(
@@ -175,29 +194,36 @@ def format_batch_object(
     contents: bool = False,
     format_string: Optional[str] = None,
     rest: str = "",
+    record_terminator: bytes = b"\n",
 ) -> bytes:
     """Render one batch response using the default or a custom header format.
 
     Missing or malformed object expressions are record-local failures and use
     Git's canonical ``<input> missing`` form regardless of custom formatting.
-    Storage/I/O failures are intentionally not swallowed so callers can
-    distinguish repository corruption from a missing object name.
+    ``record_terminator`` controls only protocol framing; object bytes are never
+    rewritten, even when they contain newlines or NULs.
     """
 
+    _validate_output_terminator(record_terminator)
     if format_string is not None:
         _compile_batch_format(format_string)
     try:
         record = inspect_object(repo, expression)
     except (KeyError, ValueError, RuntimeError):
-        return expression.encode("utf-8") + b" missing\n"
+        return expression.encode("utf-8") + b" missing" + record_terminator
 
     if format_string is None:
-        header = f"{record.oid} {record.type_name} {record.size}\n".encode("ascii")
+        header = f"{record.oid} {record.type_name} {record.size}".encode("ascii") + record_terminator
     else:
-        header = format_batch_record(record, format_string, rest=rest)
+        header = format_batch_record(
+            record,
+            format_string,
+            rest=rest,
+            record_terminator=record_terminator,
+        )
     if not contents:
         return header
-    return header + record.content + b"\n"
+    return header + record.content + record_terminator
 
 
 def batch_all_objects(
@@ -205,14 +231,15 @@ def batch_all_objects(
     *,
     contents: bool = False,
     format_string: Optional[str] = None,
+    record_terminator: bytes = b"\n",
 ) -> Iterable[bytes]:
     """Yield batch responses for every object known to loose or packed storage.
 
-    Enumeration is independent of refs and reachability, so unreachable objects
-    are included. Custom ``%(rest)`` expands to an empty string because there is
-    no stdin record associated with an all-object query.
+    Enumeration is independent of refs and reachability. Custom ``%(rest)`` is
+    empty because there is no stdin record associated with an all-object query.
     """
 
+    _validate_output_terminator(record_terminator)
     if format_string is not None:
         _compile_batch_format(format_string)
     for oid in all_object_ids(repo):
@@ -221,19 +248,18 @@ def batch_all_objects(
             oid,
             contents=contents,
             format_string=format_string,
+            record_terminator=record_terminator,
         )
 
 
-def parse_batch_command(raw: str) -> CatFileBatchCommand:
-    """Parse one default-format ``--batch-command`` input line.
+def parse_batch_command(
+    raw: str,
+    *,
+    record_terminator: str = "\n",
+) -> CatFileBatchCommand:
+    """Parse one ``--batch-command`` protocol record."""
 
-    The protocol deliberately uses an ASCII space between the command and its
-    object argument. Everything after that first space is part of the object
-    expression, including additional leading spaces, matching Git's command
-    protocol rather than generic whitespace splitting.
-    """
-
-    line = raw.rstrip("\r\n")
+    line = _strip_record_terminator(raw, record_terminator)
     if not line:
         raise ValueError("empty cat-file batch command")
 
@@ -261,23 +287,24 @@ def run_batch_commands(
     *,
     buffered: bool = False,
     format_string: Optional[str] = None,
+    input_terminator: str = "\n",
+    output_terminator: bytes = b"\n",
 ) -> Iterable[bytes]:
     """Execute ``--batch-command`` input and yield output flush chunks.
 
-    Without buffering each object request yields one chunk immediately. With
-    ``buffered=True`` responses accumulate until ``flush``; pending data is also
-    yielded at clean end-of-input, as process exit flushes Git's buffered
-    output. If parsing fails before a flush, pending buffered responses are not
-    yielded. ``%(rest)`` is rendered as empty in command mode because the
-    command protocol treats the complete text after ``info ``/``contents `` as
-    the object expression rather than applying the batch-input rest split.
+    Input and output delimiters are independent protocol parameters so callers
+    can model newline or NUL framing without touching object content. With
+    buffering, responses accumulate until ``flush`` or clean end-of-input.
     """
 
+    _validate_output_terminator(output_terminator)
+    if input_terminator not in {"\n", "\0"}:
+        raise ValueError("record terminator must be newline or NUL")
     if format_string is not None:
         _compile_batch_format(format_string)
     pending = bytearray()
     for raw in commands:
-        command = parse_batch_command(raw)
+        command = parse_batch_command(raw, record_terminator=input_terminator)
         if command.action == "flush":
             if not buffered:
                 raise ValueError("flush is only valid with --buffer")
@@ -291,6 +318,7 @@ def run_batch_commands(
             command.expression,
             contents=command.action == "contents",
             format_string=format_string,
+            record_terminator=output_terminator,
         )
         if buffered:
             pending.extend(payload)
