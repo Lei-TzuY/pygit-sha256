@@ -39,6 +39,7 @@ from .pack_plumbing import (
     parse_pack_bytes,
     unpack_objects,
 )
+from .prune_packed import PrunePackedResult, prune_packed
 from .remote_query import LsRemoteResult, RemoteRef, ls_remote, resolve_remote_url
 from .revision import (
     RevisionResult,
@@ -109,6 +110,8 @@ __all__ = [
     "build_index_bytes",
     "index_pack",
     "unpack_objects",
+    "PrunePackedResult",
+    "prune_packed",
     "RemoteRef",
     "LsRemoteResult",
     "resolve_remote_url",
