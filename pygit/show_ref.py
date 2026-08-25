@@ -42,6 +42,8 @@ def _stored_refnames(repo: Repository) -> Set[str]:
     refs_root = repo.pygit_dir / "refs"
     if not refs_root.exists():
         return names
+    if refs_root.is_symlink():
+        raise RuntimeError("symbolic-link refs storage is not supported")
     if not refs_root.is_dir():
         raise RuntimeError("refs storage is not a directory")
 
