@@ -23,6 +23,7 @@ from .checkout_index import checkout_index
 from .hash_object import hash_object_data, hash_path, object_envelope, write_object_data
 from .diff_plumbing import DiffEntry, diff_files, diff_index, diff_tree, format_diff_entries
 from .fsck import FsckIssue, FsckReport, fsck
+from .merge_tree import MergeConflict, MergeTreeResult, merge_tree
 from .revision import (
     RevisionResult,
     abbreviate_oid,
@@ -66,6 +67,9 @@ __all__ = [
     "FsckIssue",
     "FsckReport",
     "fsck",
+    "MergeConflict",
+    "MergeTreeResult",
+    "merge_tree",
     "RevisionResult",
     "resolve_revision",
     "resolve_abbreviation",
