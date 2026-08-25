@@ -14,6 +14,7 @@ from typing import Sequence
 from .entrypoint import _find_repo
 from .fsck import fsck
 from .hash_object import hash_object_data, write_object_data
+from .merge_file import merge_file
 from .merge_tree import merge_tree
 from .runtime import main as runtime_main
 
@@ -182,9 +183,69 @@ def _run_merge_tree(argv: Sequence[str]) -> int:
     return 1
 
 
+def _run_merge_file(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit merge-file",
+        description="Merge two file versions relative to a common base.",
+    )
+    parser.add_argument(
+        "-p",
+        "--stdout",
+        action="store_true",
+        help="write the merged result to stdout instead of replacing CURRENT",
+    )
+    parser.add_argument(
+        "--diff3",
+        action="store_true",
+        help="include the base version in conflict regions",
+    )
+    parser.add_argument(
+        "--marker-size",
+        type=int,
+        default=7,
+        metavar="N",
+        help="use N-character conflict markers (default: 7)",
+    )
+    parser.add_argument(
+        "-L",
+        action="append",
+        default=[],
+        dest="labels",
+        metavar="LABEL",
+        help="override current/base/other conflict labels; may be supplied up to three times",
+    )
+    parser.add_argument("current", metavar="CURRENT")
+    parser.add_argument("base", metavar="BASE")
+    parser.add_argument("other", metavar="OTHER")
+    args = parser.parse_args(list(argv))
+
+    if len(args.labels) > 3:
+        parser.error("-L may be supplied at most three times")
+    defaults = [args.current, args.base, args.other]
+    for index, label in enumerate(args.labels):
+        defaults[index] = label
+
+    result = merge_file(
+        args.current,
+        args.base,
+        args.other,
+        labels=(defaults[0], defaults[1], defaults[2]),
+        style="diff3" if args.diff3 else "merge",
+        marker_size=args.marker_size,
+        write_current=not args.stdout,
+    )
+    if args.stdout:
+        output = getattr(sys.stdout, "buffer", None)
+        if output is not None:
+            output.write(result.data)
+        else:
+            sys.stdout.write(result.data.decode("utf-8"))
+    return min(result.conflicts, 127)
+
+
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"hash-object", "fsck", "merge-tree"}
+    commands = {"hash-object", "fsck", "merge-tree", "merge-file"}
     if not argv or argv[0] not in commands:
         runtime_main()
         return
@@ -194,8 +255,10 @@ def main() -> None:
             code = _run_hash_object(argv[1:])
         elif argv[0] == "fsck":
             code = _run_fsck(argv[1:])
-        else:
+        elif argv[0] == "merge-tree":
             code = _run_merge_tree(argv[1:])
+        else:
+            code = _run_merge_file(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         code = 1
