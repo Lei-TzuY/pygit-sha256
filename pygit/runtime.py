@@ -1,8 +1,10 @@
 """Installed CLI router.
 
 ``cat-file`` is handled here as one coherent command so its original single-
-object modes and newer batch modes share the same object-ish resolver. Other
-commands continue through the existing dispatch stack unchanged.
+object modes and newer batch modes share the same object-ish resolver. The
+``checkout-index`` plumbing command also lives here to avoid legacy parser
+conflicts while the remaining commands continue through the existing dispatch
+stack unchanged.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import sys
 from typing import Sequence
 
 from .cat_file import inspect_object, object_exists
+from .checkout_index import checkout_index
 from .command import main as command_main
 from .entrypoint import _find_repo
 from .objects import CommitObject, TreeObject
@@ -80,15 +83,42 @@ def _run_cat_file(argv: Sequence[str]) -> int:
     return 0
 
 
+def _run_checkout_index(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit checkout-index",
+        description="Copy files from the index to the working tree.",
+    )
+    parser.add_argument("-a", "--all", action="store_true", help="checkout all index entries")
+    parser.add_argument("-f", "--force", action="store_true", help="overwrite existing files")
+    parser.add_argument("--prefix", default="", metavar="PREFIX", help="write entries beneath PREFIX")
+    parser.add_argument("path", nargs="*", metavar="PATH")
+    args = parser.parse_args(list(argv))
+    if args.all and args.path:
+        parser.error("--all cannot be combined with explicit paths")
+
+    repo = _find_repo()
+    checkout_index(
+        repo,
+        args.path,
+        all_entries=args.all,
+        force=args.force,
+        prefix=args.prefix,
+    )
+    return 0
+
+
 def main() -> None:
     argv = sys.argv[1:]
-    if argv and argv[0] == "cat-file":
-        try:
+    try:
+        if argv and argv[0] == "cat-file":
             code = _run_cat_file(argv[1:])
-        except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            code = 1
-        if code:
-            raise SystemExit(code)
-        return
-    command_main()
+        elif argv and argv[0] == "checkout-index":
+            code = _run_checkout_index(argv[1:])
+        else:
+            command_main()
+            return
+    except (RuntimeError, ValueError, KeyError, FileNotFoundError, FileExistsError, IsADirectoryError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        code = 1
+    if code:
+        raise SystemExit(code)
