@@ -159,7 +159,7 @@ class TestPhase51CLI:
         monkeypatch.setattr("sys.stdin", io.StringIO(
             f"create refs/heads/a {one}\n"
             f"create refs/heads/b {two}\n"
-            f"verify refs/heads/a {one}\n"
+            f"verify refs/heads/main {two}\n"
         ))
         assert dispatch(["update-ref", "--stdin", "-m", "batch"]) == 0
         assert repo.refs.get_branch("a") == one
