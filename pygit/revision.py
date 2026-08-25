@@ -61,24 +61,32 @@ def _resolve_reflog_selector(repo: Repository, expression: str) -> Optional[str]
     """Resolve ``REF@{N}`` using the strict Phase 77 reflog reader."""
     match = _REFLOG_SELECTOR_RE.fullmatch(expression)
     if match is None:
+        if "@{" in expression:
+            raise ValueError(f"Malformed reflog selector: {expression!r}")
         return None
 
     ref, raw_index = match.groups()
     if not ref:
         raise ValueError(f"Invalid reflog selector: {expression!r}")
+    if "@{" in ref:
+        raise ValueError(f"Nested reflog selectors are not supported: {expression!r}")
     if not raw_index or not raw_index.isdigit():
         raise ValueError(
             f"Only non-negative numeric reflog selectors are supported: {expression!r}"
         )
 
-    index = int(raw_index)
     # Local import keeps revision parsing independent from the application
     # routing layer and avoids introducing a module-import cycle through repo.py.
     from .reflog_show import show_reflog
 
-    entries = show_reflog(repo, ref, max_count=index + 1)
-    if len(entries) <= index:
+    entries = show_reflog(repo, ref)
+    significant = raw_index.lstrip("0") or "0"
+    limit = str(len(entries))
+    if len(significant) > len(limit) or (
+        len(significant) == len(limit) and significant >= limit
+    ):
         raise KeyError(f"Reflog selector is out of range: {expression!r}")
+    index = int(significant)
 
     oid = entries[index].new_oid.lower()
     if oid == _ZERO_OID:
