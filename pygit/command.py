@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 from .cli import main as legacy_main
 from .commit_plumbing import commit_tree, read_message_file, write_tree
+from .diff_plumbing import diff_files, diff_index, diff_tree, format_diff_entries
 from .entrypoint import _find_repo, dispatch as extended_dispatch
 from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
 from .name_rev import abbreviated_oid, name_all, name_revisions
@@ -31,6 +32,9 @@ _COMMANDS = {
     "merge-base",
     "name-rev",
     "pack-refs",
+    "diff-tree",
+    "diff-index",
+    "diff-files",
 }
 
 
@@ -144,26 +148,10 @@ def _run_merge_base(argv: Sequence[str]) -> int:
         description="Find best common ancestors across commit graphs.",
     )
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument(
-        "--is-ancestor",
-        action="store_true",
-        help="test whether the first commit is an ancestor of the second",
-    )
-    mode.add_argument(
-        "--octopus",
-        action="store_true",
-        help="find common ancestors shared by every supplied commit",
-    )
-    mode.add_argument(
-        "--independent",
-        action="store_true",
-        help="print commits not reachable from any other supplied commit",
-    )
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        help="print all best merge bases instead of only the first",
-    )
+    mode.add_argument("--is-ancestor", action="store_true", help="test whether the first commit is an ancestor of the second")
+    mode.add_argument("--octopus", action="store_true", help="find common ancestors shared by every supplied commit")
+    mode.add_argument("--independent", action="store_true", help="print commits not reachable from any other supplied commit")
+    parser.add_argument("--all", action="store_true", help="print all best merge bases instead of only the first")
     parser.add_argument("commit", nargs="+", metavar="COMMIT")
     args = parser.parse_args(list(argv))
 
@@ -183,11 +171,7 @@ def _run_merge_base(argv: Sequence[str]) -> int:
     if len(args.commit) < 2:
         parser.error("merge-base requires at least two commits")
 
-    bases = (
-        octopus_merge_bases(repo, args.commit)
-        if args.octopus
-        else merge_bases_many(repo, args.commit)
-    )
+    bases = octopus_merge_bases(repo, args.commit) if args.octopus else merge_bases_many(repo, args.commit)
     if not bases:
         return 1
     for oid in bases if args.all else bases[:1]:
@@ -196,19 +180,10 @@ def _run_merge_base(argv: Sequence[str]) -> int:
 
 
 def _run_name_rev(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(
-        prog="pygit name-rev",
-        description="Find symbolic names for commits from refs and ancestry paths.",
-    )
+    parser = argparse.ArgumentParser(prog="pygit name-rev", description="Find symbolic names for commits from refs and ancestry paths.")
     parser.add_argument("--all", action="store_true", help="name every commit reachable from selected refs")
     parser.add_argument("--tags", action="store_true", help="use only refs/tags/* as naming anchors")
-    parser.add_argument(
-        "--refs",
-        action="append",
-        default=[],
-        metavar="PATTERN",
-        help="limit naming anchors by glob pattern; may be supplied repeatedly",
-    )
+    parser.add_argument("--refs", action="append", default=[], metavar="PATTERN", help="limit naming anchors by glob pattern; may be supplied repeatedly")
     parser.add_argument("--name-only", action="store_true", help="print only the symbolic name")
     parser.add_argument("--no-undefined", action="store_true", help="fail if any requested commit cannot be named")
     parser.add_argument("--always", action="store_true", help="fall back to a 12-hex object abbreviation")
@@ -223,11 +198,7 @@ def _run_name_rev(argv: Sequence[str]) -> int:
         parser.error("--no-undefined and --always are mutually exclusive")
 
     repo = _find_repo()
-    records = (
-        name_all(repo, tags_only=args.tags, ref_patterns=args.refs)
-        if args.all
-        else name_revisions(repo, args.commit, tags_only=args.tags, ref_patterns=args.refs)
-    )
+    records = name_all(repo, tags_only=args.tags, ref_patterns=args.refs) if args.all else name_revisions(repo, args.commit, tags_only=args.tags, ref_patterns=args.refs)
 
     unnamed = [record for record in records if record.name is None]
     if unnamed and args.no_undefined:
@@ -247,17 +218,74 @@ def _run_name_rev(argv: Sequence[str]) -> int:
 
 
 def _run_pack_refs(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(
-        prog="pygit pack-refs",
-        description="Pack loose references into .pygit/packed-refs.",
-    )
+    parser = argparse.ArgumentParser(prog="pygit pack-refs", description="Pack loose references into .pygit/packed-refs.")
     parser.add_argument("--all", action="store_true", help="pack all direct refs below refs/, not only tags")
     parser.add_argument("--no-prune", action="store_true", help="keep loose refs after writing packed-refs")
     args = parser.parse_args(list(argv))
-
     repo = _find_repo()
     pack_refs(repo, all_refs=args.all, prune=not args.no_prune)
     return 0
+
+
+def _split_pathspec(argv: Sequence[str]) -> Tuple[Sequence[str], Sequence[str]]:
+    values = list(argv)
+    if "--" not in values:
+        return values, ()
+    index = values.index("--")
+    return values[:index], values[index + 1 :]
+
+
+def _add_diff_output_options(parser: argparse.ArgumentParser) -> None:
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--name-only", action="store_true", help="show only changed paths")
+    output.add_argument("--name-status", action="store_true", help="show status and path")
+    output.add_argument("--raw", action="store_true", help="show raw metadata (the default)")
+    parser.add_argument("-z", action="store_true", help="terminate records with NUL")
+    parser.add_argument("--exit-code", action="store_true", help="exit 1 when differences exist")
+    parser.add_argument("--quiet", action="store_true", help="suppress output and exit 1 on differences")
+
+
+def _finish_diff(entries, args: argparse.Namespace) -> int:
+    if not args.quiet:
+        sys.stdout.buffer.write(
+            format_diff_entries(entries, name_only=args.name_only, name_status=args.name_status, nul_terminated=args.z)
+        )
+    return 1 if entries and (args.exit_code or args.quiet) else 0
+
+
+def _run_diff_tree(argv: Sequence[str]) -> int:
+    command_argv, patterns = _split_pathspec(argv)
+    parser = argparse.ArgumentParser(prog="pygit diff-tree", description="Compare tree objects without touching the index or worktree.")
+    parser.add_argument("-r", action="store_true", help="accepted for Git compatibility; recursion is the default")
+    parser.add_argument("--root", action="store_true", help="show a root commit against an empty tree")
+    _add_diff_output_options(parser)
+    parser.add_argument("treeish", nargs="+", metavar="TREEISH")
+    args = parser.parse_args(list(command_argv))
+    if len(args.treeish) not in {1, 2}:
+        parser.error("diff-tree requires one or two tree-ish arguments")
+    repo = _find_repo()
+    entries = diff_tree(repo, args.treeish[0], args.treeish[1] if len(args.treeish) == 2 else None, root=args.root, patterns=patterns)
+    return _finish_diff(entries, args)
+
+
+def _run_diff_index(argv: Sequence[str]) -> int:
+    command_argv, patterns = _split_pathspec(argv)
+    parser = argparse.ArgumentParser(prog="pygit diff-index", description="Compare a tree-ish with the index or tracked worktree.")
+    parser.add_argument("--cached", action="store_true", help="compare tree-ish with the index")
+    _add_diff_output_options(parser)
+    parser.add_argument("treeish", metavar="TREEISH")
+    args = parser.parse_args(list(command_argv))
+    repo = _find_repo()
+    return _finish_diff(diff_index(repo, args.treeish, cached=args.cached, patterns=patterns), args)
+
+
+def _run_diff_files(argv: Sequence[str]) -> int:
+    command_argv, patterns = _split_pathspec(argv)
+    parser = argparse.ArgumentParser(prog="pygit diff-files", description="Compare index entries with the tracked working tree.")
+    _add_diff_output_options(parser)
+    args = parser.parse_args(list(command_argv))
+    repo = _find_repo()
+    return _finish_diff(diff_files(repo, patterns=patterns), args)
 
 
 def dispatch(argv: Sequence[str]) -> Optional[int]:
@@ -275,7 +303,13 @@ def dispatch(argv: Sequence[str]) -> Optional[int]:
                 return _run_merge_base(argv[1:])
             if argv[0] == "name-rev":
                 return _run_name_rev(argv[1:])
-            return _run_pack_refs(argv[1:])
+            if argv[0] == "pack-refs":
+                return _run_pack_refs(argv[1:])
+            if argv[0] == "diff-tree":
+                return _run_diff_tree(argv[1:])
+            if argv[0] == "diff-index":
+                return _run_diff_index(argv[1:])
+            return _run_diff_files(argv[1:])
         except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
