@@ -20,6 +20,27 @@ def test_merge_file_data_combines_non_overlapping_line_edits() -> None:
     assert result.data == b"ONE\ntwo\nTHREE\n"
 
 
+def test_transitive_overlapping_hunks_form_one_complete_conflict() -> None:
+    result = merge_file_data(
+        b"x\ny\nz\n",
+        b"a\nb\nc\n",
+        b"A\nb\nC\n",
+        labels=("ours", "base", "theirs"),
+        style="diff3",
+    )
+
+    assert result.conflicts == 1
+    assert result.data == (
+        b"<<<<<<< ours\n"
+        b"x\ny\nz\n"
+        b"||||||| base\n"
+        b"a\nb\nc\n"
+        b"=======\n"
+        b"A\nb\nC\n"
+        b">>>>>>> theirs\n"
+    )
+
+
 def test_merge_file_conflict_writes_current_with_labels(tmp_path: Path) -> None:
     current = tmp_path / "current.txt"
     base = tmp_path / "base.txt"
