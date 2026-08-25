@@ -1,9 +1,8 @@
 """Advanced ``cat-file`` plumbing for object inspection and batch queries.
 
-The legacy CLI already supports single-object ``-t``, ``-s`` and ``-p`` modes.
-This module adds the high-leverage plumbing modes used by scripts: existence
-checks, stdin batch queries, abbreviated/ref object names, and ``REV:path``
-lookups inside commit/tree snapshots.
+The helpers here resolve refs, abbreviated SHA-256 IDs, commit ancestry
+expressions, and ``REV:path`` tree entries without touching the worktree or
+index. They back both single-object and stdin batch CLI modes.
 """
 
 from __future__ import annotations
@@ -35,8 +34,6 @@ def _resolve_plain(repo: Repository, expression: str) -> str:
     if oid:
         return oid.lower()
 
-    # Commit ancestry expressions such as HEAD~2 and topic^2 are handled by
-    # the graph plumbing. Keep this last so a literal ref/object wins first.
     try:
         return resolve_commit(repo, expression)
     except (KeyError, ValueError, RuntimeError):
@@ -55,7 +52,7 @@ def _treeish(repo: Repository, oid: str, display: str) -> TreeObject:
         if isinstance(obj, TreeObject):
             return obj
         if isinstance(obj, CommitObject):
-            tree = repo.store.read(obj.tree_sha)
+            tree = repo.store.read(obj.tree)
             if not isinstance(tree, TreeObject):
                 raise RuntimeError(f"Commit {current} references a non-tree root")
             return tree
@@ -80,7 +77,7 @@ def resolve_object(repo: Repository, expression: str) -> str:
     if not path:
         obj = repo.store.read(oid)
         if isinstance(obj, CommitObject):
-            return obj.tree_sha
+            return obj.tree
         if isinstance(obj, TagObject):
             tree = _treeish(repo, oid, expression)
             return tree.hash()
