@@ -16,6 +16,7 @@ Quick start::
 from .repo import Repository
 from .plumbing import is_ancestor, list_refs, merge_bases
 from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
+from .name_rev import NameRevResult, name_all, name_revision, name_revisions
 
 __all__ = [
     "Repository",
@@ -25,5 +26,9 @@ __all__ = [
     "merge_bases_many",
     "octopus_merge_bases",
     "independent_commits",
+    "NameRevResult",
+    "name_revision",
+    "name_revisions",
+    "name_all",
 ]
 __version__ = "0.1.0"
