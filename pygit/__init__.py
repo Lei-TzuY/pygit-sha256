@@ -20,6 +20,16 @@ from .name_rev import NameRevResult, name_all, name_revision, name_revisions
 from .packed_refs import PackedRef, pack_refs, read_packed_refs
 from .cat_file import CatFileRecord, inspect_object, object_exists, resolve_object
 from .checkout_index import checkout_index
+from .revision import (
+    RevisionResult,
+    abbreviate_oid,
+    glob_refs,
+    namespace_refs,
+    resolve_abbreviation,
+    resolve_many,
+    resolve_revision,
+    symbolic_refname,
+)
 
 __all__ = [
     "Repository",
@@ -41,5 +51,13 @@ __all__ = [
     "inspect_object",
     "object_exists",
     "checkout_index",
+    "RevisionResult",
+    "resolve_revision",
+    "resolve_abbreviation",
+    "resolve_many",
+    "symbolic_refname",
+    "abbreviate_oid",
+    "namespace_refs",
+    "glob_refs",
 ]
 __version__ = "0.1.0"
