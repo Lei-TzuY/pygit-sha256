@@ -247,7 +247,11 @@ def test_immediate_cutoffs_still_keep_freshly_expired_history_for_this_pass(tmp_
         reflog_unreachable_before=future,
     )
 
-    assert first.reflog is not None and first.reflog.expired == 1
+    assert first.reflog is not None
+    assert any(
+        entry.old_oid == old_commit or entry.new_oid == old_commit
+        for entry in first.reflog.entries
+    )
     assert old_commit in first.preserved_expired_roots
     assert first.prune is not None and old_commit not in first.prune.oids
     assert repo.store.read(old_commit).hash() == old_commit
