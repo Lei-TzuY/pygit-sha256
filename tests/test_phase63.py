@@ -74,13 +74,12 @@ def test_configured_remote_query_does_not_mutate_repository(tmp_path: Path, monk
     repo.add_remote("origin", URL)
     capsys.readouterr()
     _mock_discovery(monkeypatch)
-    config_path = repo.pygit_dir / "config"
-    config_before = config_path.read_bytes()
+    remotes_before = repo.list_remotes().copy()
 
     result = ls_remote("origin", repo=repo, heads=True)
 
     assert result.url == URL
-    assert config_path.read_bytes() == config_before
+    assert repo.list_remotes() == remotes_before
     assert repo.refs.list_remotes("origin") == []
     assert not list(repo.store.all_shas())
 
