@@ -98,12 +98,17 @@ def test_malformed_input_warns_and_skips_without_failing_filter(tmp_path: Path) 
 
     result = exclude_existing_refs(
         repo,
-        [b"\n", b"refs/heads/trailing-space \n", b"refs/heads/\xff\n"],
+        [
+            b"\n",
+            b"refs/heads/trailing-space \n",
+            b"refs/heads/bad..name\n",
+            b"refs/heads/\xff\n",
+        ],
     )
 
     assert result.output == b""
-    assert len(result.warnings) == 3
-    assert any("malformed ref line" in warning for warning in result.warnings)
+    assert len(result.warnings) == 4
+    assert sum("malformed ref line" in warning for warning in result.warnings) == 2
     assert any("invalid refname" in warning for warning in result.warnings)
     assert any("non-UTF-8" in warning for warning in result.warnings)
 
