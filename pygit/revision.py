@@ -1,9 +1,9 @@
 """Unified revision/object-ish parsing for low-level plumbing commands.
 
 The resolver is intentionally read-only. It understands pygit's SHA-256
-object IDs, loose/packed refs, abbreviated IDs, commit ancestry expressions,
-``REV:path`` tree walks, and Git-style ``^{type}`` peeling without touching the
-index or worktree.
+object IDs, loose/packed refs, abbreviated IDs, numeric reflog selectors,
+commit ancestry expressions, ``REV:path`` tree walks, and Git-style
+``^{type}`` peeling without touching the index or worktree.
 """
 
 from __future__ import annotations
@@ -19,7 +19,9 @@ from .repo import Repository
 
 
 _HEX = frozenset("0123456789abcdef")
+_ZERO_OID = "0" * 64
 _PEEL_RE = re.compile(r"^(.*)\^\{([^{}]*)\}$", re.DOTALL)
+_REFLOG_SELECTOR_RE = re.compile(r"^(.*)@\{([^{}]*)\}$", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -55,7 +57,52 @@ def resolve_abbreviation(repo: Repository, prefix: str) -> Optional[str]:
     return None
 
 
+def _resolve_reflog_selector(repo: Repository, expression: str) -> Optional[str]:
+    """Resolve ``REF@{N}`` using the strict Phase 77 reflog reader."""
+    match = _REFLOG_SELECTOR_RE.fullmatch(expression)
+    if match is None:
+        if "@{" in expression:
+            raise ValueError(f"Malformed reflog selector: {expression!r}")
+        return None
+
+    ref, raw_index = match.groups()
+    if not ref:
+        raise ValueError(f"Invalid reflog selector: {expression!r}")
+    if "@{" in ref:
+        raise ValueError(f"Nested reflog selectors are not supported: {expression!r}")
+    if not raw_index or not raw_index.isdigit():
+        raise ValueError(
+            f"Only non-negative numeric reflog selectors are supported: {expression!r}"
+        )
+
+    # Local import keeps revision parsing independent from the application
+    # routing layer and avoids introducing a module-import cycle through repo.py.
+    from .reflog_show import show_reflog
+
+    entries = show_reflog(repo, ref)
+    significant = raw_index.lstrip("0") or "0"
+    limit = str(len(entries))
+    if len(significant) > len(limit) or (
+        len(significant) == len(limit) and significant >= limit
+    ):
+        raise KeyError(f"Reflog selector is out of range: {expression!r}")
+    index = int(significant)
+
+    oid = entries[index].new_oid.lower()
+    if oid == _ZERO_OID:
+        raise KeyError(f"Reflog selector names the zero object: {expression!r}")
+    if not repo.store.exists(oid):
+        raise KeyError(
+            f"Reflog selector {expression!r} names missing object {oid}"
+        )
+    return oid
+
+
 def _resolve_direct(repo: Repository, expression: str) -> str:
+    reflog_oid = _resolve_reflog_selector(repo, expression)
+    if reflog_oid is not None:
+        return reflog_oid
+
     oid = repo.refs.resolve(expression)
     if oid and repo.store.exists(oid):
         return oid.lower()
@@ -272,7 +319,7 @@ def resolve_revision(repo: Repository, expression: str) -> str:
 
 
 def symbolic_refname(repo: Repository, expression: str) -> Optional[str]:
-    if not expression or any(marker in expression for marker in ("~", "^", ":")):
+    if not expression or any(marker in expression for marker in ("~", "^", ":", "@{")):
         return None
 
     if expression == "HEAD":

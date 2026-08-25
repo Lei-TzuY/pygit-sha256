@@ -4,7 +4,8 @@
 SHA-256 object database. Phase 57 consolidates revision resolution into
 `pygit.revision`, which is also used by the advanced `cat-file` plumbing.
 That keeps object names consistent across commands instead of maintaining
-separate ref/SHA/path parsers.
+separate ref/SHA/path parsers. Phase 78 extends the same shared resolver with
+strict numeric reflog selectors.
 
 ## Object-ish expressions
 
@@ -15,6 +16,12 @@ HEAD
 main
 refs/tags/v1
 0123abcd...          # unique 4+ SHA-256 prefix
+HEAD@{0}             # newest HEAD reflog value
+main@{2}             # third-newest main reflog value
+refs/heads/main@{1}
+HEAD@{1}~2
+HEAD@{1}^{tree}
+HEAD@{1}:path/to/file
 HEAD~2
 HEAD^2
 HEAD^2~1
@@ -26,6 +33,18 @@ v1^{commit}
 v1^{tree}
 HEAD:file.txt^{blob}
 ```
+
+Numeric `REF@{N}` selectors use the same newest-first local index shown by
+`pygit reflog show REF`. They resolve the selected record's `new_oid`; the
+selected OID must be non-zero and still exist in loose or packed storage.
+Short reflog names use the same strict normalization and path-safety rules as
+Phase 77. Missing history, zero OIDs, pruned objects, malformed reflogs,
+symlinked log paths, malformed selector syntax, and nested selectors fail
+loudly.
+
+Only non-negative decimal selector indices are supported. Date selectors such
+as `HEAD@{yesterday}`, checkout-stack selectors such as `@{-1}`, and nested
+selectors are intentionally outside the current compatibility boundary.
 
 `~N` walks first parents and `^N` selects the Nth parent. Explicit parent
 walks stop at entries in `.pygit/shallow`. Tree paths reject absolute paths,
@@ -42,11 +61,21 @@ no longer find an otherwise valid short SHA.
 
 ```bash
 pygit rev-parse HEAD HEAD~1 v1^{tree}
-pygit rev-parse --verify HEAD^{commit}
+pygit rev-parse --verify HEAD@{1}
+pygit rev-parse --verify HEAD@{1}^{tree}
 pygit rev-parse --verify --quiet maybe-missing
 pygit rev-parse --short=12 HEAD
 pygit rev-parse --symbolic-full-name HEAD
 pygit rev-parse --abbrev-ref HEAD
+```
+
+Because selector support lives in `pygit.revision`, other plumbing that uses
+the shared resolver inherits it too, for example:
+
+```bash
+pygit cat-file -t 'main@{2}:README.md'
+pygit ls-tree --name-only 'HEAD@{1}'
+pygit rev-list 'HEAD@{3}..HEAD@{0}'
 ```
 
 Namespace and argument filtering:
@@ -96,9 +125,10 @@ from pygit import (
     symbolic_refname,
 )
 
-oid = resolve_revision(repo, "HEAD~1^{tree}")
+oid = resolve_revision(repo, "HEAD@{1}^{tree}")
 short = abbreviate_oid(repo, oid, 12)
 full = symbolic_refname(repo, "main")
 ```
 
-The resolver is read-only: it never changes refs, the index, or the worktree.
+The resolver is read-only: it never changes reflogs, refs, the index, or the
+worktree.
