@@ -14,6 +14,7 @@ Quick start::
 """
 
 from .repo import Repository
+from .plumbing import is_ancestor, list_refs, merge_bases
 
-__all__ = ["Repository"]
+__all__ = ["Repository", "is_ancestor", "list_refs", "merge_bases"]
 __version__ = "0.1.0"
