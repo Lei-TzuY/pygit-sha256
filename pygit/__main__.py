@@ -1,4 +1,4 @@
 """Allow ``python -m pygit <command>`` invocation."""
-from .runtime import main
+from .launcher import main
 
 main()
