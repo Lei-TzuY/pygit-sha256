@@ -64,7 +64,7 @@ from .revision import (
     resolve_revision,
     symbolic_refname,
 )
-from .show_ref import ShowRefEntry, format_show_refs, show_refs
+from .show_ref import ShowRefEntry, format_show_refs, ref_exists, show_refs
 
 __all__ = [
     "Repository",
@@ -163,6 +163,7 @@ __all__ = [
     "glob_refs",
     "ShowRefEntry",
     "show_refs",
+    "ref_exists",
     "format_show_refs",
 ]
 __version__ = "0.1.0"
