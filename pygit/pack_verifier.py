@@ -1,91 +1,86 @@
-"""
-pygit/pack_verifier.py
-======================
-Packfile & Fan-out Index Integrity Verifier
-===========================================
+"""Strict integrity verifier for pygit's educational SHA-256 pack pairs.
 
-Validates CRC-32 checksums, offsets, and object stream decompression for .idx / .pack pairs.
+``verify_packfile`` deliberately reuses the canonical pack-index and pack
+parsers instead of maintaining a third binary decoder.  The complete ``.idx``
+and ``.pack`` images are validated first, then their object records are
+cross-checked for identity, CRC32, and byte offsets.
 """
 
 from __future__ import annotations
 
-import struct
-import zlib
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
-from .pack import PackReader, _ID_TYPE_MAP
+from .pack_index import parse_index
+from .pack_plumbing import parse_pack
 
 
-def verify_packfile(idx_path: Path, verbose: bool = False) -> List[Tuple[str, str, int, int, int]]:
+VerifyPackRecord = Tuple[str, str, int, int, int]
+
+
+def verify_packfile(
+    idx_path: Path,
+    verbose: bool = False,
+) -> List[VerifyPackRecord]:
+    """Validate one ``.idx``/``.pack`` pair and return object metadata.
+
+    The return shape is retained for compatibility with the existing
+    ``Repository.verify_pack`` API::
+
+        (oid, type_name, size, compressed_size, offset)
+
+    ``verbose`` is retained as an API compatibility parameter; verification is
+    always strict regardless of its value.
     """
-    Verify CRC-32 and offsets in *idx_path*.
+    del verbose
 
-    Returns a list of ``(sha, type_name, size, compressed_size, offset)``.
-    """
+    idx_path = Path(idx_path)
     pack_path = idx_path.with_suffix(".pack")
-    if not idx_path.exists() or not pack_path.exists():
+    if not idx_path.is_file() or not pack_path.is_file():
         raise FileNotFoundError(f"Packfile or index file missing for: {idx_path}")
 
-    idx_bytes = idx_path.read_bytes()
-    pack_bytes = pack_path.read_bytes()
+    index = parse_index(idx_path)
+    pack = parse_pack(pack_path)
 
-    if len(idx_bytes) < 1032 or not idx_bytes.startswith(b"\xfftOc"):
-        raise ValueError("Invalid index file header.")
+    if index.object_count != len(pack.entries):
+        raise ValueError(
+            "pack/index object count mismatch: "
+            f"index has {index.object_count}, pack has {len(pack.entries)}"
+        )
 
-    total_objs = struct.unpack(">I", idx_bytes[1028:1032])[0]
-    pos = 1032
+    pack_by_oid = {entry.oid: entry for entry in pack.entries}
+    index_oids = {entry.oid for entry in index.entries}
+    pack_oids = set(pack_by_oid)
+    if index_oids != pack_oids:
+        missing = sorted(pack_oids - index_oids)
+        extra = sorted(index_oids - pack_oids)
+        details = []
+        if missing:
+            details.append(f"missing from index: {', '.join(missing)}")
+        if extra:
+            details.append(f"not present in pack: {', '.join(extra)}")
+        raise ValueError("pack/index object ID mismatch: " + "; ".join(details))
 
-    # Read SHAs
-    shas = []
-    for _ in range(total_objs):
-        sha_str = idx_bytes[pos : pos + 64].decode("utf-8")
-        shas.append(sha_str)
-        pos += 64
-
-    # Read CRCs
-    crcs = []
-    for _ in range(total_objs):
-        crc = struct.unpack(">I", idx_bytes[pos : pos + 4])[0]
-        crcs.append(crc)
-        pos += 4
-
-    # Read Offsets
-    offsets = []
-    for _ in range(total_objs):
-        off = struct.unpack(">I", idx_bytes[pos : pos + 4])[0]
-        offsets.append(off)
-        pos += 4
-
-    results: List[Tuple[str, str, int, int, int]] = []
-
-    for i in range(total_objs):
-        sha = shas[i]
-        expected_crc = crcs[i]
-        offset = offsets[i]
-
-        p = offset
-        first = pack_bytes[p]
-        type_id = (first >> 4) & 0x07
-        size = first & 0x0F
-        shift = 4
-        p += 1
-        while first & 0x80:
-            first = pack_bytes[p]
-            size |= (first & 0x7F) << shift
-            shift += 7
-            p += 1
-
-        decompressor = zlib.decompressobj()
-        decompressed = decompressor.decompress(pack_bytes[p:])
-        entry_len = (p - offset) + len(pack_bytes[p:]) - len(decompressor.unconsumed_tail) - len(decompressor.unused_data)
-        entry_bytes = pack_bytes[offset : offset + entry_len]
-
-        actual_crc = zlib.crc32(entry_bytes) & 0xFFFFFFFF
-        if actual_crc != expected_crc:
-            raise ValueError(f"CRC-32 mismatch for object {sha} at offset {offset}")
-
-        type_name = _ID_TYPE_MAP.get(type_id, b"blob").decode("utf-8")
-        results.append((sha, type_name, size, entry_len, offset))
+    results: List[VerifyPackRecord] = []
+    for indexed in index.entries:
+        packed = pack_by_oid[indexed.oid]
+        if indexed.offset != packed.offset:
+            raise ValueError(
+                f"pack/index offset mismatch for object {indexed.oid}: "
+                f"index has {indexed.offset}, pack has {packed.offset}"
+            )
+        if indexed.crc32 != packed.crc32:
+            raise ValueError(
+                f"CRC-32 mismatch for object {indexed.oid} at offset {indexed.offset}"
+            )
+        results.append(
+            (
+                indexed.oid,
+                packed.type_name,
+                packed.size,
+                packed.compressed_size,
+                packed.offset,
+            )
+        )
 
     return results
