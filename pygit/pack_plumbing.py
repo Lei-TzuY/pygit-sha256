@@ -15,9 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Tuple
 
+from .hash_object import hash_object_data, object_envelope
 from .pack import _ID_TYPE_MAP
 from .repo import Repository
-from .store import ObjectStore
 
 
 @dataclass(frozen=True)
@@ -80,28 +80,66 @@ def _read_varint(data: bytes, pos: int, limit: int) -> tuple[int, int, int]:
     return type_id, size, pos
 
 
-def _validate_store_bytes(store_bytes: bytes, expected_type: bytes) -> None:
+def _validate_store_bytes(store_bytes: bytes, expected_type: bytes) -> str:
+    """Validate one exact object envelope and return its canonical SHA-256 ID."""
     try:
         nul = store_bytes.index(b"\x00")
     except ValueError as exc:
         raise ValueError("packed object is missing its object envelope") from exc
+
     header = store_bytes[:nul]
     payload = store_bytes[nul + 1 :]
+    expected_name = expected_type.decode("ascii")
+    canonical = object_envelope(payload, expected_name)
+    if store_bytes != canonical:
+        raise ValueError(
+            "packed object has a non-canonical object envelope or payload size"
+        )
+
+    # Reuse the typed hash-object validator so structurally incomplete trees,
+    # commits, and tags cannot enter the object database merely because their
+    # outer envelope and pack checksum are self-consistent.
+    return hash_object_data(payload, expected_name)
+
+
+def _decompress_entry(
+    data: bytes,
+    compressed_pos: int,
+    payload_end: int,
+    declared_size: int,
+    offset: int,
+) -> tuple[bytes, int]:
+    """Decode one zlib member without materializing more than declared size + 1.
+
+    The extra byte is only a sentinel used to detect an under-declared object.
+    This prevents a tiny claimed pack entry from expanding into an arbitrarily
+    large in-memory byte string before the size mismatch is noticed.
+    """
+    decompressor = zlib.decompressobj()
     try:
-        type_name, size_text = header.split(b" ", 1)
-        declared = int(size_text)
-    except (ValueError, TypeError) as exc:
-        raise ValueError("packed object has a malformed object envelope") from exc
-    if type_name != expected_type:
-        raise ValueError(
-            f"pack type {expected_type.decode()} disagrees with object envelope "
-            f"{type_name.decode('ascii', 'replace')}"
+        store_bytes = decompressor.decompress(
+            data[compressed_pos:payload_end], declared_size + 1
         )
-    if declared != len(payload):
+    except (zlib.error, OverflowError) as exc:
+        raise ValueError(f"invalid zlib stream at pack offset {offset}") from exc
+
+    if len(store_bytes) > declared_size or decompressor.unconsumed_tail:
         raise ValueError(
-            f"packed object payload size mismatch: header says {declared}, got {len(payload)}"
+            f"pack entry size mismatch at offset {offset}: "
+            f"header says {declared_size}, compressed stream expands beyond it"
         )
-    ObjectStore._parse(store_bytes)
+    if not decompressor.eof:
+        raise ValueError(f"truncated zlib stream at pack offset {offset}")
+
+    consumed = (payload_end - compressed_pos) - len(decompressor.unused_data)
+    if consumed <= 0:
+        raise ValueError(f"empty zlib stream at pack offset {offset}")
+    if len(store_bytes) != declared_size:
+        raise ValueError(
+            f"pack entry size mismatch at offset {offset}: "
+            f"header says {declared_size}, got {len(store_bytes)}"
+        )
+    return store_bytes, compressed_pos + consumed
 
 
 def parse_pack_bytes(data: bytes) -> ParsedPack:
@@ -130,25 +168,10 @@ def parse_pack_bytes(data: bytes) -> ParsedPack:
         if type_name is None:
             raise ValueError(f"unsupported packed object type id: {type_id}")
 
-        decompressor = zlib.decompressobj()
-        try:
-            store_bytes = decompressor.decompress(data[compressed_pos:payload_end])
-        except zlib.error as exc:
-            raise ValueError(f"invalid zlib stream at pack offset {offset}") from exc
-        if not decompressor.eof:
-            raise ValueError(f"truncated zlib stream at pack offset {offset}")
-        consumed = (payload_end - compressed_pos) - len(decompressor.unused_data)
-        if consumed <= 0:
-            raise ValueError(f"empty zlib stream at pack offset {offset}")
-        pos = compressed_pos + consumed
-        if len(store_bytes) != declared_size:
-            raise ValueError(
-                f"pack entry size mismatch at offset {offset}: "
-                f"header says {declared_size}, got {len(store_bytes)}"
-            )
-
-        _validate_store_bytes(store_bytes, type_name)
-        oid = hashlib.sha256(store_bytes).hexdigest()
+        store_bytes, pos = _decompress_entry(
+            data, compressed_pos, payload_end, declared_size, offset
+        )
+        oid = _validate_store_bytes(store_bytes, type_name)
         if oid in seen:
             raise ValueError(f"duplicate object {oid} in pack")
         seen.add(oid)
