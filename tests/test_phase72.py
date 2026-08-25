@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -23,7 +24,7 @@ def _loose(repo: Repository, oid: str) -> Path:
     return repo.store.root / oid[:2] / oid[2:]
 
 
-def _commit(repo: Repository, payload: bytes, message: str, parent: str | None = None):
+def _commit(repo: Repository, payload: bytes, message: str, parent: Optional[str] = None):
     blob_obj = BlobObject(payload)
     blob = repo.store.write(blob_obj)
     tree_obj = TreeObject([TreeEntry("100644", "file.txt", blob)])
