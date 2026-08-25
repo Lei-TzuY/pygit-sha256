@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 from .cli import main as legacy_main
 from .commit_plumbing import commit_tree, read_message_file, write_tree
+from .diff_plumbing import diff_files, diff_index, diff_tree, format_diff_entries
 from .entrypoint import _find_repo, dispatch as extended_dispatch
 from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
 from .name_rev import abbreviated_oid, name_all, name_revisions
@@ -31,6 +32,9 @@ _COMMANDS = {
     "merge-base",
     "name-rev",
     "pack-refs",
+    "diff-tree",
+    "diff-index",
+    "diff-files",
 }
 
 
@@ -260,6 +264,88 @@ def _run_pack_refs(argv: Sequence[str]) -> int:
     return 0
 
 
+def _split_pathspec(argv: Sequence[str]) -> Tuple[Sequence[str], Sequence[str]]:
+    values = list(argv)
+    if "--" not in values:
+        return values, ()
+    index = values.index("--")
+    return values[:index], values[index + 1 :]
+
+
+def _add_diff_output_options(parser: argparse.ArgumentParser) -> None:
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--name-only", action="store_true", help="show only changed paths")
+    output.add_argument("--name-status", action="store_true", help="show status and path")
+    output.add_argument("--raw", action="store_true", help="show raw metadata (the default)")
+    parser.add_argument("-z", action="store_true", help="terminate records with NUL")
+    parser.add_argument("--exit-code", action="store_true", help="exit 1 when differences exist")
+    parser.add_argument("--quiet", action="store_true", help="suppress output and exit 1 on differences")
+
+
+def _finish_diff(entries, args: argparse.Namespace) -> int:
+    if not args.quiet:
+        sys.stdout.buffer.write(
+            format_diff_entries(
+                entries,
+                name_only=args.name_only,
+                name_status=args.name_status,
+                nul_terminated=args.z,
+            )
+        )
+    return 1 if entries and (args.exit_code or args.quiet) else 0
+
+
+def _run_diff_tree(argv: Sequence[str]) -> int:
+    command_argv, patterns = _split_pathspec(argv)
+    parser = argparse.ArgumentParser(
+        prog="pygit diff-tree",
+        description="Compare tree objects without touching the index or worktree.",
+    )
+    parser.add_argument("-r", action="store_true", help="accepted for Git compatibility; recursion is the default")
+    parser.add_argument("--root", action="store_true", help="show a root commit against an empty tree")
+    _add_diff_output_options(parser)
+    parser.add_argument("treeish", nargs="+", metavar="TREEISH")
+    args = parser.parse_args(list(command_argv))
+    if len(args.treeish) not in {1, 2}:
+        parser.error("diff-tree requires one or two tree-ish arguments")
+    repo = _find_repo()
+    entries = diff_tree(
+        repo,
+        args.treeish[0],
+        args.treeish[1] if len(args.treeish) == 2 else None,
+        root=args.root,
+        patterns=patterns,
+    )
+    return _finish_diff(entries, args)
+
+
+def _run_diff_index(argv: Sequence[str]) -> int:
+    command_argv, patterns = _split_pathspec(argv)
+    parser = argparse.ArgumentParser(
+        prog="pygit diff-index",
+        description="Compare a tree-ish with the index or tracked worktree.",
+    )
+    parser.add_argument("--cached", action="store_true", help="compare tree-ish with the index")
+    _add_diff_output_options(parser)
+    parser.add_argument("treeish", metavar="TREEISH")
+    args = parser.parse_args(list(command_argv))
+    repo = _find_repo()
+    entries = diff_index(repo, args.treeish, cached=args.cached, patterns=patterns)
+    return _finish_diff(entries, args)
+
+
+def _run_diff_files(argv: Sequence[str]) -> int:
+    command_argv, patterns = _split_pathspec(argv)
+    parser = argparse.ArgumentParser(
+        prog="pygit diff-files",
+        description="Compare index entries with the tracked working tree.",
+    )
+    _add_diff_output_options(parser)
+    args = parser.parse_args(list(command_argv))
+    repo = _find_repo()
+    return _finish_diff(diff_files(repo, patterns=patterns), args)
+
+
 def dispatch(argv: Sequence[str]) -> Optional[int]:
     if argv and argv[0] in _COMMANDS:
         try:
@@ -275,7 +361,13 @@ def dispatch(argv: Sequence[str]) -> Optional[int]:
                 return _run_merge_base(argv[1:])
             if argv[0] == "name-rev":
                 return _run_name_rev(argv[1:])
-            return _run_pack_refs(argv[1:])
+            if argv[0] == "pack-refs":
+                return _run_pack_refs(argv[1:])
+            if argv[0] == "diff-tree":
+                return _run_diff_tree(argv[1:])
+            if argv[0] == "diff-index":
+                return _run_diff_index(argv[1:])
+            return _run_diff_files(argv[1:])
         except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
