@@ -112,6 +112,7 @@ def test_cli_stdin_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 
 def test_cli_write_and_typed_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     repo = _repo(tmp_path)
+    capsys.readouterr()
     monkeypatch.chdir(repo.worktree)
     payload = TreeObject([]).serialize()
     source = repo.worktree / "tree.raw"
