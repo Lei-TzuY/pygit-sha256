@@ -25,6 +25,7 @@ from .diff_plumbing import DiffEntry, diff_files, diff_index, diff_tree, format_
 from .fsck import FsckIssue, FsckReport, fsck
 from .merge_file import MergeFileResult, merge_file, merge_file_data
 from .merge_tree import MergeConflict, MergeTreeResult, merge_tree
+from .mktag import make_tag, parse_tag_payload, validate_tag_payload
 from .revision import (
     RevisionResult,
     abbreviate_oid,
@@ -74,6 +75,9 @@ __all__ = [
     "MergeConflict",
     "MergeTreeResult",
     "merge_tree",
+    "parse_tag_payload",
+    "validate_tag_payload",
+    "make_tag",
     "RevisionResult",
     "resolve_revision",
     "resolve_abbreviation",
