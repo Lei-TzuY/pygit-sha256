@@ -1,4 +1,4 @@
 """Allow ``python -m pygit <command>`` invocation."""
-from .cli import main
+from .entrypoint import main
 
 main()
