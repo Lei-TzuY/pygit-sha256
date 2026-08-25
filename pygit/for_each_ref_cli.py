@@ -31,7 +31,7 @@ def run_for_each_ref(argv: Sequence[str]) -> int:
         "--format",
         default="%(objectname) %(refname)",
         metavar="FORMAT",
-        help="format output using %(...)-style ref atoms",
+        help="format output using %%(...)-style ref atoms",
     )
     parser.add_argument(
         "--points-at",
