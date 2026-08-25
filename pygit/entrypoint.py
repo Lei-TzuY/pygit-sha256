@@ -11,9 +11,17 @@ from .cli import main as legacy_main
 from .plumbing import is_ancestor, list_refs, merge_bases, peel_oid, verify_ref
 from .ref_query import check_ref_format, format_ref, query_refs
 from .repo import Repository
+from .tree_plumbing import make_tree, read_tree
 
 
-_EXTRA_COMMANDS = {"merge-base", "show-ref", "for-each-ref", "check-ref-format"}
+_EXTRA_COMMANDS = {
+    "merge-base",
+    "show-ref",
+    "for-each-ref",
+    "check-ref-format",
+    "mktree",
+    "read-tree",
+}
 
 
 def _find_repo() -> Repository:
@@ -227,6 +235,67 @@ def _run_check_ref_format(argv: Sequence[str]) -> int:
     return 0
 
 
+def _run_mktree(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit mktree",
+        description="Build a tree object from ls-tree style input on stdin.",
+    )
+    parser.add_argument(
+        "--missing",
+        action="store_true",
+        help="allow entries that reference objects not present locally",
+    )
+    parser.add_argument(
+        "-z",
+        action="store_true",
+        help="read NUL-terminated records instead of newline-terminated records",
+    )
+    args = parser.parse_args(list(argv))
+
+    raw = sys.stdin.read()
+    records = raw.split("\x00") if args.z else raw.splitlines()
+    if args.z and records and records[-1] == "":
+        records.pop()
+    repo = _find_repo()
+    print(make_tree(repo, records, missing=args.missing))
+    return 0
+
+
+def _run_read_tree(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit read-tree",
+        description="Read tree information into the index.",
+    )
+    parser.add_argument(
+        "--empty",
+        action="store_true",
+        help="clear the index instead of reading a tree",
+    )
+    parser.add_argument(
+        "--prefix",
+        metavar="PREFIX",
+        help="add the tree under PREFIX without replacing existing index entries",
+    )
+    parser.add_argument(
+        "-u",
+        "--update",
+        action="store_true",
+        help="also update the working tree; requires a clean repository",
+    )
+    parser.add_argument("treeish", nargs="?", metavar="TREE-ISH")
+    args = parser.parse_args(list(argv))
+
+    repo = _find_repo()
+    read_tree(
+        repo,
+        args.treeish,
+        empty=args.empty,
+        prefix=args.prefix,
+        update_worktree=args.update,
+    )
+    return 0
+
+
 def dispatch(argv: Sequence[str]) -> Optional[int]:
     """Run an extended command, or return ``None`` for the legacy CLI."""
     if not argv or argv[0] not in _EXTRA_COMMANDS:
@@ -239,7 +308,11 @@ def dispatch(argv: Sequence[str]) -> Optional[int]:
             return _run_show_ref(argv[1:])
         if argv[0] == "for-each-ref":
             return _run_for_each_ref(argv[1:])
-        return _run_check_ref_format(argv[1:])
+        if argv[0] == "check-ref-format":
+            return _run_check_ref_format(argv[1:])
+        if argv[0] == "mktree":
+            return _run_mktree(argv[1:])
+        return _run_read_tree(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -1,8 +1,10 @@
-# Graph and reference plumbing
+# Graph, reference, tree, and index plumbing
 
-Phase 46 adds two low-level commands backed by reusable Python helpers in
-`pygit.plumbing`. Phase 47 extends the same layer with structured ref querying,
-formatting, graph filters, and refname validation in `pygit.ref_query`.
+Phase 46 adds low-level graph/reference commands backed by reusable Python
+helpers in `pygit.plumbing`. Phase 47 extends the same layer with structured ref
+querying, formatting, graph filters, and refname validation in
+`pygit.ref_query`. Phase 48 adds tree-object construction and index loading in
+`pygit.tree_plumbing`.
 
 ## `pygit merge-base`
 
@@ -90,11 +92,57 @@ allowed; `--branch` permits one-level branch names but rejects a leading `-`.
 `--normalize` removes leading/repeated slashes, validates the result, and prints
 the normalized refname.
 
+## `pygit mktree`
+
+Build a SHA-256 tree object directly from `ls-tree`-style records supplied on
+standard input:
+
+```text
+100644 blob <64-hex-oid>\tREADME.md
+040000 tree <64-hex-oid>\tsrc
+```
+
+```text
+pygit mktree < entries.txt
+pygit mktree -z < entries.nul
+pygit mktree --missing < entries.txt
+```
+
+Each record is validated as `MODE TYPE OID<TAB>NAME`. Supported modes are
+regular/executable blobs (`100644`/`100755`), symlinks (`120000`), trees
+(`040000`), and gitlinks (`160000`). Mode/type mismatches, duplicate names,
+invalid path components, malformed SHA-256 IDs, and missing objects are rejected.
+`--missing` permits references to objects that are intentionally absent.
+
+## `pygit read-tree`
+
+Load a tree-ish into the staging index without creating a commit:
+
+```text
+pygit read-tree HEAD
+pygit read-tree HEAD~1
+pygit read-tree --empty
+pygit read-tree --prefix=vendor/lib third-party-tag
+pygit read-tree -u release
+```
+
+A tree-ish may be a tree object, commit, annotated tag, or parent-walking
+revision. The default operation replaces only the index; it does not modify the
+working tree. `--prefix` adds the flattened tree below a prefix while preserving
+existing index entries and rejects file/path collisions. `-u` also materializes
+the selected tree, but first requires a clean repository so local changes are
+not overwritten. `--empty` clears the index and, with `-u`, removes currently
+tracked worktree paths.
+
+Tree traversal verifies every entry's mode/object-type relationship before the
+index is written, so malformed trees are rejected rather than silently staged.
+
 ## Python API
 
 ```python
 from pygit.plumbing import is_ancestor, list_refs, merge_bases
 from pygit.ref_query import check_ref_format, format_ref, query_refs
+from pygit.tree_plumbing import make_tree, read_tree, resolve_treeish
 
 bases = merge_bases(repo, "main", "feature")
 contained = is_ancestor(repo, "v1.0", "HEAD")
@@ -103,7 +151,11 @@ refs = list_refs(repo, heads=True)
 records = query_refs(repo, patterns=["refs/heads/"], sort_keys=["-refname"])
 line = format_ref(records[0], "%(refname:short) %(subject)")
 checked = check_ref_format("refs/heads/topic")
+
+tree_oid = make_tree(repo, [f"100644 blob {blob_oid}\tREADME.md"])
+read_tree(repo, tree_oid)
+resolved_tree = resolve_treeish(repo, "HEAD~1")
 ```
 
 These helpers intentionally live outside the large porcelain `Repository`
-implementation so graph/ref logic can be tested and extended independently.
+implementation so low-level mechanisms can be tested and extended independently.
