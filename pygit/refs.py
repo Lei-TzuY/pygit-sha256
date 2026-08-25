@@ -1,35 +1,35 @@
 """
 pygit/refs.py
 =============
-**References** — symbolic names for commit SHAs.
+Reference storage for loose, symbolic, and packed refs.
 
-In Git, branches and tags are simply text files that contain a SHA.
-The current branch is pointed to by ``HEAD``, which is either:
-
-  - a *symbolic ref*: ``ref: refs/heads/main``  (normal case)
-  - a *detached HEAD*: a raw SHA                (after checkout of a commit)
-
-Our ref storage mirrors Git exactly:
-
-    .pygit/
-      HEAD
-      refs/
-        heads/
-          main          <- contains a 64-hex SHA
-          feature-x     <- etc.
-        tags/
-          v1.0          <- etc.
+Loose refs live below ``.pygit/refs`` and shadow entries from
+``.pygit/packed-refs``. ``HEAD`` may be symbolic or detached. The public API
+keeps the original branch/tag/remote helpers while making packed storage
+transparent to callers.
 """
 
 from __future__ import annotations
+
 import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, List
+from typing import List, Optional, Set
+
+from .packed_refs import (
+    PackedRef,
+    list_packed_refnames,
+    packed_ref_value,
+    read_packed_refs,
+    remove_packed_refs,
+    write_packed_refs,
+)
 
 
 ZERO_SHA = "0" * 64
+_HEX = frozenset("0123456789abcdef")
+_MAX_SYMREF_DEPTH = 32
 
 
 @dataclass(frozen=True)
@@ -43,26 +43,64 @@ class ReflogEntry:
 
 
 class RefStore:
-    """
-    Manages all references under ``.pygit/``.
-
-    Parameters
-    ----------
-    pygit_dir : Path
-        Path to the ``.pygit`` directory.
-    """
+    """Manage references under one ``.pygit`` directory."""
 
     def __init__(self, pygit_dir: Path) -> None:
-        self._root    = pygit_dir
-        self._heads   = pygit_dir / "refs" / "heads"
-        self._tags    = pygit_dir / "refs" / "tags"
+        self._root = pygit_dir
+        self._heads = pygit_dir / "refs" / "heads"
+        self._tags = pygit_dir / "refs" / "tags"
         self._remotes = pygit_dir / "refs" / "remotes"
-        self._stash   = pygit_dir / "refs" / "stash"
-        self._head    = pygit_dir / "HEAD"
-        self._logs    = pygit_dir / "logs"
+        self._stash = pygit_dir / "refs" / "stash"
+        self._head = pygit_dir / "HEAD"
+        self._logs = pygit_dir / "logs"
         self._heads.mkdir(parents=True, exist_ok=True)
         self._tags.mkdir(parents=True, exist_ok=True)
         self._remotes.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def refs_dir(self) -> Path:
+        return self._root / "refs"
+
+    # ------------------------------------------------------------------
+    # Generic direct/symbolic resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_refname(self, refname: str) -> Optional[str]:
+        current = refname
+        seen: Set[str] = set()
+        for _ in range(_MAX_SYMREF_DEPTH):
+            if current in seen:
+                raise RuntimeError(f"Symbolic ref cycle while resolving {refname!r}")
+            seen.add(current)
+
+            if current == "HEAD":
+                path = self._head
+            else:
+                if not current.startswith("refs/"):
+                    raise ValueError(f"Expected fully-qualified ref name: {current!r}")
+                path = self._path_under(self._root / "refs", current[len("refs/") :])
+
+            if path.exists():
+                raw = path.read_text(encoding="utf-8").strip()
+                if raw.startswith("ref: "):
+                    target = raw[5:].strip()
+                    if not target.startswith("refs/"):
+                        raise RuntimeError(f"Malformed symbolic ref {current}: {raw!r}")
+                    current = target
+                    continue
+                if not self._is_oid(raw):
+                    raise RuntimeError(f"Malformed ref {current}: expected a 64-hex object ID")
+                return raw.lower()
+
+            if current != "HEAD":
+                return packed_ref_value(self._root, current)
+            return None
+
+        raise RuntimeError(f"Symbolic ref chain is too deep while resolving {refname!r}")
+
+    @staticmethod
+    def _is_oid(value: str) -> bool:
+        return len(value) == 64 and all(char in _HEX for char in value.lower())
 
     # ------------------------------------------------------------------
     # HEAD
@@ -73,7 +111,7 @@ class RefStore:
         return self._head.read_text(encoding="utf-8").strip()
 
     def set_head_symbolic(self, branch: str, message: str = "checkout") -> None:
-        """Point HEAD at a branch (e.g. 'main')."""
+        """Point HEAD at a branch (e.g. ``main``)."""
         old_head = self.get_head()
         old_sha = self.resolve_head()
         self._head.write_text(f"ref: refs/heads/{branch}", encoding="utf-8")
@@ -96,37 +134,26 @@ class RefStore:
             self._append_reflog("HEAD", old_sha, sha, message, force=old_head != sha)
 
     def is_detached(self) -> bool:
-        head = self.get_head()
-        return not head.startswith("ref:")
+        return not self.get_head().startswith("ref:")
 
     def current_branch(self) -> Optional[str]:
-        """Return current branch name, or None if HEAD is detached."""
         head = self.get_head()
         if head.startswith("ref: refs/heads/"):
-            return head[len("ref: refs/heads/"):]
+            return head[len("ref: refs/heads/") :]
         return None
 
     def resolve_head(self) -> Optional[str]:
-        """Return the commit SHA that HEAD points to, or None."""
-        head = self.get_head()
-        if head.startswith("ref:"):
-            ref_path = self._root / head[5:].strip()
-            if ref_path.exists():
-                return ref_path.read_text(encoding="utf-8").strip()
-            return None  # branch exists but has no commits yet
-        return head  # detached HEAD — already a SHA
+        return self._resolve_refname("HEAD")
 
     # ------------------------------------------------------------------
     # Branches
     # ------------------------------------------------------------------
 
     def get_branch(self, name: str) -> Optional[str]:
-        """Return the SHA a branch points to, or None."""
-        p = self._path_under(self._heads, name)
-        return p.read_text(encoding="utf-8").strip() if p.exists() else None
+        self._path_under(self._heads, name)  # traversal validation
+        return self._resolve_refname(f"refs/heads/{name}")
 
     def set_branch(self, name: str, sha: str, message: str = "update") -> None:
-        """Update (or create) a branch to point at *sha*."""
         p = self._path_under(self._heads, name)
         old_sha = self.get_branch(name)
         old_head = self.resolve_head() if self.current_branch() == name else None
@@ -140,33 +167,52 @@ class RefStore:
         p = self._path_under(self._heads, name)
         if p.exists():
             p.unlink()
+            self._prune_empty_parents(p.parent, self._heads)
+        remove_packed_refs(self._root, [f"refs/heads/{name}"])
 
     def list_branches(self) -> List[str]:
-        return self._list_under(self._heads)
+        loose = set(self._list_under(self._heads))
+        packed = {
+            name[len("refs/heads/") :]
+            for name in list_packed_refnames(self._root, "refs/heads/")
+        }
+        return sorted(loose | packed)
 
     # ------------------------------------------------------------------
     # Tags
     # ------------------------------------------------------------------
 
     def get_tag(self, name: str) -> Optional[str]:
-        p = self._path_under(self._tags, name)
-        return p.read_text(encoding="utf-8").strip() if p.exists() else None
+        self._path_under(self._tags, name)
+        return self._resolve_refname(f"refs/tags/{name}")
 
     def set_tag(self, name: str, sha: str) -> None:
         p = self._path_under(self._tags, name)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(sha, encoding="utf-8")
 
+    def delete_tag(self, name: str) -> None:
+        p = self._path_under(self._tags, name)
+        if p.exists():
+            p.unlink()
+            self._prune_empty_parents(p.parent, self._tags)
+        remove_packed_refs(self._root, [f"refs/tags/{name}"])
+
     def list_tags(self) -> List[str]:
-        return self._list_under(self._tags)
+        loose = set(self._list_under(self._tags))
+        packed = {
+            name[len("refs/tags/") :]
+            for name in list_packed_refnames(self._root, "refs/tags/")
+        }
+        return sorted(loose | packed)
 
     # ------------------------------------------------------------------
     # Remote-tracking refs
     # ------------------------------------------------------------------
 
     def get_remote(self, remote: str, branch: str) -> Optional[str]:
-        p = self._path_under(self._remotes, f"{remote}/{branch}")
-        return p.read_text(encoding="utf-8").strip() if p.exists() else None
+        self._path_under(self._remotes, f"{remote}/{branch}")
+        return self._resolve_refname(f"refs/remotes/{remote}/{branch}")
 
     def set_remote(self, remote: str, branch: str, sha: str) -> None:
         p = self._path_under(self._remotes, f"{remote}/{branch}")
@@ -174,7 +220,6 @@ class RefStore:
         p.write_text(sha, encoding="utf-8")
 
     def delete_remote(self, remote: str, branch: Optional[str] = None) -> None:
-        """Delete a remote-tracking branch or an entire remote namespace."""
         p = self._path_under(
             self._remotes,
             remote if branch is None else f"{remote}/{branch}",
@@ -185,39 +230,81 @@ class RefStore:
             p.unlink()
             self._prune_empty_parents(p.parent, self._remotes)
 
+        if branch is not None:
+            remove_packed_refs(self._root, [f"refs/remotes/{remote}/{branch}"])
+        else:
+            prefix = f"refs/remotes/{remote}/"
+            remove_packed_refs(
+                self._root,
+                [name for name in list_packed_refnames(self._root, prefix)],
+            )
+
     def rename_remote(self, old: str, new: str) -> None:
-        """Rename a remote-tracking namespace."""
         old_path = self._path_under(self._remotes, old)
         new_path = self._path_under(self._remotes, new)
-        if not old_path.exists():
+        packed = read_packed_refs(self._root)
+        old_prefix = f"refs/remotes/{old}/"
+        new_prefix = f"refs/remotes/{new}/"
+        packed_old = [name for name in packed if name.startswith(old_prefix)]
+        packed_new = [name for name in packed if name.startswith(new_prefix)]
+
+        if not old_path.exists() and not packed_old:
             return
-        if new_path.exists():
+        if new_path.exists() or packed_new:
             raise RuntimeError(f"Remote-tracking namespace already exists: {new}")
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        old_path.rename(new_path)
+
+        if old_path.exists():
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            old_path.rename(new_path)
+
+        if packed_old:
+            rewritten = []
+            for name, record in packed.items():
+                if name.startswith(old_prefix):
+                    replacement = new_prefix + name[len(old_prefix) :]
+                    rewritten.append(PackedRef(record.oid, replacement, record.peeled_oid))
+                else:
+                    rewritten.append(record)
+            write_packed_refs(self._root, rewritten)
 
     def list_remotes(self, remote: Optional[str] = None) -> List[str]:
-        root = self._remotes if remote is None else self._path_under(self._remotes, remote)
-        if not root.exists():
-            return []
-        return self._list_under(root)
+        if remote is None:
+            loose = set(self._list_under(self._remotes))
+            prefix = "refs/remotes/"
+            packed = {
+                name[len(prefix) :]
+                for name in list_packed_refnames(self._root, prefix)
+            }
+            return sorted(loose | packed)
+
+        root = self._path_under(self._remotes, remote)
+        loose = set(self._list_under(root)) if root.exists() else set()
+        prefix = f"refs/remotes/{remote}/"
+        packed = {
+            name[len(prefix) :]
+            for name in list_packed_refnames(self._root, prefix)
+        }
+        return sorted(loose | packed)
 
     # ------------------------------------------------------------------
     # Stash ref
     # ------------------------------------------------------------------
 
     def get_stash(self) -> Optional[str]:
-        return self._stash.read_text(encoding="utf-8").strip() if self._stash.exists() else None
+        return self._resolve_refname("refs/stash")
 
     def set_stash(self, sha: str, message: str = "stash") -> None:
         old_sha = self.get_stash()
+        self._stash.parent.mkdir(parents=True, exist_ok=True)
         self._stash.write_text(sha, encoding="utf-8")
         self._append_reflog("refs/stash", old_sha, sha, message)
 
     def delete_stash(self, message: str = "stash pop") -> None:
+        old_sha = self.get_stash()
         if self._stash.exists():
-            old_sha = self.get_stash()
             self._stash.unlink()
+        removed = remove_packed_refs(self._root, ["refs/stash"])
+        if old_sha is not None and (removed or not self._stash.exists()):
             self._append_reflog("refs/stash", old_sha, None, message)
 
     # ------------------------------------------------------------------
@@ -225,7 +312,6 @@ class RefStore:
     # ------------------------------------------------------------------
 
     def read_reflog(self, ref: str = "HEAD") -> List[ReflogEntry]:
-        """Return ref movements newest first."""
         path = self._log_path(ref)
         if not path.exists():
             return []
@@ -244,19 +330,12 @@ class RefStore:
     # ------------------------------------------------------------------
 
     def resolve(self, name: str) -> Optional[str]:
-        """
-        Resolve a name to a SHA.  Tries in order:
-
-        1. Raw 64-char SHA
-        2. Branch name
-        3. Tag name
-        4. Remote tracking branch
-        5. ``HEAD``
-        """
         if name == "HEAD":
             return self.resolve_head()
-        if len(name) == 64 and all(c in "0123456789abcdef" for c in name.lower()):
-            return name
+        if self._is_oid(name):
+            return name.lower()
+        if name.startswith("refs/"):
+            return self._resolve_refname(name)
         branch = self.get_branch(name)
         if branch:
             return branch
@@ -264,8 +343,8 @@ class RefStore:
         if tag:
             return tag
         if "/" in name:
-            remote, branch = name.split("/", 1)
-            remote_sha = self.get_remote(remote, branch)
+            remote, branch_name = name.split("/", 1)
+            remote_sha = self.get_remote(remote, branch_name)
             if remote_sha:
                 return remote_sha
         return None
