@@ -9,7 +9,7 @@ printf 'refs/heads/main\nrefs/heads/new\n' | pygit show-ref --exclude-existing
 printf 'refs/heads/a\nrefs/tags/v1\n' | pygit show-ref --exclude-existing=refs/heads/
 ```
 
-`--exclude-existing[=<pattern>]` is a standalone mode. The optional pattern is accepted only in the documented attached `=...` form and performs a literal head-match against the parsed refname. Positional ref arguments and listing/formatting/verification/existence options are rejected.
+`--exclude-existing[=<pattern>]` is a standalone mode. The optional pattern is accepted only in the documented attached `=...` form and performs a literal head-match against the parsed refname. Positional ref arguments and listing/formatting/verification/existence options are rejected. Empty stdin is valid and produces empty stdout without warnings.
 
 For every stdin line the filter:
 
