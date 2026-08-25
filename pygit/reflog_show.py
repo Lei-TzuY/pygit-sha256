@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Tuple
 
 from .reflog_expire import _read_records, _safe_log_path, _target_logs
 from .repo import Repository
@@ -43,7 +42,7 @@ def normalize_reflog_ref(repo: Repository, ref: str) -> str:
     ``HEAD`` and fully-qualified ``refs/...`` names are accepted directly.
     Short names are matched only against existing reflog files, so a branch
     named ``topic`` may be shown as ``topic`` without inventing a ref when the
-    log does not exist.  Ambiguous short names fail loudly.
+    log does not exist. Ambiguous short names fail loudly.
     """
 
     if not ref:
@@ -111,8 +110,9 @@ def show_reflog(
 ) -> Tuple[ReflogShowEntry, ...]:
     """Return strict reflog records without modifying repository state.
 
-    Default output order is newest-first.  ``--all`` semantics globally order
+    Default output order is newest-first. ``--all`` semantics globally order
     records by timestamp while each selector index remains local to its ref.
+    Limiting is applied before reversing, matching other history walkers.
     Missing explicitly requested logs preserve the legacy empty-result
     behaviour; malformed existing logs always fail loudly.
     """
@@ -144,10 +144,10 @@ def show_reflog(
             allow_missing=True,
         )
 
-    if reverse:
-        entries.reverse()
     if max_count:
         entries = entries[:max_count]
+    if reverse:
+        entries.reverse()
     return tuple(entries)
 
 
