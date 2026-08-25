@@ -1,8 +1,8 @@
 """Stable top-level application entrypoint.
 
-Most commands continue through :mod:`pygit.launcher`.  Reflog commands are
-handled here because their nested grammar must be recognized before the legacy
-argparse stack; the show output remains compatible with the previous handler.
+Most commands continue through :mod:`pygit.launcher`.  Reflog commands and the
+coordinated ``gc`` pipeline are handled here before the legacy argparse stack;
+reflog show output remains compatible with the previous handler.
 """
 
 from __future__ import annotations
@@ -12,8 +12,20 @@ import sys
 from typing import Sequence
 
 from .entrypoint import _find_repo
+from .gc_cli import run_gc
 from .launcher import main as launcher_main
 from .reflog_expire_cli import run_reflog_expire
+
+
+_ERRORS = (
+    RuntimeError,
+    ValueError,
+    KeyError,
+    FileNotFoundError,
+    FileExistsError,
+    IsADirectoryError,
+    OSError,
+)
 
 
 def _run_reflog_show(argv: Sequence[str]) -> int:
@@ -28,6 +40,11 @@ def _run_reflog_show(argv: Sequence[str]) -> int:
     return 0
 
 
+def _finish(code: int) -> None:
+    if code:
+        raise SystemExit(code)
+
+
 def main() -> None:
     argv = sys.argv[1:]
     if argv and argv[0] == "reflog":
@@ -36,18 +53,19 @@ def main() -> None:
                 code = run_reflog_expire(argv[2:])
             else:
                 code = _run_reflog_show(argv[1:])
-        except (
-            RuntimeError,
-            ValueError,
-            KeyError,
-            FileNotFoundError,
-            FileExistsError,
-            IsADirectoryError,
-            OSError,
-        ) as exc:
+        except _ERRORS as exc:
             print(f"error: {exc}", file=sys.stderr)
             code = 1
-        if code:
-            raise SystemExit(code)
+        _finish(code)
         return
+
+    if argv and argv[0] == "gc":
+        try:
+            code = run_gc(argv[1:])
+        except _ERRORS as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            code = 1
+        _finish(code)
+        return
+
     launcher_main()
