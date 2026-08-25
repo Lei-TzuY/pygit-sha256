@@ -32,7 +32,7 @@ def run_gc(argv: Sequence[str]) -> int:
     prune_group.add_argument(
         "--no-prune",
         action="store_true",
-        help="skip unreachable loose-object pruning",
+        help="legacy no-write mode; validate and report without changing repository state",
     )
     parser.add_argument(
         "--no-reflog-expire",
@@ -58,46 +58,61 @@ def run_gc(argv: Sequence[str]) -> int:
     parser.add_argument("-v", "--verbose", action="store_true", help="show maintenance details")
     args = parser.parse_args(list(argv))
 
+    dry_run = bool(args.dry_run or args.no_prune)
     result = garbage_collect(
         _find_repo(),
         prune_expire_before=_cutoff(args.prune),
         reflog_expire_before=_cutoff(args.reflog_expire),
         reflog_unreachable_before=_cutoff(args.reflog_expire_unreachable),
         expire_reflogs_enabled=not args.no_reflog_expire,
-        prune_objects=not args.no_prune,
-        dry_run=args.dry_run,
+        prune_objects=True,
+        dry_run=dry_run,
     )
 
-    if args.verbose or args.dry_run:
-        verb = "would repack" if args.dry_run else "repacked"
-        print(
-            f"{verb} {result.repack.object_count} object(s); "
-            f"reachable {result.preflight_reachable}; "
-            f"redundant packs {len(result.repack.removed_packs)}"
+    repack_count = result.repack.object_count
+    reflog_count = result.reflog.expired if result.reflog is not None else 0
+    prune_count = (
+        len(result.prune.oids)
+        if result.dry_run and result.prune is not None
+        else result.prune.pruned if result.prune is not None else 0
+    )
+    prefix = "would " if result.dry_run else ""
+    print(
+        f"Garbage collection: {prefix}repack {repack_count} object(s), "
+        f"{prefix}expire {reflog_count} reflog record(s), "
+        f"{prefix}prune {prune_count} unreachable loose object(s); "
+        f"retained {result.final_reachable} reachable object(s)."
+    )
+
+    if args.verbose:
+        duplicate_count = (
+            len(result.repack.loose_candidates)
+            if result.dry_run
+            else result.repack.pruned_loose
         )
-        if args.dry_run:
-            print(f"would prune {len(result.repack.loose_candidates)} packed loose duplicate(s)")
-        else:
-            print(f"pruned {result.repack.pruned_loose} packed loose duplicate(s)")
+        print(f"packed loose duplicate cleanup: {duplicate_count}")
 
         if result.reflog is not None:
-            verb = "would expire" if args.dry_run else "expired"
-            print(
-                f"{verb} {result.reflog.expired} reflog record(s) "
-                f"across {result.reflog.scanned_logs} log(s)"
-            )
+            for entry in result.reflog.entries:
+                print(
+                    f"reflog {entry.reason}\t{entry.ref}\t"
+                    f"{entry.old_oid}\t{entry.new_oid}"
+                )
         else:
             print("reflog expiry skipped")
 
+        for oid in result.repack.selected_oids:
+            print(f"repack\t{oid}")
+        for name in result.repack.removed_packs:
+            verb = "would-remove-pack" if result.dry_run else "removed-pack"
+            print(f"{verb}\t{name}")
+
         if result.prune is not None:
-            if args.dry_run:
-                print(
-                    f"would prune {len(result.prune.oids)} loose unreachable object(s) "
-                    "under current reflog roots (conservative dry-run)"
-                )
-            else:
-                print(f"pruned {result.prune.pruned} loose unreachable object(s)")
-        else:
-            print("unreachable-object prune skipped")
+            verb = "would-prune" if result.dry_run else "pruned"
+            for oid in result.prune.oids:
+                print(f"{verb}\t{oid}")
+
+        for oid in result.preserved_expired_roots:
+            print(f"preserve-expired-root\t{oid}")
 
     return 0
