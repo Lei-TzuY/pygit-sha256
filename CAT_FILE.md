@@ -1,6 +1,6 @@
 # Advanced `cat-file` plumbing
 
-Phase 55 extends object inspection beyond the original single-object `-t`, `-s`, and `-p` modes.
+Phase 55 extends object inspection beyond the original single-object `-t`, `-s`, and `-p` modes. Phase 82 adds the interactive command-oriented batch protocol used by long-lived tooling.
 
 ## Object expressions
 
@@ -54,16 +54,39 @@ printf 'HEAD:README.md\n' | pygit cat-file --batch
 
 For each successful object, `--batch` emits the same metadata header followed by the object's raw serialized content and a trailing newline. This makes the mode useful for scripts that need to inspect many objects without starting one process per lookup.
 
+## Batch command protocol
+
+```console
+printf 'info HEAD\ncontents HEAD:README.md\n' | pygit cat-file --batch-command
+```
+
+`info <object>` behaves like one `--batch-check` request. `contents <object>` behaves like one `--batch` request. Missing object expressions emit `<object> missing` and processing continues.
+
+With `--buffer`, responses are accumulated until a `flush` command is received. Pending output is also emitted at clean end-of-input. A parse error before `flush` does not publish the pending buffered data. Without `--buffer`, each response is flushed immediately for interactive clients.
+
+The command delimiter is one ASCII space; everything after that first space belongs to the object expression, so additional leading spaces are preserved rather than normalized.
+
 ## Python API
 
 ```python
-from pygit import inspect_object, object_exists, resolve_object
+from pygit import (
+    format_batch_object,
+    inspect_object,
+    object_exists,
+    parse_batch_command,
+    resolve_object,
+    run_batch_commands,
+)
 
 oid = resolve_object(repo, "HEAD:README.md")
 record = inspect_object(repo, "HEAD:README.md")
 assert record.oid == oid
 assert record.type_name == "blob"
 assert object_exists(repo, "HEAD")
+
+command = parse_batch_command("info HEAD\n")
+chunks = list(run_batch_commands(repo, ["info HEAD\n", "flush\n"], buffered=True))
+header = format_batch_object(repo, "HEAD")
 ```
 
-The original `pygit cat-file -t/-s/-p` code path remains delegated unchanged.
+The original single-object and Phase 55 batch modes remain supported. Custom batch formatting, all-object enumeration, symlink following, text conversion/filters, mailmap toggling, and NUL-framed command input are outside the Phase 82 scope.
