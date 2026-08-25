@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from pygit import Repository, checkout_index
+from pygit.commit_plumbing import write_tree
 from pygit.objects import BlobObject, CommitObject, Identity
 from pygit.runtime import _run_checkout_index
 
@@ -56,8 +57,11 @@ def test_directory_prefix_and_glob_selection(tmp_path: Path) -> None:
     assert (repo.worktree / "dir" / "b.txt").read_text(encoding="utf-8") == "beta\n"
 
     (repo.worktree / "a.txt").unlink()
-    checkout_index(repo, ["*.txt"])
+    (repo.worktree / "dir" / "b.txt").unlink()
+    written = checkout_index(repo, ["*.txt"])
+    assert written == [repo.worktree / "a.txt", repo.worktree / "dir" / "b.txt"]
     assert (repo.worktree / "a.txt").read_text(encoding="utf-8") == "alpha\n"
+    assert (repo.worktree / "dir" / "b.txt").read_text(encoding="utf-8") == "beta\n"
 
 
 def test_missing_pathspec_and_empty_selection_are_errors(tmp_path: Path) -> None:
@@ -115,7 +119,7 @@ def test_symlink_entry_is_materialized(tmp_path: Path) -> None:
 
 def test_submodule_entry_is_rejected(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    tree_oid = repo.write_tree()
+    tree_oid = write_tree(repo)
     ident = Identity("A", "a@example.com")
     commit_oid = repo.store.write(CommitObject(tree=tree_oid, author=ident, committer=ident, message="m"))
     entry_type = type(repo.index.get("a.txt"))
