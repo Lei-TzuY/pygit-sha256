@@ -15,10 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from .objects import BlobObject, CommitObject
+from .objects import BlobObject, CommitObject, TagObject, TreeObject
 from .repo import Repository
 from .revision import resolve_revision
-from .tree_plumbing import flatten_tree, resolve_treeish
+from .tree_plumbing import flatten_tree
 
 
 ZERO_OID = "0" * 64
@@ -128,8 +128,22 @@ def _diff_snapshots(
 
 
 def tree_snapshot(repo: Repository, treeish: str) -> Snapshot:
-    tree_oid = resolve_treeish(repo, treeish)
-    return dict(flatten_tree(repo, tree_oid))
+    """Resolve a tree-ish through the shared revision layer and flatten it."""
+    oid = resolve_revision(repo, treeish)
+    seen = set()
+    while True:
+        if oid in seen:
+            raise RuntimeError(f"tag cycle while resolving {treeish!r}")
+        seen.add(oid)
+        obj = repo.store.read(oid)
+        if isinstance(obj, TreeObject):
+            return dict(flatten_tree(repo, oid))
+        if isinstance(obj, CommitObject):
+            return dict(flatten_tree(repo, obj.tree))
+        if isinstance(obj, TagObject):
+            oid = obj.target_sha
+            continue
+        raise ValueError(f"tree-ish {treeish!r} resolves to a non-tree object")
 
 
 def index_snapshot(repo: Repository) -> Snapshot:
@@ -190,11 +204,8 @@ def worktree_snapshot(
             result[path] = (_hash_blob(data), mode)
             continue
         if stat.S_ISDIR(st.st_mode):
-            # A tracked file replaced by a directory is a type change.  There is
-            # no tree object for an arbitrary worktree directory, so use zero.
             result[path] = (ZERO_OID, "040000")
             continue
-        # Unsupported filesystem objects are represented as a type change.
         result[path] = (ZERO_OID, "000000")
     return result
 
