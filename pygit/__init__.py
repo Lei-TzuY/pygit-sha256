@@ -26,6 +26,7 @@ from .fsck import FsckIssue, FsckReport, fsck
 from .merge_file import MergeFileResult, merge_file, merge_file_data
 from .merge_tree import MergeConflict, MergeTreeResult, merge_tree
 from .mktag import make_tag, parse_tag_payload, validate_tag_payload
+from .pack_objects import PackObjectsResult, pack_objects, reachable_objects, select_pack_objects
 from .pack_plumbing import (
     IndexPackResult,
     PackEntry,
@@ -90,6 +91,10 @@ __all__ = [
     "parse_tag_payload",
     "validate_tag_payload",
     "make_tag",
+    "PackObjectsResult",
+    "reachable_objects",
+    "select_pack_objects",
+    "pack_objects",
     "PackEntry",
     "ParsedPack",
     "IndexPackResult",
