@@ -10,7 +10,7 @@ from __future__ import annotations
 import fnmatch
 import re
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Match, Optional, Sequence, Set, Tuple
 
 from .objects import CommitObject, TagObject, TreeObject
 from .repo import Repository
@@ -103,6 +103,13 @@ def _has_magic(pattern: str) -> bool:
     return any(char in _GLOB_MAGIC for char in pattern)
 
 
+def _glob_prefix(pattern: str) -> str:
+    positions = [pattern.find(char) for char in _GLOB_MAGIC if char in pattern]
+    if not positions:
+        return pattern
+    return pattern[: min(positions)].rstrip("/")
+
+
 def _matches(path: str, patterns: Tuple[str, ...]) -> bool:
     if not patterns:
         return True
@@ -122,14 +129,26 @@ def _may_descend(path: str, patterns: Tuple[str, ...]) -> bool:
         return True
     for pattern in patterns:
         if _has_magic(pattern):
-            # Exact pruning of arbitrary fnmatch expressions is surprisingly
-            # subtle; favor correctness over an unsafe false negative.
-            return True
+            prefix = _glob_prefix(pattern)
+            if not prefix or path.startswith(prefix) or prefix.startswith(path + "/"):
+                return True
+            continue
         if (
             pattern == path
             or pattern.startswith(path + "/")
             or path.startswith(pattern + "/")
         ):
+            return True
+    return False
+
+
+def _needs_nonrecursive_descent(path: str, patterns: Tuple[str, ...]) -> bool:
+    for pattern in patterns:
+        if _has_magic(pattern):
+            if "/" in pattern and _may_descend(path, (pattern,)):
+                return True
+            continue
+        if pattern.startswith(path + "/"):
             return True
     return False
 
@@ -179,10 +198,11 @@ def ls_tree(
                 if matched and (not recursive or show_trees or directories_only):
                     records.append(LsTreeEntry(item.mode, kind, oid, path))
 
-                needs_pathspec_walk = bool(selected_patterns) and _may_descend(
-                    path, selected_patterns
-                )
-                if recursive or needs_pathspec_walk:
+                if recursive:
+                    descend = _may_descend(path, selected_patterns)
+                else:
+                    descend = _needs_nonrecursive_descent(path, selected_patterns)
+                if descend:
                     child = repo.store.read(oid)
                     if not isinstance(child, TreeObject):
                         raise RuntimeError(
@@ -198,11 +218,11 @@ def ls_tree(
     return tuple(records)
 
 
-def _format_template(template: str, values: dict[str, str]) -> str:
+def _format_template(template: str, values: Dict[str, str]) -> str:
     sentinel = "\x00PERCENT\x00"
     escaped = template.replace("%%", sentinel)
 
-    def replace(match: re.Match[str]) -> str:
+    def replace(match: Match[str]) -> str:
         field = match.group(1)
         if field not in _FORMAT_FIELDS:
             raise ValueError(f"unsupported ls-tree format atom: {field!r}")
