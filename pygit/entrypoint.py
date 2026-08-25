@@ -9,10 +9,11 @@ from typing import Optional, Sequence
 
 from .cli import main as legacy_main
 from .plumbing import is_ancestor, list_refs, merge_bases, peel_oid, verify_ref
+from .ref_query import check_ref_format, format_ref, query_refs
 from .repo import Repository
 
 
-_EXTRA_COMMANDS = {"merge-base", "show-ref"}
+_EXTRA_COMMANDS = {"merge-base", "show-ref", "for-each-ref", "check-ref-format"}
 
 
 def _find_repo() -> Repository:
@@ -121,6 +122,111 @@ def _run_show_ref(argv: Sequence[str]) -> int:
     return 0
 
 
+def _run_for_each_ref(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit for-each-ref",
+        description="Filter, sort, and format references.",
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        metavar="N",
+        help="show at most N refs after sorting",
+    )
+    parser.add_argument(
+        "--sort",
+        action="append",
+        default=[],
+        metavar="KEY",
+        help="sort by refname/objectname/objecttype/date field; prefix '-' for descending",
+    )
+    parser.add_argument(
+        "--format",
+        default="%(objectname) %(refname)",
+        metavar="FORMAT",
+        help="format output using %(...)-style ref atoms",
+    )
+    parser.add_argument(
+        "--contains",
+        nargs="?",
+        const="HEAD",
+        metavar="COMMIT",
+        help="only refs whose tip contains COMMIT (default HEAD)",
+    )
+    parser.add_argument(
+        "--no-contains",
+        nargs="?",
+        const="HEAD",
+        metavar="COMMIT",
+        help="only refs whose tip does not contain COMMIT",
+    )
+    parser.add_argument(
+        "--merged",
+        nargs="?",
+        const="HEAD",
+        metavar="COMMIT",
+        help="only refs whose tip is reachable from COMMIT",
+    )
+    parser.add_argument(
+        "--no-merged",
+        nargs="?",
+        const="HEAD",
+        metavar="COMMIT",
+        help="only refs whose tip is not reachable from COMMIT",
+    )
+    parser.add_argument("pattern", nargs="*", metavar="PATTERN")
+    args = parser.parse_args(list(argv))
+
+    repo = _find_repo()
+    records = query_refs(
+        repo,
+        patterns=args.pattern,
+        sort_keys=args.sort,
+        count=args.count,
+        contains=args.contains,
+        no_contains=args.no_contains,
+        merged=args.merged,
+        no_merged=args.no_merged,
+    )
+    for record in records:
+        print(format_ref(record, args.format))
+    return 0
+
+
+def _run_check_ref_format(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit check-ref-format",
+        description="Validate a reference name.",
+    )
+    parser.add_argument(
+        "--allow-onelevel",
+        action="store_true",
+        help="permit a refname with no slash",
+    )
+    parser.add_argument(
+        "--branch",
+        action="store_true",
+        help="validate a branch name (one-level names allowed; leading '-' rejected)",
+    )
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        help="remove leading/repeated slashes before validation and print the result",
+    )
+    parser.add_argument("refname", metavar="REFNAME")
+    args = parser.parse_args(list(argv))
+
+    checked = check_ref_format(
+        args.refname,
+        allow_onelevel=args.allow_onelevel,
+        branch=args.branch,
+        normalize=args.normalize,
+    )
+    if args.normalize:
+        print(checked)
+    return 0
+
+
 def dispatch(argv: Sequence[str]) -> Optional[int]:
     """Run an extended command, or return ``None`` for the legacy CLI."""
     if not argv or argv[0] not in _EXTRA_COMMANDS:
@@ -129,7 +235,11 @@ def dispatch(argv: Sequence[str]) -> Optional[int]:
     try:
         if argv[0] == "merge-base":
             return _run_merge_base(argv[1:])
-        return _run_show_ref(argv[1:])
+        if argv[0] == "show-ref":
+            return _run_show_ref(argv[1:])
+        if argv[0] == "for-each-ref":
+            return _run_for_each_ref(argv[1:])
+        return _run_check_ref_format(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
