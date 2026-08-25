@@ -30,10 +30,10 @@ class ReflogShowEntry:
 
 
 def _log_exists(repo: Repository, ref: str) -> bool:
-    try:
-        return _safe_log_path(repo, ref).is_file()
-    except (ValueError, RuntimeError):
-        return False
+    # ``ref`` is generated as a fully-qualified candidate below. Any error from
+    # the shared safe-path validator therefore represents an unsafe reflog path
+    # and must not be downgraded to "missing" during short-name resolution.
+    return _safe_log_path(repo, ref).is_file()
 
 
 def normalize_reflog_ref(repo: Repository, ref: str) -> str:
