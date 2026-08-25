@@ -13,6 +13,7 @@ from typing import Sequence
 
 from .entrypoint import _find_repo
 from .hash_object import hash_object_data, write_object_data
+from .merge_tree import merge_tree
 from .runtime import main as runtime_main
 
 
@@ -78,14 +79,47 @@ def _run_hash_object(argv: Sequence[str]) -> int:
     return 0
 
 
+def _run_merge_tree(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit merge-tree",
+        description="Compute a three-way merge without changing HEAD, index, or worktree.",
+    )
+    parser.add_argument(
+        "--messages",
+        action="store_true",
+        help="print merge-base and conflict diagnostics in addition to the result",
+    )
+    parser.add_argument("ours", metavar="OURS")
+    parser.add_argument("theirs", metavar="THEIRS")
+    args = parser.parse_args(list(argv))
+
+    result = merge_tree(_find_repo(), args.ours, args.theirs)
+    if result.clean:
+        assert result.tree_oid is not None
+        print(result.tree_oid)
+        if args.messages:
+            print(f"base {result.base_oid or '(none)'}")
+            print("clean")
+        return 0
+
+    if args.messages:
+        print(f"base {result.base_oid or '(none)'}")
+    for path in result.conflicts:
+        print(f"CONFLICT\t{path}")
+    return 1
+
+
 def main() -> None:
     argv = sys.argv[1:]
-    if not argv or argv[0] != "hash-object":
+    if not argv or argv[0] not in {"hash-object", "merge-tree"}:
         runtime_main()
         return
 
     try:
-        code = _run_hash_object(argv[1:])
+        if argv[0] == "hash-object":
+            code = _run_hash_object(argv[1:])
+        else:
+            code = _run_merge_tree(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         code = 1
