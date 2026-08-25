@@ -36,6 +36,7 @@ Index File (.idx) Binary Structure:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import struct
 import zlib
@@ -73,8 +74,6 @@ class PackWriter:
         offsets: List[int] = []
         crcs: List[int] = []
         shas: List[str] = []
-
-        import hashlib
 
         for sha, obj in self.objects:
             shas.append(sha)
@@ -158,13 +157,16 @@ class PackWriter:
 
 
 class PackReader:
-    """Reads objects from a paired .pack and .idx file."""
+    """Reads validated objects from a paired .pack and .idx file."""
 
     def __init__(self, idx_path: Path) -> None:
         self.idx_path = idx_path
         self.pack_path = idx_path.with_suffix(".pack")
         self._shas: List[str] = []
         self._offsets: Dict[str, int] = {}
+        self._crcs: Dict[str, int] = {}
+        self._pack_bytes: Optional[bytes] = None
+        self._payload_end: Optional[int] = None
         self._load_idx()
 
     def _load_idx(self) -> None:
@@ -176,6 +178,49 @@ class PackReader:
         index = parse_index(self.idx_path)
         self._shas = [entry.oid for entry in index.entries]
         self._offsets = {entry.oid: entry.offset for entry in index.entries}
+        self._crcs = {entry.oid: entry.crc32 for entry in index.entries}
+
+    def _load_pack_image(self) -> Tuple[bytes, int]:
+        """Load and validate the pack envelope without decompressing objects."""
+        if self._pack_bytes is not None and self._payload_end is not None:
+            return self._pack_bytes, self._payload_end
+
+        if not self.pack_path.is_file():
+            raise FileNotFoundError(self.pack_path)
+        pack_bytes = self.pack_path.read_bytes()
+        if len(pack_bytes) < 44:
+            raise ValueError("pack file is too short")
+        if pack_bytes[:4] != b"PACK":
+            raise ValueError("invalid pack signature")
+
+        version, object_count = struct.unpack(">II", pack_bytes[4:12])
+        if version != 2:
+            raise ValueError(f"unsupported pack version: {version}")
+        if object_count != len(self._shas):
+            raise ValueError(
+                f"pack/index object count mismatch: pack has {object_count}, "
+                f"index has {len(self._shas)}"
+            )
+
+        payload_end = len(pack_bytes) - 32
+        expected_checksum = pack_bytes[payload_end:]
+        actual_checksum = hashlib.sha256(pack_bytes[:payload_end]).digest()
+        if actual_checksum != expected_checksum:
+            raise ValueError("pack SHA-256 checksum mismatch")
+
+        for offset in self._offsets.values():
+            if offset < 12 or offset >= payload_end:
+                raise ValueError(
+                    f"pack index object offset {offset} is outside the pack payload"
+                )
+
+        self._pack_bytes = pack_bytes
+        self._payload_end = payload_end
+        return pack_bytes, payload_end
+
+    def _entry_end(self, offset: int, payload_end: int) -> int:
+        later_offsets = [candidate for candidate in self._offsets.values() if candidate > offset]
+        return min(later_offsets) if later_offsets else payload_end
 
     def has_object(self, sha: str) -> bool:
         return sha in self._offsets
@@ -187,34 +232,47 @@ class PackReader:
         if sha not in self._offsets:
             return None
 
+        pack_bytes, payload_end = self._load_pack_image()
         offset = self._offsets[sha]
-        pack_bytes = self.pack_path.read_bytes()
+        entry_end = self._entry_end(offset, payload_end)
 
-        # Parse varint header
-        pos = offset
-        first = pack_bytes[pos]
-        type_id = (first >> 4) & 0x07
-        size = first & 0x0F
-        shift = 4
-        pos += 1
-        while first & 0x80:
-            first = pack_bytes[pos]
-            size |= (first & 0x7F) << shift
-            shift += 7
-            pos += 1
+        # Import the strict Phase 66 primitives lazily to avoid a module cycle:
+        # pack_plumbing itself imports the pack type-id table above.
+        from .pack_plumbing import _decompress_entry, _read_varint, _validate_store_bytes
 
-        # Decompress object payload
-        compressed = pack_bytes[pos:]
-        store_bytes = zlib.decompress(compressed)
+        type_id, declared_size, compressed_pos = _read_varint(
+            pack_bytes, offset, entry_end
+        )
+        type_name = _ID_TYPE_MAP.get(type_id)
+        if type_name is None:
+            raise ValueError(f"unsupported packed object type id: {type_id}")
 
-        type_name = _ID_TYPE_MAP.get(type_id, b"blob")
-        klass = {
-            b"blob": BlobObject,
-            b"tree": TreeObject,
-            b"commit": CommitObject,
-            b"tag": TagObject,
-        }.get(type_name, BlobObject)
+        store_bytes, next_pos = _decompress_entry(
+            pack_bytes,
+            compressed_pos,
+            entry_end,
+            declared_size,
+            offset,
+        )
+        if next_pos != entry_end:
+            raise ValueError(
+                f"pack entry at offset {offset} ends at {next_pos}, "
+                f"but index boundary is {entry_end}"
+            )
 
-        obj = klass.__new__(klass)
-        obj.deserialize(store_bytes[store_bytes.index(b"\x00") + 1:])
-        return obj
+        actual_crc = zlib.crc32(pack_bytes[offset:entry_end]) & 0xFFFFFFFF
+        expected_crc = self._crcs[sha]
+        if actual_crc != expected_crc:
+            raise ValueError(
+                f"CRC-32 mismatch for object {sha} at offset {offset}"
+            )
+
+        actual_oid = _validate_store_bytes(store_bytes, type_name)
+        if actual_oid != sha:
+            raise ValueError(
+                f"pack index object ID mismatch: requested {sha}, decoded {actual_oid}"
+            )
+
+        from .store import ObjectStore
+
+        return ObjectStore._parse(store_bytes)
