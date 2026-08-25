@@ -32,7 +32,7 @@ else:
 
 ## Merge rules
 
-Identical entries are kept directly. If only one side differs from the base, that side wins. Independent text-line changes are merged through the repository's existing three-way line merger. Ambiguous cases are surfaced rather than guessed, including:
+Identical entries are kept directly. If only one side differs from the base, that side wins. Independent line changes are auto-merged only when all three blob versions are lossless UTF-8 text. NUL-containing or invalid UTF-8 data is treated as binary rather than decoded with replacement characters. Ambiguous cases are surfaced rather than guessed, including:
 
 - add/add with different objects
 - modify/delete
