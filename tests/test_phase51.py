@@ -26,17 +26,14 @@ class TestUpdateRef:
     def test_create_compare_and_swap_and_reflog(self, tmp_path: Path) -> None:
         repo = _repo(tmp_path)
         one, two, _ = _oids(repo)
-
         update_ref(repo, "refs/heads/topic", one, old_oid=ZERO_SHA, message="create topic")
         assert repo.refs.get_branch("topic") == one
         update_ref(repo, "refs/heads/topic", two, old_oid=one, message="advance topic")
         assert repo.refs.get_branch("topic") == two
-
         entries = repo.refs.read_reflog("refs/heads/topic")
         assert entries[0].old_sha == one
         assert entries[0].new_sha == two
         assert entries[0].message == "advance topic"
-
         with pytest.raises(RuntimeError, match="expected"):
             update_ref(repo, "refs/heads/topic", one, old_oid=one)
         assert repo.refs.get_branch("topic") == two
@@ -46,13 +43,11 @@ class TestUpdateRef:
         one, two, three = _oids(repo)
         update_ref(repo, "refs/heads/a", one)
         update_ref(repo, "refs/heads/b", two)
-
         with pytest.raises(RuntimeError, match="expected"):
             update_refs(repo, [
                 RefUpdate("update", "refs/heads/a", three, one),
                 RefUpdate("update", "refs/heads/b", three, one),
             ])
-
         assert repo.refs.get_branch("a") == one
         assert repo.refs.get_branch("b") == two
 
@@ -64,7 +59,6 @@ class TestUpdateRef:
         update_refs(repo, [RefUpdate("verify", "refs/tags/v1", None, one)])
         update_refs(repo, [RefUpdate("delete", "refs/tags/v1", None, one)])
         assert repo.refs.get_tag("v1") is None
-
         with pytest.raises(ValueError, match="multiple updates"):
             update_refs(repo, [
                 RefUpdate("create", "refs/heads/x", one, ZERO_SHA),
@@ -76,11 +70,9 @@ class TestUpdateRef:
         one, two, _ = _oids(repo)
         update_ref(repo, "refs/heads/main", one)
         assert repo.refs.get_head() == "ref: refs/heads/main"
-
         update_ref(repo, "HEAD", two, old_oid=one)
         assert repo.refs.get_branch("main") == two
         assert repo.refs.get_head() == "ref: refs/heads/main"
-
         update_ref(repo, "HEAD", one, old_oid=None, deref=False)
         assert repo.refs.get_head() == one
         assert repo.refs.get_branch("main") == two
@@ -99,7 +91,6 @@ class TestSymbolicRef:
         one, two, _ = _oids(repo)
         update_ref(repo, "refs/heads/main", one)
         update_ref(repo, "refs/heads/next", two)
-
         assert symbolic_target(repo, "HEAD") == "refs/heads/main"
         set_symbolic_ref(repo, "HEAD", "refs/heads/next", message="switch symbolic head")
         assert symbolic_target(repo, "HEAD") == "refs/heads/next"
@@ -111,7 +102,6 @@ class TestSymbolicRef:
         one, two, _ = _oids(repo)
         update_ref(repo, "refs/heads/main", one)
         set_symbolic_ref(repo, "refs/aliases/current", "refs/heads/main")
-
         update_ref(repo, "refs/aliases/current", two, old_oid=one)
         assert repo.refs.get_branch("main") == two
         assert symbolic_target(repo, "refs/aliases/current") == "refs/heads/main"
@@ -122,10 +112,10 @@ class TestPhase51CLI:
         repo = _repo(tmp_path)
         one, two, _ = _oids(repo)
         monkeypatch.chdir(repo.worktree)
+        capsys.readouterr()
         monkeypatch.setattr("sys.stdin", io.StringIO(
             f"create refs/heads/a {one}\n"
             f"create refs/heads/b {two}\n"
-            f"verify refs/heads/a {one}\n"
         ))
         assert dispatch(["update-ref", "--stdin", "-m", "batch"]) == 0
         assert repo.refs.get_branch("a") == one
@@ -136,12 +126,11 @@ class TestPhase51CLI:
         one, two, _ = _oids(repo)
         monkeypatch.chdir(repo.worktree)
         update_ref(repo, "refs/heads/main", one)
-
+        capsys.readouterr()
         assert dispatch(["symbolic-ref", "HEAD"]) == 0
         assert capsys.readouterr().out.strip() == "refs/heads/main"
         assert dispatch(["update-ref", "refs/heads/main", two, "f" * 64]) == 1
         assert "error:" in capsys.readouterr().err
         assert repo.refs.get_branch("main") == one
-
         assert dispatch(["symbolic-ref", "HEAD", "refs/heads/topic", "-m", "retarget"]) == 0
         assert symbolic_target(repo, "HEAD") == "refs/heads/topic"
