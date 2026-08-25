@@ -134,6 +134,17 @@ def _merged_mode(base: str, ours: str, theirs: str) -> Optional[str]:
     return None
 
 
+def _is_mergeable_text(data: bytes) -> bool:
+    """Return True only for lossless UTF-8 text accepted by the line merger."""
+    if b"\x00" in data:
+        return False
+    try:
+        data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def _merge_entry(
     repo: Repository,
     path: str,
@@ -178,7 +189,7 @@ def _merge_entry(
     base_data = _blob_bytes(repo, base, path)
     our_data = _blob_bytes(repo, ours, path)
     their_data = _blob_bytes(repo, theirs, path)
-    if b"\x00" in base_data or b"\x00" in our_data or b"\x00" in their_data:
+    if not all(_is_mergeable_text(data) for data in (base_data, our_data, their_data)):
         return None, _conflict(path, "binary", base, ours, theirs)
 
     merged, has_conflict = Repository._merge_lines_three_way(
