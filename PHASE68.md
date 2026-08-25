@@ -48,4 +48,4 @@ for entry in entries:
 
 ## Scope boundary
 
-This phase intentionally focuses on commit-set graph semantics. Object enumeration (`--objects`), path limiting, reflog walks, bitmap acceleration, and the broader native Git revision-option surface remain out of scope. The repository continues to use its SHA-256 object model rather than claiming native Git object-format compatibility.
+Phase 68 intentionally focused on commit-set graph semantics. Phase 75 subsequently adds OID-only object enumeration via `rev-list --objects` and `rev_list_objects()`. Path limiting, pathname annotations, reflog walks, bitmap acceleration, and the broader native Git revision-option surface remain out of scope. The repository continues to use its SHA-256 object model rather than claiming native Git object-format compatibility.
