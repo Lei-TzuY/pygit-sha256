@@ -23,6 +23,7 @@ from .checkout_index import checkout_index
 from .hash_object import hash_object_data, hash_path, object_envelope, write_object_data
 from .diff_plumbing import DiffEntry, diff_files, diff_index, diff_tree, format_diff_entries
 from .fsck import FsckIssue, FsckReport, fsck
+from .merge_file import MergeFileResult, merge_file, merge_file_data
 from .merge_tree import MergeConflict, MergeTreeResult, merge_tree
 from .revision import (
     RevisionResult,
@@ -67,6 +68,9 @@ __all__ = [
     "FsckIssue",
     "FsckReport",
     "fsck",
+    "MergeFileResult",
+    "merge_file_data",
+    "merge_file",
     "MergeConflict",
     "MergeTreeResult",
     "merge_tree",
