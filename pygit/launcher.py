@@ -17,6 +17,7 @@ from .hash_object import hash_object_data, write_object_data
 from .merge_file import merge_file
 from .merge_tree import merge_tree
 from .mktag import make_tag
+from .remote_query import ls_remote, resolve_remote_url
 from .runtime import main as runtime_main
 
 
@@ -254,9 +255,66 @@ def _run_mktag(argv: Sequence[str]) -> int:
     return 0
 
 
+def _run_ls_remote(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit ls-remote",
+        description="List refs advertised by a smart HTTP remote without fetching objects.",
+    )
+    parser.add_argument("--heads", action="store_true", help="show branch refs only")
+    parser.add_argument("--tags", action="store_true", help="show tag refs only")
+    parser.add_argument(
+        "--refs",
+        action="store_true",
+        dest="refs_only",
+        help="omit pseudorefs such as HEAD and peeled tag helper refs",
+    )
+    parser.add_argument("--symref", action="store_true", help="show symbolic-ref targets such as HEAD")
+    parser.add_argument(
+        "--exit-code",
+        action="store_true",
+        help="return status 2 when no refs match the requested filters",
+    )
+    parser.add_argument(
+        "--get-url",
+        action="store_true",
+        help="resolve and print the remote URL without contacting it",
+    )
+    parser.add_argument("repository", metavar="REPOSITORY")
+    parser.add_argument("pattern", nargs="*", metavar="PATTERN")
+    args = parser.parse_args(list(argv))
+
+    try:
+        url = resolve_remote_url(args.repository)
+        repo = None
+    except KeyError:
+        repo = _find_repo()
+        url = resolve_remote_url(args.repository, repo)
+
+    if args.get_url:
+        print(url)
+        return 0
+
+    result = ls_remote(
+        url,
+        repo=repo,
+        heads=args.heads,
+        tags=args.tags,
+        refs_only=args.refs_only,
+        patterns=args.pattern,
+    )
+    if args.symref:
+        for name, target in result.symrefs:
+            print(f"ref: {target}\t{name}")
+    for ref in result.refs:
+        print(f"{ref.oid}\t{ref.name}")
+    if args.exit_code and not result.refs:
+        return 2
+    return 0
+
+
 def main() -> None:
     argv = sys.argv[1:]
-    commands = {"hash-object", "fsck", "merge-tree", "merge-file", "mktag"}
+    commands = {"hash-object", "fsck", "merge-tree", "merge-file", "mktag", "ls-remote"}
     if not argv or argv[0] not in commands:
         runtime_main()
         return
@@ -270,8 +328,10 @@ def main() -> None:
             code = _run_merge_tree(argv[1:])
         elif argv[0] == "merge-file":
             code = _run_merge_file(argv[1:])
-        else:
+        elif argv[0] == "mktag":
             code = _run_mktag(argv[1:])
+        else:
+            code = _run_ls_remote(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         code = 1
