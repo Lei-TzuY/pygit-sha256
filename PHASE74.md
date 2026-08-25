@@ -10,16 +10,26 @@ The installed command now uses `pygit.gc.garbage_collect()` instead. The legacy 
 
 ## Pipeline
 
-A normal pass uses one frozen policy timestamp and performs:
+A normal pass freezes one policy timestamp and performs:
 
 1. full `fsck` health check;
-2. dry-run/preflight of every requested maintenance phase;
-3. full reachable-object `repack -a -d`;
-4. `reflog expire --all` using the configured recovery windows;
-5. conservative loose unreachable-object `prune`;
+2. dry-run/preflight of the requested repack, reflog-expiry, and prune phases;
+3. verified full reachable-object `repack -a -d`;
+4. atomic `reflog expire --all` using the configured recovery windows;
+5. grace-aware loose unreachable-object `prune`;
 6. final full `fsck` validation.
 
-All requested phases are planned before the first real mutation. This means a malformed reflog, corrupt pack/index pair, or unhealthy reachable graph is rejected before repack changes storage.
+All requested phases are planned before the first real mutation. A malformed reflog, corrupt pack/index pair, unhealthy current graph, or missing historical root needed by this pass is therefore rejected before repack changes storage.
+
+Repack runs before reflog expiry, so a pack-write failure cannot shorten recovery metadata.
+
+## Same-cycle recovery retention
+
+A reflog record selected for expiry may be the last name for an old commit graph. Removing that record and pruning its old objects in the same command would collapse the recovery window abruptly.
+
+Phase 74 therefore collects every non-zero old/new OID from reflog records expired in this invocation and passes those OIDs to `prune` as extra retention roots. The reflog record may disappear now, but its historical commit/tree/blob closure survives the current gc pass. A later gc may reclaim it once no recovery root remains and the normal object-age policy permits deletion.
+
+This rule applies even when explicit `--prune=now` and immediate reflog cutoffs are requested.
 
 ## Default retention policy
 
@@ -27,7 +37,7 @@ All requested phases are planned before the first real mutation. This means a ma
 - unreachable reflog expiry: 30 days;
 - loose unreachable-object prune grace: 2 weeks.
 
-The three cutoffs are intentionally independent. Expiring a reflog record does not itself delete an object, and an object still younger than the prune cutoff remains available after its reflog recovery record expires.
+The three cutoffs are independent. Expiring metadata never makes its historical object graph disposable during the same gc invocation.
 
 ## CLI
 
@@ -43,15 +53,19 @@ pygit gc --reflog-expire-unreachable=45.days.ago
 
 `WHEN` accepts the same deterministic expiry subset as `prune`: `now`, `never`, `default`, an epoch timestamp, or `N.minutes.ago`, `N.hours.ago`, `N.days.ago`, and `N.weeks.ago`.
 
-`--no-prune` skips deletion of unreachable loose objects. Repack may still remove verified duplicate loose copies of objects that have a trusted packed copy; that operation is redundancy cleanup, not unreachable-object pruning.
+`--no-prune` preserves the historical project CLI contract as a **no-write compatibility mode**. It validates and reports the complete maintenance plan but does not install packs, rewrite reflogs, or remove objects. It is effectively a legacy spelling of `--dry-run`.
 
-`--no-reflog-expire` preserves every existing recovery record, so the subsequent prune phase continues to treat all reflog old/new OIDs as retention roots.
+For programmatic stage-level control, `garbage_collect(..., prune_objects=False)` can still run verified repack and reflog expiry while skipping unreachable loose-object pruning.
+
+`--no-reflog-expire` preserves every existing recovery record; the prune phase continues to treat all reflog old/new OIDs as retention roots.
 
 ## Dry-run semantics
 
 `--dry-run` executes the same health, pack, reflog parsing, and loose-object validation paths without writing repository state. No pack is installed, no reflog is rewritten, and no loose object is removed.
 
-The prune portion of dry-run is deliberately conservative: because the reflogs are not actually rewritten, objects protected only by reflog records that *would* expire may not yet appear in the dry-run prune candidate list. The verbose output labels this explicitly.
+Dry-run also computes the OIDs whose reflog records *would* expire and supplies them as explicit prune roots. This intentionally matches the real pass's same-cycle recovery boundary rather than showing objects that the real invocation would refuse to delete.
+
+The installed command always emits a compact summary; `--verbose` adds per-stage OIDs, pack removals, reflog records, and the freshly expired roots preserved for this pass.
 
 ## Python API
 
@@ -62,33 +76,42 @@ result = garbage_collect(repo)
 print(result.repack.object_count)
 print(result.reflog.expired if result.reflog else 0)
 print(result.prune.pruned if result.prune else 0)
+print(result.preserved_expired_roots)
 ```
 
-`GarbageCollectResult` exposes the repack, reflog-expiry, and prune sub-results along with preflight/final reachable counts.
+`GarbageCollectResult` exposes the repack, reflog-expiry, and prune sub-results, preflight/final reachable counts, same-cycle preserved recovery roots, and dry-run state.
 
 ## Safety properties
 
-- full current repository integrity is required before maintenance;
-- all requested phases are dry-planned before the first mutation;
+- full repository integrity is required before maintenance;
+- every requested destructive phase is dry-planned before the first mutation;
 - repack uses strict pack/index validation and verified redundant-copy cleanup;
-- reflogs remain recovery roots until explicitly expired by policy;
+- reflogs remain recovery roots until policy expires them;
+- freshly expired reflog roots survive the current gc invocation;
 - prune keeps its two-week default object-age grace period;
-- malformed reflogs prevent the entire pass from starting;
-- corrupt current connectivity prevents the entire pass from starting;
+- malformed reflogs and missing historical roots fail before pack creation;
+- corrupt current connectivity fails before any maintenance;
 - a final full fsck verifies the resulting object database;
-- `gc --dry-run` never writes repository state.
+- `gc --dry-run` and legacy `gc --no-prune` never write repository state.
+
+## Compatibility boundary
+
+This remains pygit's educational SHA-256 object and pack format. Phase 74 does not claim native Git pack compatibility, delta compression, bitmap/MIDX maintenance, background scheduling, auto-gc heuristics, or native Git's complete configuration surface.
+
+`repack -a -d` remains deliberately conservative: an existing pack that contains an object outside the newly generated reachable pack is retained. `gc` therefore does not force-delete unreachable objects that exist only inside such a pack.
 
 ## Regression coverage
 
 Phase 74 tests cover:
 
-- complete repack → reflog-expire → prune lifecycle;
-- current objects remaining readable after loose duplicates are removed;
-- recent reflogs preserving recovery-only commit/tree/blob closure;
-- `--no-reflog-expire` retention;
-- `--no-prune` behavior;
+- verified repack → reflog-expire → prune orchestration;
+- one-gc-cycle retention for freshly expired historical commit/tree/blob closure;
+- reclamation on a later pass once that recovery root is gone;
+- recent reflog and `--no-reflog-expire` retention;
+- API-level prune skipping;
 - full-pipeline dry-run immutability;
-- malformed-reflog preflight failure before pack creation;
+- legacy `gc --no-prune` no-write compatibility;
+- malformed-reflog and missing-historical-root preflight failure before pack creation;
 - unhealthy current-connectivity failure before any maintenance;
-- explicit immediate cutoff overrides;
-- installed `pygit gc` routing without the legacy argparse path.
+- explicit immediate cutoff behavior;
+- installed `pygit gc` routing through the safe application front door.
