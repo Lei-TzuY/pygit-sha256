@@ -9,7 +9,7 @@ description     = "A minimal Git clone in Python (SHA-256, zlib, JSON index)"
 requires-python = ">=3.9"
 
 [project.scripts]
-pygit = "pygit.launcher:main"
+pygit = "pygit.application:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
