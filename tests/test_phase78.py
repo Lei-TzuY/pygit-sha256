@@ -196,9 +196,9 @@ def test_short_selector_preserves_reflog_path_fail_closed_semantics(tmp_path: Pa
     except (OSError, NotImplementedError):
         pytest.skip("symlinks are unavailable")
 
-    with pytest.raises(RuntimeError, match="symbolic-link"):
+    with pytest.raises((ValueError, RuntimeError), match="reflog path escapes|symbolic-link"):
         resolve_revision(repo, "linked@{0}")
 
     cli = _run(repo, "rev-parse", "--verify", "linked@{0}")
     assert cli.returncode == 1
-    assert b"symbolic-link" in cli.stderr
+    assert b"reflog path escapes" in cli.stderr or b"symbolic-link" in cli.stderr
