@@ -16,6 +16,7 @@ from typing import List, Optional, Sequence, Union
 from .objects import CommitObject, TagObject
 from .plumbing import ancestor_distances, is_ancestor, list_refs, peel_oid, resolve_commit
 from .repo import Repository
+from .revision import resolve_revision
 
 
 _FORBIDDEN_REF_CHARS = frozenset(" ~^:?*[\\")
@@ -68,13 +69,19 @@ def query_refs(
     patterns: Sequence[str] = (),
     sort_keys: Sequence[str] = (),
     count: Optional[int] = None,
+    points_at: Sequence[str] = (),
     contains: Optional[str] = None,
     no_contains: Optional[str] = None,
     merged: Optional[str] = None,
     no_merged: Optional[str] = None,
 ) -> List[RefRecord]:
     """
-    Return refs after Git-style pattern, graph, sort, and count filtering.
+    Return refs after Git-style object, pattern, graph, sort, and count filters.
+
+    ``points_at`` accepts arbitrary object-ish expressions. A ref matches when
+    either its stored object ID or the recursively peeled target of an annotated
+    tag equals any requested object. Multiple point targets therefore compose as
+    an OR filter, matching native ``for-each-ref`` behavior.
 
     ``contains=X`` keeps refs whose tip contains X in its ancestry.
     ``merged=X`` keeps refs whose tip is already reachable from X.
@@ -89,6 +96,14 @@ def query_refs(
         for oid, refname in list_refs(repo)
         if not patterns or any(_match_pattern(refname, p) for p in patterns)
     ]
+
+    point_targets = {resolve_revision(repo, expression) for expression in points_at}
+    if point_targets:
+        records = [
+            record
+            for record in records
+            if record.oid in point_targets or record.peeled_oid in point_targets
+        ]
 
     contains_sha = resolve_commit(repo, contains) if contains else None
     no_contains_sha = resolve_commit(repo, no_contains) if no_contains else None
