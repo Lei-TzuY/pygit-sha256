@@ -15,6 +15,15 @@ Quick start::
 
 from .repo import Repository
 from .plumbing import is_ancestor, list_refs, merge_bases
+from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
 
-__all__ = ["Repository", "is_ancestor", "list_refs", "merge_bases"]
+__all__ = [
+    "Repository",
+    "is_ancestor",
+    "list_refs",
+    "merge_bases",
+    "merge_bases_many",
+    "octopus_merge_bases",
+    "independent_commits",
+]
 __version__ = "0.1.0"
