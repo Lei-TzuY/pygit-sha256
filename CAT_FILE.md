@@ -1,6 +1,6 @@
 # Advanced `cat-file` plumbing
 
-Phase 55 extends object inspection beyond the original single-object `-t`, `-s`, and `-p` modes. Phase 82 adds the interactive command-oriented batch protocol used by long-lived tooling. Phase 84 adds Git-style custom headers for every batch mode. Phase 86 adds storage-wide object enumeration.
+Phase 55 extends object inspection beyond the original single-object `-t`, `-s`, and `-p` modes. Phase 82 adds the interactive command-oriented batch protocol used by long-lived tooling. Phase 84 adds Git-style custom headers for every batch mode. Phase 88 adds storage-wide object enumeration.
 
 ## Object expressions
 
