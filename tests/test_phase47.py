@@ -163,6 +163,7 @@ class TestPhase47CLI:
     def test_for_each_ref_dispatch(self, tmp_path: Path, monkeypatch, capsys) -> None:
         repo, _, _ = _fixture_repo(tmp_path)
         monkeypatch.chdir(repo.worktree)
+        capsys.readouterr()  # discard Repository.init() status output
 
         code = dispatch(
             [
