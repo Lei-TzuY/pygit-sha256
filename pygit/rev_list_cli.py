@@ -8,6 +8,7 @@ from typing import Sequence
 from .entrypoint import _find_repo
 from .rev_list import rev_list
 from .rev_list_object_names import rev_list_named_objects, rev_list_object_edges
+from .rev_list_sides import count_sides, rev_list_sides
 
 
 def run_rev_list(argv: Sequence[str]) -> int:
@@ -37,6 +38,17 @@ def run_rev_list(argv: Sequence[str]) -> int:
         action="store_true",
         help="mark commits from the left/right side of one A...B symmetric range",
     )
+    side_group = parser.add_mutually_exclusive_group()
+    side_group.add_argument(
+        "--left-only",
+        action="store_true",
+        help="emit only the left side of one A...B symmetric range",
+    )
+    side_group.add_argument(
+        "--right-only",
+        action="store_true",
+        help="emit only the right side of one A...B symmetric range",
+    )
     parser.add_argument("--first-parent", action="store_true", help="follow only the first parent of merge commits")
     parser.add_argument("--topo-order", action="store_true", help="never show a parent before a selected child")
     parser.add_argument("--reverse", action="store_true", help="reverse the final selected commit order")
@@ -58,9 +70,13 @@ def run_rev_list(argv: Sequence[str]) -> int:
     args = parser.parse_args(list(argv))
 
     object_mode = args.objects or args.objects_edge
+    side_mode = args.left_right or args.left_only or args.right_only
     if object_mode:
-        if args.left_right:
-            parser.error("--objects/--objects-edge cannot be combined with --left-right")
+        if side_mode:
+            parser.error(
+                "--objects/--objects-edge cannot be combined with "
+                "--left-right/--left-only/--right-only"
+            )
 
         repo = _find_repo()
         objects = rev_list_named_objects(
@@ -95,21 +111,42 @@ def run_rev_list(argv: Sequence[str]) -> int:
                 print(f"{entry.oid} {entry.path}")
         return 0
 
-    entries = rev_list(
-        _find_repo(),
-        args.revision,
-        all_refs=args.all,
-        first_parent=args.first_parent,
-        topo_order=args.topo_order,
-        reverse=args.reverse,
-        skip=args.skip,
-        max_count=args.max_count,
-        left_right=args.left_right,
-    )
+    repo = _find_repo()
+    if side_mode:
+        entries = rev_list_sides(
+            repo,
+            args.revision,
+            all_refs=args.all,
+            first_parent=args.first_parent,
+            topo_order=args.topo_order,
+            reverse=args.reverse,
+            skip=args.skip,
+            max_count=args.max_count,
+            left_only=args.left_only,
+            right_only=args.right_only,
+        )
+    else:
+        entries = rev_list(
+            repo,
+            args.revision,
+            all_refs=args.all,
+            first_parent=args.first_parent,
+            topo_order=args.topo_order,
+            reverse=args.reverse,
+            skip=args.skip,
+            max_count=args.max_count,
+            left_right=False,
+        )
+
     if args.count:
-        print(len(entries))
+        if args.left_right:
+            left, right = count_sides(entries)
+            print(f"{left}\t{right}")
+        else:
+            print(len(entries))
         return 0
 
     for entry in entries:
-        print(f"{entry.side or ''}{entry.oid}")
+        marker = entry.side if args.left_right else ""
+        print(f"{marker or ''}{entry.oid}")
     return 0
