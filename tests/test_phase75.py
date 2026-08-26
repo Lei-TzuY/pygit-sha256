@@ -12,6 +12,7 @@ from pygit import Repository
 from pygit.objects import BlobObject, CommitObject, Identity, TreeEntry, TreeObject
 from pygit.pack_objects import reachable_objects
 from pygit.rev_list import rev_list_objects
+from pygit.rev_list_object_names import rev_list_named_objects
 
 
 def _tree(repo: Repository, entries: list[tuple[str, bytes]]) -> tuple[str, dict[str, str]]:
@@ -220,18 +221,28 @@ def test_all_objects_respects_shallow_boundaries_and_ignores_noncommit_refs(tmp_
     assert all(entry.type_name != "tag" for entry in all_entries)
 
 
-def test_cli_objects_matches_api_and_rejects_ambiguous_modes(tmp_path: Path) -> None:
+def test_cli_objects_matches_named_api_and_rejects_left_right(tmp_path: Path) -> None:
     repo, _ = _graph(tmp_path)
 
-    expected = _oids(rev_list_objects(repo, ["left..HEAD"], topo_order=True))
-    result = _run(repo, "rev-list", "--objects", "--topo-order", "left..HEAD")
+    expected = [
+        entry.oid
+        for entry in rev_list_named_objects(repo, ["left..HEAD"], topo_order=True)
+    ]
+    result = _run(
+        repo,
+        "rev-list",
+        "--objects",
+        "--no-object-names",
+        "--topo-order",
+        "left..HEAD",
+    )
     assert result.returncode == 0, result.stderr.decode()
     assert result.stdout.decode().splitlines() == expected
 
     counted = _run(repo, "rev-list", "--objects", "--count", "HEAD")
-    assert counted.returncode != 0
-    assert b"--objects cannot be combined with --count" in counted.stderr
+    assert counted.returncode == 0, counted.stderr.decode()
+    assert counted.stdout == f"{len(rev_list_named_objects(repo, ['HEAD']))}\n".encode("ascii")
 
     marked = _run(repo, "rev-list", "--objects", "--left-right", "left...right")
     assert marked.returncode != 0
-    assert b"--objects cannot be combined with --left-right" in marked.stderr
+    assert b"--objects/--objects-edge cannot be combined with --left-right" in marked.stderr
