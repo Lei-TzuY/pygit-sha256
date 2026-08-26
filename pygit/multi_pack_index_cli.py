@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Sequence
 
 from .entrypoint import _find_repo
 from .multi_pack_index import verify_multi_pack_index, write_multi_pack_index
 from .multi_pack_index_expire import expire_multi_pack_index
 from .multi_pack_index_repack import repack_multi_pack_index
+from .multi_pack_index_stdin import write_multi_pack_index_from_packs
 
 
 _SIZE_SUFFIXES = {
@@ -51,6 +53,11 @@ def run_multi_pack_index(argv: Sequence[str]) -> int:
         metavar="PACK",
         help="prefer this pack when duplicate object copies exist",
     )
+    write_parser.add_argument(
+        "--stdin-packs",
+        action="store_true",
+        help="read .idx basenames from stdin and index only those packs",
+    )
     subparsers.add_parser(
         "verify",
         help="verify the multi-pack-index and its source pack-index mappings",
@@ -76,7 +83,19 @@ def run_multi_pack_index(argv: Sequence[str]) -> int:
     pack_dir = repo.pygit_dir / "objects" / "pack"
     midx_path = pack_dir / "multi-pack-index"
     if args.command == "write":
-        write_multi_pack_index(pack_dir, preferred_pack=args.preferred_pack)
+        if args.stdin_packs:
+            result = write_multi_pack_index_from_packs(
+                pack_dir,
+                sys.stdin,
+                preferred_pack=args.preferred_pack,
+            )
+            if result.ignored_preferred_pack is not None:
+                print(
+                    f"warning: unknown preferred pack: {result.ignored_preferred_pack!r}",
+                    file=sys.stderr,
+                )
+        else:
+            write_multi_pack_index(pack_dir, preferred_pack=args.preferred_pack)
         return 0
     if args.command == "expire":
         expire_multi_pack_index(midx_path)
