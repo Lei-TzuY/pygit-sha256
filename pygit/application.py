@@ -16,9 +16,11 @@ from .count_objects_cli import run_count_objects
 from .for_each_ref_cli import run_for_each_ref
 from .gc_cli import run_gc
 from .launcher import main as launcher_main
+from .ls_files_cli import run_ls_files
 from .ls_tree_cli import run_ls_tree
 from .merge_base_cli import run_merge_base
 from .pack_refs_cli import run_pack_refs
+from .read_tree_cli import run_read_tree
 from .reflog_expire_cli import run_reflog_expire
 from .reflog_show_cli import run_reflog_show
 from .show_ref_cli import run_show_ref
@@ -67,6 +69,14 @@ def main() -> None:
 
     if argv and argv[0] == "ls-tree":
         _run_safe(run_ls_tree, argv[1:])
+        return
+
+    if argv and argv[0] == "ls-files":
+        _run_safe(run_ls_files, argv[1:])
+        return
+
+    if argv and argv[0] == "read-tree":
+        _run_safe(run_read_tree, argv[1:])
         return
 
     if argv and argv[0] == "show-ref":
