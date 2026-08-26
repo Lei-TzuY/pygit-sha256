@@ -7,6 +7,12 @@ from typing import Sequence
 
 from .entrypoint import _find_repo
 from .rev_list import rev_list
+from .rev_list_age_filter import (
+    rev_list_age_filter,
+    rev_list_age_filter_boundary,
+    rev_list_age_filter_children,
+    rev_list_age_filter_named_objects,
+)
 from .rev_list_boundary import boundary_children, rev_list_boundary
 from .rev_list_children import rev_list_children
 from .rev_list_object_names import rev_list_named_objects, rev_list_object_edges
@@ -101,6 +107,20 @@ def run_rev_list(argv: Sequence[str]) -> int:
         const=1,
         help="exclude merge commits (same as --max-parents=1)",
     )
+    parser.add_argument(
+        "--max-age",
+        type=int,
+        default=None,
+        metavar="TIMESTAMP",
+        help="show commits newer than this Unix timestamp",
+    )
+    parser.add_argument(
+        "--min-age",
+        type=int,
+        default=None,
+        metavar="TIMESTAMP",
+        help="show commits older than this Unix timestamp",
+    )
     relation_group = parser.add_mutually_exclusive_group()
     relation_group.add_argument(
         "--parents",
@@ -160,17 +180,45 @@ def run_rev_list(argv: Sequence[str]) -> int:
             parser.error("--max-count-oldest must be non-negative")
         if args.max_count or args.skip:
             parser.error("--max-count-oldest cannot be used together with --max-count or --skip")
+    if args.max_age is not None and args.max_age < 0:
+        parser.error("--max-age must be a non-negative Unix timestamp")
+    if args.min_age is not None and args.min_age < 0:
+        parser.error("--min-age must be a non-negative Unix timestamp")
 
     object_mode = args.objects or args.objects_edge
     side_mode = args.left_right or args.left_only or args.right_only
     parent_filter_mode = args.min_parents > 0 or args.max_parents >= 0
     oldest_mode = args.max_count_oldest is not None
+    age_filter_mode = args.max_age is not None or args.min_age is not None
     repo = _find_repo()
+
+    age_skip = 0 if oldest_mode else args.skip
+    age_max_count = 0 if oldest_mode else args.max_count
+    age_oldest = args.max_count_oldest if oldest_mode else None
 
     child_entries = None
     child_map = {}
     if args.children:
-        if oldest_mode:
+        if age_filter_mode:
+            child_entries = rev_list_age_filter_children(
+                repo,
+                args.revision,
+                all_refs=args.all,
+                first_parent=args.first_parent,
+                topo_order=args.topo_order,
+                reverse=args.reverse,
+                skip=age_skip,
+                max_count=age_max_count,
+                max_count_oldest=age_oldest,
+                left_right=side_mode,
+                left_only=args.left_only,
+                right_only=args.right_only,
+                min_parents=args.min_parents,
+                max_parents=args.max_parents,
+                max_age=args.max_age,
+                min_age=args.min_age,
+            )
+        elif oldest_mode:
             child_entries = rev_list_oldest_children(
                 repo,
                 args.revision,
@@ -218,7 +266,26 @@ def run_rev_list(argv: Sequence[str]) -> int:
     boundary_entries = None
     boundary_child_map = {}
     if args.boundary:
-        if oldest_mode:
+        if age_filter_mode:
+            boundary_entries = rev_list_age_filter_boundary(
+                repo,
+                args.revision,
+                all_refs=args.all,
+                first_parent=args.first_parent,
+                topo_order=args.topo_order,
+                reverse=args.reverse,
+                skip=age_skip,
+                max_count=age_max_count,
+                max_count_oldest=age_oldest,
+                side_mode=side_mode,
+                left_only=args.left_only,
+                right_only=args.right_only,
+                min_parents=args.min_parents,
+                max_parents=args.max_parents,
+                max_age=args.max_age,
+                min_age=args.min_age,
+            )
+        elif oldest_mode:
             boundary_entries = rev_list_oldest_boundary(
                 repo,
                 args.revision,
@@ -277,7 +344,23 @@ def run_rev_list(argv: Sequence[str]) -> int:
                 "--left-right/--left-only/--right-only"
             )
 
-        if oldest_mode:
+        if age_filter_mode:
+            objects = rev_list_age_filter_named_objects(
+                repo,
+                args.revision,
+                all_refs=args.all,
+                first_parent=args.first_parent,
+                topo_order=args.topo_order,
+                reverse=args.reverse,
+                skip=age_skip,
+                max_count=age_max_count,
+                max_count_oldest=age_oldest,
+                min_parents=args.min_parents,
+                max_parents=args.max_parents,
+                max_age=args.max_age,
+                min_age=args.min_age,
+            )
+        elif oldest_mode:
             objects = rev_list_oldest_named_objects(
                 repo,
                 args.revision,
@@ -382,6 +465,25 @@ def run_rev_list(argv: Sequence[str]) -> int:
         entries = boundary_entries
     elif child_entries is not None:
         entries = child_entries
+    elif age_filter_mode:
+        entries = rev_list_age_filter(
+            repo,
+            args.revision,
+            all_refs=args.all,
+            first_parent=args.first_parent,
+            topo_order=args.topo_order,
+            reverse=args.reverse,
+            skip=age_skip,
+            max_count=age_max_count,
+            max_count_oldest=age_oldest,
+            left_right=side_mode,
+            left_only=args.left_only,
+            right_only=args.right_only,
+            min_parents=args.min_parents,
+            max_parents=args.max_parents,
+            max_age=args.max_age,
+            min_age=args.min_age,
+        )
     elif oldest_mode:
         entries = rev_list_oldest(
             repo,
