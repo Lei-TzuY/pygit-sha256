@@ -10,6 +10,7 @@ import sys
 from typing import Sequence
 
 from .cat_file_cli import run_cat_file
+from .commit_graph_cli import run_commit_graph
 from .count_objects_cli import run_count_objects
 from .for_each_ref_cli import run_for_each_ref
 from .gc_cli import run_gc
@@ -92,6 +93,10 @@ def main() -> None:
 
     if argv and argv[0] == "verify-pack":
         _run_safe(run_verify_pack, argv[1:])
+        return
+
+    if argv and argv[0] == "commit-graph":
+        _run_safe(run_commit_graph, argv[1:])
         return
 
     launcher_main()
