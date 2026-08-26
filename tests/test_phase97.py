@@ -110,8 +110,8 @@ def test_valid_pack_sidecars_are_not_garbage(tmp_path: Path) -> None:
     obj = BlobObject(b"sidecar\n")
     repo.store.write(obj)
     pack_path, idx_path = _pack(repo, obj, prefix="pack-sidecar")
-    (pack_path.parent / "pack-sidecar.keep").write_text("keep\n", encoding="utf-8")
-    (pack_path.parent / "pack-sidecar.bitmap").write_bytes(b"bitmap")
+    (pack_path.parent / f"{pack_path.stem}.keep").write_text("keep\n", encoding="utf-8")
+    (pack_path.parent / f"{pack_path.stem}.bitmap").write_bytes(b"bitmap")
 
     info = repo.count_objects()
     assert info["packs"] == 1
