@@ -69,7 +69,7 @@ def test_fsync_failure_publishes_neither_file_and_cleans_temps(
     assert _temp_files(tmp_path) == []
 
 
-def test_index_publish_failure_rolls_back_new_pack_and_cleans_temps(
+def test_index_publish_failure_leaves_safe_pack_only_orphan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     writer, _oid = _writer(b"rename failure\n")
@@ -85,9 +85,40 @@ def test_index_publish_failure_rolls_back_new_pack_and_cleans_temps(
     with pytest.raises(OSError, match="simulated index publication failure"):
         writer.write_pack_and_idx(tmp_path, "pack")
 
-    assert list(tmp_path.glob("*.pack")) == []
+    packs = list(tmp_path.glob("*.pack"))
+    assert len(packs) == 1
     assert list(tmp_path.glob("*.idx")) == []
     assert _temp_files(tmp_path) == []
+
+
+def test_failed_writer_does_not_delete_pack_used_by_concurrent_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writer, oid = _writer(b"concurrent publication\n")
+    real_replace = pack_module.os.replace
+
+    def concurrent_index_then_fail(src, dst) -> None:
+        destination = Path(dst)
+        if destination.suffix == ".idx":
+            # Model another identical writer winning the index publication
+            # race before this writer reports its own rename failure.
+            shutil.copyfile(src, destination)
+            raise OSError("simulated losing index publisher")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(pack_module.os, "replace", concurrent_index_then_fail)
+    with pytest.raises(OSError, match="simulated losing index publisher"):
+        writer.write_pack_and_idx(tmp_path, "pack")
+
+    pack_path = next(tmp_path.glob("*.pack"))
+    idx_path = next(tmp_path.glob("*.idx"))
+    assert pack_path.is_file()
+    assert idx_path.is_file()
+    assert _temp_files(tmp_path) == []
+
+    restored = PackReader(idx_path).read_object(oid)
+    assert isinstance(restored, BlobObject)
+    assert restored.data == b"concurrent publication\n"
 
 
 def test_matching_orphan_pack_is_completed_without_rewriting_pack(
