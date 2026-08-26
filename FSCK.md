@@ -4,7 +4,9 @@ Phase 60 adds a repository checker for pygit's native SHA-256 object database.
 It validates storage before trusting graph traversal, then checks connectivity
 from repository roots. Phase 142 adds Git-style reflog reachability to the
 installed command while preserving the historical Python API default. Phase 143
-adds recovery materialization for dangling tips through `--lost-found`.
+adds recovery materialization for dangling tips through `--lost-found`. Phases
+144-145 add explicit reachability heads and independent reference-database
+verification. Phase 146 adds root-commit and annotated-tag diagnostics.
 
 ## CLI
 
@@ -14,9 +16,13 @@ pygit fsck --full
 pygit fsck --connectivity-only
 pygit fsck --unreachable
 pygit fsck --no-dangling
+pygit fsck --root
+pygit fsck --tags
 pygit fsck --lost-found
 pygit fsck --no-reflogs
+pygit fsck --no-references
 pygit fsck --strict
+pygit fsck HEAD
 ```
 
 A normal full scan exits `0` when no integrity errors are found. Structural or
@@ -31,10 +37,23 @@ dangling commit 0123...abcd
 `--unreachable` prints every unreachable object instead. `--no-dangling`
 suppresses reachability diagnostics while retaining integrity errors.
 
+`--root` reports every validated commit with no traversal-visible parent,
+including unreachable root commits. `--tags` reports every validated annotated
+tag and its target using Git-compatible `tagged <type> <target> (<name>) in
+<tag-oid>` records. Both are database-wide full-scan diagnostics and remain
+independent of explicit fsck heads and `--no-dangling`. As in native Git, they
+are suppressed by `--connectivity-only`, which does not inventory the complete
+object database. A shallow-boundary commit is presented as a synthetic root.
+
 The installed `pygit fsck` command treats reflog entries as reachability roots by
 default, matching Git's recovery model. `--no-reflogs` disables that policy and
 restores the ref/index/shallow-only view. This applies to both full and
 `--connectivity-only` scans.
+
+Supplying positional objects, such as `pygit fsck HEAD~2`, replaces the default
+refs/index/reflog reachability roots with exactly those resolved objects.
+`--cache` adds index entries back as heads. Reference-database consistency is
+still checked independently unless `--no-references` is supplied.
 
 ## Lost-found recovery
 
@@ -75,7 +94,7 @@ Checks include:
 
 ## Connectivity roots
 
-Without reflog expansion, the graph walk treats these as roots:
+Without explicit positional objects, the graph walk treats these as roots:
 
 - `HEAD`
 - all loose and packed refs below `refs/`
@@ -144,11 +163,14 @@ It is useful for a fast "can the published/staged/recoverable graph be
 traversed?" check. Add `--no-reflogs` when only the currently published/staged
 graph should participate. Because unrelated dangling objects are not inventoried,
 `--connectivity-only --lost-found` does not synthesize recovery files for them.
+`--root` and `--tags` are likewise suppressed in this mode rather than showing a
+partial database-wide diagnostic.
 
 ## Python API
 
 ```python
 from pygit import fsck
+from pygit.fsck_diagnostics import annotated_tags, root_commits
 from pygit.fsck_lost_found import write_lost_found
 
 report = fsck(repo)
@@ -156,6 +178,8 @@ assert report.ok
 print(report.checked_objects)
 print(report.reachable)
 print(report.dangling)
+print(root_commits(repo, report))
+print(annotated_tags(repo, report))
 
 recovery_report = fsck(repo, include_reflogs=True)
 write_lost_found(repo, sorted(report.dangling))
@@ -166,12 +190,13 @@ for issue in report.issues:
 
 The exported fsck API consists of:
 
-- `fsck(repo, connectivity_only=False, include_reflogs=False)`
+- `fsck(repo, connectivity_only=False, include_reflogs=False, heads=(), include_index=None)`
 - `FsckReport`
 - `FsckIssue`
 
 The recovery helper is `write_lost_found(repo, dangling_oids)` and returns
-`LostFoundRecord` entries describing the files it wrote.
+`LostFoundRecord` entries describing the files it wrote. Phase 146's reporting
+helpers are `root_commits(repo, report)` and `annotated_tags(repo, report)`.
 
 For backward compatibility, direct Python callers keep the Phase 60 root set
 unless `include_reflogs=True` is requested. The installed CLI intentionally uses
