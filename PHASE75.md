@@ -13,9 +13,9 @@ pygit rev-list --objects --first-parent HEAD
 pygit rev-list --objects --topo-order --skip 2 -n 5 HEAD
 ```
 
-Output is intentionally OID-only. Selected commits appear first in normal `rev-list` order; the remaining selected objects follow in deterministic SHA-256 order. This is the educational repository's equivalent of object enumeration without pathname annotations. Native Git pathname decoration and path-limited object walks remain outside this phase.
+Phase 75 originally exposed an OID-only CLI stream. Phase 121 later adds native-style pathname annotations by default, `--no-object-names`, object counting, and `--objects-edge`, while preserving Phase 75's exact selected object set and the original `rev_list_objects()` Python API.
 
-`--objects` is rejected with `--count` and `--left-right`. Those combinations have ambiguous mixed-output semantics in this implementation and are better rejected than silently interpreted in a surprising way.
+`--objects` and `--objects-edge` remain rejected with `--left-right` because the named-object stream and Phase 68 side-marker protocol are still separate. `--objects --count`, which Phase 75 originally rejected, is implemented by Phase 121 and counts the selected objects.
 
 ## Selection semantics
 
@@ -25,15 +25,15 @@ For ordinary positive/negative revision sets, Phase 75 computes the selected com
 A..B  =>  objects needed by selected B-side commits minus objects already reachable from A
 ```
 
-The subtraction applies to commits, trees, and blobs. A blob still referenced by a selected merge snapshot is omitted when the negative side already owns the same blob.
+The subtraction applies to commits, trees, and blobs. A blob still referenced by a selected merge snapshot is omitted when the negative side already owns it.
 
-For `A...B`, the commit selection remains the symmetric difference from Phase 68. The complete common-ancestry object closure is then subtracted, so shared trees/blobs from the merge base history are not emitted again.
+For `A...B`, the commit selection remains the symmetric difference from Phase 68. The complete common-ancestry object closure is then subtracted, so shared trees/blobs from the merge-base history are not emitted again.
 
 ## Limiting and ordering
 
 `--skip` and `--max-count` are applied to the commit set before object expansion. This matters for script-facing behavior: `rev-list --objects -n 1 HEAD` enumerates the selected tip commit and the objects required by that snapshot, but does not accidentally reintroduce omitted parent commits merely because object traversal is recursive.
 
-`--first-parent` and `.pygit/shallow` boundaries affect commit selection and negative/common-ancestry subtraction consistently. `--topo-order` and `--reverse` continue to control selected commit order; the non-commit tail remains deterministically sorted by OID.
+`--first-parent` and `.pygit/shallow` boundaries affect commit selection and negative/common-ancestry subtraction consistently. `--topo-order` and `--reverse` continue to control selected commit order. The Phase 75 API keeps its deterministic OID-sorted non-commit tail; Phase 121's CLI presentation overlays tree-walk pathname ordering without changing the set.
 
 ## Shared reachability primitive
 
@@ -59,8 +59,10 @@ for entry in entries:
     print(entry.type_name, entry.oid)
 ```
 
-`RevListObjectEntry` contains the 64-hex SHA-256 object ID and the native pygit object type (`commit`, `tree`, `blob`, or `tag`). The operation is read-only and does not change refs, reflogs, index state, packs, or the worktree.
+`RevListObjectEntry` contains the 64-hex SHA-256 object ID and the native pygit object type (`commit`, `tree`, `blob`, or `tag`). This API intentionally remains pathname-free for compatibility. Phase 121 adds the separate `pygit.rev_list_object_names` presentation API.
+
+The operation is read-only and does not change refs, reflogs, index state, packs, or the worktree.
 
 ## Scope boundary
 
-Phase 75 deliberately does not claim full native Git `rev-list` parity. Pathname annotations, path limiting, reflog walks, `--objects-edge`, bitmap acceleration, missing-object toleration/promisor semantics, and the broader native revision-option surface remain out of scope. The repository continues to use its educational SHA-256 object and pack formats.
+Phase 121 now covers pathname annotations, `--no-object-names`, `--objects-edge`, and object counting. Path limiting, reflog walks, bitmap acceleration, missing-object toleration/promisor semantics, annotated-tag input naming, and the broader native revision-option surface remain out of scope. The repository continues to use its educational SHA-256 object and pack formats.
