@@ -54,6 +54,21 @@ def _decorate_help(text: str) -> str:
     return text[:line_end] + insertion + text[line_end:]
 
 
+def _run_captured(argv: Sequence[str]) -> tuple[int, str]:
+    """Run the legacy adapter while preserving argparse's help exit protocol."""
+    capture = io.StringIO()
+    try:
+        with redirect_stdout(capture):
+            code = run_rev_list(argv)
+    except SystemExit as exc:
+        # argparse implements --help/-h by printing help and raising
+        # SystemExit(0).  The timestamp wrapper must not lose that captured
+        # output merely because control flow exits through argparse.
+        raw_code = exc.code
+        code = raw_code if isinstance(raw_code, int) else 1
+    return code, capture.getvalue()
+
+
 def run_rev_list_timestamp(argv: Sequence[str]) -> int:
     """Run rev-list, implementing native-style ``--timestamp`` presentation."""
     args = list(argv)
@@ -63,31 +78,27 @@ def run_rev_list_timestamp(argv: Sequence[str]) -> int:
     # Route every installed rev-list invocation through this wrapper so help can
     # advertise the option even when --timestamp itself was not supplied.
     if "--help" in cleaned or "-h" in cleaned:
-        capture = io.StringIO()
-        with redirect_stdout(capture):
-            code = run_rev_list(cleaned)
-        print(_decorate_help(capture.getvalue()), end="")
+        code, output = _run_captured(cleaned)
+        print(_decorate_help(output), end="")
         return code
 
     if not wants_timestamp:
         return run_rev_list(cleaned)
 
-    capture = io.StringIO()
-    with redirect_stdout(capture):
-        code = run_rev_list(cleaned)
+    code, output = _run_captured(cleaned)
     if code:
         return code
 
     # --count suppresses normal commit output in Git; --timestamp does not alter
     # that protocol.
     if "--count" in cleaned:
-        print(capture.getvalue(), end="")
+        print(output, end="")
         return 0
 
     repo = _find_repo()
     object_edge_mode = "--objects-edge" in cleaned
 
-    for raw_line in capture.getvalue().splitlines():
+    for raw_line in output.splitlines():
         candidate = _candidate_oid(raw_line)
         if candidate is None:
             print(raw_line)
