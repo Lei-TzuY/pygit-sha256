@@ -52,7 +52,7 @@ from pygit.rev_list_parent_filter import (
 )
 
 merges = rev_list_parent_filter(repo, ["HEAD"], min_parents=2)
-roots = rev_list_parent_filter(repo, ["--all"], max_parents=0)
+roots = rev_list_parent_filter(repo, all_refs=True, max_parents=0)
 ```
 
 `normalize_parent_limits()` validates the lower bound and normalizes any negative upper bound to the unlimited form.
