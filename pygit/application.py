@@ -17,6 +17,7 @@ from .gc_cli import run_gc
 from .launcher import main as launcher_main
 from .ls_tree_cli import run_ls_tree
 from .merge_base_cli import run_merge_base
+from .pack_refs_cli import run_pack_refs
 from .reflog_expire_cli import run_reflog_expire
 from .reflog_show_cli import run_reflog_show
 from .show_ref_cli import run_show_ref
@@ -97,6 +98,10 @@ def main() -> None:
 
     if argv and argv[0] == "commit-graph":
         _run_safe(run_commit_graph, argv[1:])
+        return
+
+    if argv and argv[0] == "pack-refs":
+        _run_safe(run_pack_refs, argv[1:])
         return
 
     launcher_main()
