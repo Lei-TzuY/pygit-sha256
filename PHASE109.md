@@ -40,7 +40,7 @@ Blank-only stdin is rejected rather than falling back to repository-wide mode. U
 
 ## Compatibility and safety boundary
 
-The on-disk file remains pygit's educational SHA-256 `CGPH` format, not Git's native commit-graph format. Phase 109 changes only which commits feed that existing codec from the modern CLI path.
+The on-disk file remains pygit's educational SHA-256 `CGPH` format, not Git's native commit-graph format. Phase 109 changes the modern installed-command selection layer; the older high-level `Repository.write_commit_graph()` method is retained for compatibility and is not silently given new root-selection semantics in this phase.
 
 The Phase 103 write guarantees still apply after selection: canonical IDs, cycle/generation validation, self-parse, temporary-file write, `fsync`, atomic replacement, and final repository-aware verification.
 
