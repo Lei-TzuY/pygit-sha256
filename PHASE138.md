@@ -25,9 +25,9 @@ A commit exactly on either boundary is excluded. When both options are present, 
 
 ## Selection order
 
-Age limiting does not change ancestry traversal. pygit first computes the ordinary revision/range selection, applies side and parent-count filters, then applies the timestamp predicate. Ordinary `--skip` / `--max-count` or Phase 137 `--max-count-oldest` limiting happens after age filtering. `--reverse` remains the final presentation transform.
+pygit first computes the ordinary revision/range ancestry set, applies side and parent-count filters, then applies the timestamp predicate. Ordinary `--skip` / `--max-count` or Phase 137 `--max-count-oldest` limiting happens after age filtering. `--reverse` remains the final presentation transform.
 
-This ordering means a commit hidden by an age predicate can still be traversed through to reach older or newer commits that independently satisfy the output filter. This phase intentionally implements the full-filter behavior of the raw timestamp limits rather than introducing a traversal early-stop optimization.
+The timestamp predicate matches Git's raw age-limit comparison, while pygit deliberately performs an exhaustive ancestry walk before filtering instead of depending on Git's history-walk pruning optimizations. This keeps results deterministic even for deliberately non-monotonic commit timestamps; performance-level traversal pruning remains outside this phase's scope.
 
 ## Metadata, boundaries, and objects
 
@@ -59,4 +59,4 @@ The helpers are read-only and compose with ranges, `--all`, side selection, pare
 
 ## Compatibility boundary
 
-Human-readable date parsing (`--since`, `--after`, `--until`, `--before`, `--since-as-filter`), message/identity grep filters, path-limited history, reflog walks, and pretty formatting remain separate work.
+Human-readable date parsing (`--since`, `--after`, `--until`, `--before`, `--since-as-filter`), message/identity grep filters, path-limited history, reflog walks, pretty formatting, and native performance-level age pruning remain separate work.
