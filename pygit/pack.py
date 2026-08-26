@@ -1,6 +1,6 @@
 """
 pygit/pack.py
-=============
+==============
 Packfile & Fan-out Index (.pack / .idx) Engine
 ==============================================
 
@@ -39,6 +39,7 @@ from __future__ import annotations
 import hashlib
 import os
 import struct
+import tempfile
 import zlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -62,6 +63,89 @@ class PackWriter:
     def __init__(self, objects: List[Tuple[str, GitObject]]) -> None:
         # Sort objects by SHA-256 hex string
         self.objects = sorted(objects, key=lambda x: x[0])
+
+    @staticmethod
+    def _stage_bytes(final_path: Path, data: bytes) -> Path:
+        """Write and fsync *data* to a hidden same-directory temporary file."""
+        handle = tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".tmp-{final_path.name}-",
+            dir=str(final_path.parent),
+            delete=False,
+        )
+        temp_path = Path(handle.name)
+        try:
+            with handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except Exception:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+        return temp_path
+
+    @staticmethod
+    def _matches_expected(path: Path, data: bytes) -> bool:
+        return path.is_file() and path.read_bytes() == data
+
+    @classmethod
+    def _publish_pair(
+        cls,
+        pack_path: Path,
+        pack_data: bytes,
+        idx_path: Path,
+        idx_data: bytes,
+    ) -> None:
+        """Publish an immutable pack/index pair with the index as commit point.
+
+        Pack names are content-derived, so an existing final path must contain
+        exactly the bytes this writer would produce. A matching complete pair is
+        an idempotent no-op; a matching one-file orphan is completed in place.
+
+        For a new pair, both files are fully staged and fsynced before either
+        final path appears. The pack is installed first and the index last, so a
+        crash cannot make an index advertise a pack that has not been published.
+        If index publication fails, the matching pack-only orphan is deliberately
+        retained. Final pack paths are shared immutable publication targets, and
+        without an ownership token this writer cannot safely unlink one after a
+        concurrent identical writer may have started using it. A later identical
+        write recognizes the orphan and installs only the missing index.
+        """
+        pack_exists = pack_path.exists()
+        idx_exists = idx_path.exists()
+
+        if pack_exists and not cls._matches_expected(pack_path, pack_data):
+            raise RuntimeError(f"pack target collision: {pack_path.name}")
+        if idx_exists and not cls._matches_expected(idx_path, idx_data):
+            raise RuntimeError(f"pack index target collision: {idx_path.name}")
+        if pack_exists and idx_exists:
+            return
+
+        pack_temp: Optional[Path] = None
+        idx_temp: Optional[Path] = None
+        try:
+            if not pack_exists:
+                pack_temp = cls._stage_bytes(pack_path, pack_data)
+            if not idx_exists:
+                idx_temp = cls._stage_bytes(idx_path, idx_data)
+
+            if pack_temp is not None:
+                os.replace(pack_temp, pack_path)
+                pack_temp = None
+
+            if idx_temp is not None:
+                os.replace(idx_temp, idx_path)
+                idx_temp = None
+        finally:
+            for temp_path in (pack_temp, idx_temp):
+                if temp_path is not None:
+                    try:
+                        temp_path.unlink()
+                    except FileNotFoundError:
+                        pass
 
     def write_pack_and_idx(self, output_dir: Path, name_prefix: str = "pack") -> Tuple[Path, Path]:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -117,8 +201,6 @@ class PackWriter:
         pack_path = output_dir / f"{name_prefix}-{pack_name}.pack"
         idx_path = output_dir / f"{name_prefix}-{pack_name}.idx"
 
-        pack_path.write_bytes(pack_data)
-
         # Build .idx binary stream
         idx_data = bytearray()
         idx_data.extend(b"\xfftOc")
@@ -151,8 +233,7 @@ class PackWriter:
         idx_checksum = hashlib.sha256(idx_data).digest()
         idx_data.extend(idx_checksum)
 
-        idx_path.write_bytes(idx_data)
-
+        self._publish_pair(pack_path, bytes(pack_data), idx_path, bytes(idx_data))
         return pack_path, idx_path
 
 
