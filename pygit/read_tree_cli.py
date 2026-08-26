@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
-from .read_tree_merge import read_tree_three_way
+from .read_tree_merge import read_tree_three_way, read_tree_two_way
 from .repo import Repository
 from .tree_plumbing import read_tree
 
@@ -30,7 +30,7 @@ def run_read_tree(argv: Sequence[str]) -> int:
         "-m",
         "--merge",
         action="store_true",
-        help="perform a three-tree trivial merge into the index",
+        help="perform a two-tree carry-forward or three-tree trivial merge",
     )
     parser.add_argument(
         "--aggressive",
@@ -65,16 +65,21 @@ def run_read_tree(argv: Sequence[str]) -> int:
             parser.error("-m cannot be combined with --prefix")
         if args.update:
             parser.error("read-tree -m -u is not supported")
-        if len(args.treeish) != 3:
-            parser.error("-m requires exactly three tree-ish arguments: BASE OURS THEIRS")
-        read_tree_three_way(
-            repo,
-            args.treeish[0],
-            args.treeish[1],
-            args.treeish[2],
-            aggressive=args.aggressive,
-        )
-        return 0
+        if len(args.treeish) == 2:
+            if args.aggressive:
+                parser.error("--aggressive requires a three-tree merge")
+            read_tree_two_way(repo, args.treeish[0], args.treeish[1])
+            return 0
+        if len(args.treeish) == 3:
+            read_tree_three_way(
+                repo,
+                args.treeish[0],
+                args.treeish[1],
+                args.treeish[2],
+                aggressive=args.aggressive,
+            )
+            return 0
+        parser.error("-m requires two or three tree-ish arguments")
 
     if args.aggressive:
         parser.error("--aggressive requires -m")
@@ -87,8 +92,6 @@ def run_read_tree(argv: Sequence[str]) -> int:
             parser.error("read-tree requires exactly one tree-ish or --empty")
         treeish = args.treeish[0]
 
-    # Persistent conflict stages are part of the index being replaced. A normal
-    # read-tree or --empty must discard them together with the old stage-0 view.
     saved_unmerged = dict(repo.index.unmerged)
     replacing = args.prefix is None
     if replacing:

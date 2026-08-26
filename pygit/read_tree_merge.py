@@ -1,9 +1,8 @@
-"""Three-way ``read-tree -m`` index merge support.
+"""Two- and three-tree ``read-tree -m`` index merge support.
 
-This module builds on the persistent multi-stage index introduced in Phase 124.
-It implements Git's low-level trivial three-tree merge rules without touching
-worktree files: cleanly resolvable paths become stage 0, while unresolved paths
-are stored as stages 1/2/3.
+The merge helpers are deliberately index-only. Two-tree mode models Git's
+fast-forward carry-forward rules for staged changes; three-tree mode stores
+unresolved paths in persistent stages 1/2/3.
 """
 
 from __future__ import annotations
@@ -43,6 +42,12 @@ def _index_entry(
     return IndexEntry(path, oid, mode, size, mtime, stage=stage)
 
 
+def _entry_value(entry: Optional[IndexEntry]) -> Optional[TreeValue]:
+    if entry is None:
+        return None
+    return entry.sha, entry.mode
+
+
 def _reject_directory_file_conflicts(paths: Iterable[str]) -> None:
     """Reject path sets that need Git's directory/file conflict machinery."""
     ordered = sorted(set(paths))
@@ -58,6 +63,88 @@ def _reject_directory_file_conflicts(paths: Iterable[str]) -> None:
                 )
 
 
+def read_tree_two_way(
+    repo: Repository,
+    head_treeish: str,
+    merge_treeish: str,
+) -> List[IndexEntry]:
+    """Fast-forward the index from *head_treeish* to *merge_treeish*.
+
+    Stage-0 changes already present in the index are carried forward whenever
+    doing so is unambiguous: an index entry matching the old tree adopts the new
+    tree; unchanged old/new tree entries preserve the index; an index entry that
+    already matches the new tree is preserved. Conflicting simultaneous index
+    and tree changes fail before publication. The worktree is never modified.
+    """
+    if repo.index.has_unmerged():
+        raise RuntimeError("read-tree -m cannot run with unmerged index entries")
+
+    head = flatten_tree(repo, resolve_treeish(repo, head_treeish))
+    merge = flatten_tree(repo, resolve_treeish(repo, merge_treeish))
+    current = dict(repo.index.entries)
+    initial_checkout = not current
+
+    paths = set(head) | set(merge) | set(current)
+    _reject_directory_file_conflicts(paths)
+
+    entries: Dict[str, IndexEntry] = {}
+    for path in sorted(paths):
+        head_value = head.get(path)
+        merge_value = merge.get(path)
+        current_entry = current.get(path)
+        index_value = _entry_value(current_entry)
+
+        # Native read-tree has one special initial-checkout exception: when an
+        # empty index sees the same path in H and M, populate it from M instead
+        # of interpreting the missing index entry as a staged deletion.
+        if (
+            initial_checkout
+            and index_value is None
+            and head_value == merge_value
+            and merge_value is not None
+        ):
+            entries[path] = _index_entry(repo, path, merge_value, stage=0)
+            continue
+
+        # No local staged change relative to H: advance to M, including adds
+        # and deletions.
+        if index_value == head_value:
+            if merge_value is not None:
+                if current_entry is not None and merge_value == index_value:
+                    entries[path] = current_entry
+                else:
+                    entries[path] = _index_entry(repo, path, merge_value, stage=0)
+            continue
+
+        # H and M did not change this path, so keep the local staged state.
+        if head_value == merge_value:
+            if current_entry is not None:
+                entries[path] = current_entry
+            continue
+
+        # The local staged state already equals the destination tree.
+        if index_value == merge_value:
+            if current_entry is not None:
+                entries[path] = current_entry
+            continue
+
+        # A path added only in the index is unrelated to either tree and can be
+        # carried across the fast-forward.
+        if head_value is None and merge_value is None and current_entry is not None:
+            entries[path] = current_entry
+            continue
+
+        raise RuntimeError(
+            "read-tree -m would overwrite staged changes for "
+            f"{path!r}"
+        )
+
+    repo.index.entries = entries
+    repo.index.unmerged = {}
+    repo.index.save()
+    return repo.index.all_entries()
+
+
 def _clean_resolution(
     base: Optional[TreeValue],
     ours: Optional[TreeValue],
@@ -65,11 +152,7 @@ def _clean_resolution(
     *,
     aggressive: bool,
 ) -> tuple[bool, Optional[TreeValue]]:
-    """Return ``(resolved, value)`` using native three-tree trivial rules.
-
-    In default mode Git deliberately leaves deletion-only trivialities
-    unmerged. ``--aggressive`` additionally resolves those cases.
-    """
+    """Return ``(resolved, value)`` using native three-tree trivial rules."""
     if ours == theirs:
         if ours is not None or aggressive:
             return True, ours
@@ -96,12 +179,7 @@ def read_tree_three_way(
     *,
     aggressive: bool = False,
 ) -> List[IndexEntry]:
-    """Replace the index with a three-tree trivial merge.
-
-    The operation is index-only and atomic at the JSON publication boundary:
-    all three tree-ish values are resolved and flattened before the existing
-    index is replaced.
-    """
+    """Replace the index with a three-tree trivial merge."""
     base = flatten_tree(repo, resolve_treeish(repo, base_treeish))
     ours = flatten_tree(repo, resolve_treeish(repo, ours_treeish))
     theirs = flatten_tree(repo, resolve_treeish(repo, theirs_treeish))
