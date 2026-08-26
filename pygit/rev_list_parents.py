@@ -1,8 +1,8 @@
 """Parent metadata presentation for ``rev-list --parents``.
 
 The commit-set engine deliberately keeps traversal selection separate from
-presentation.  This module layers Git-style parent records on top without
-changing which commits are selected.  Raw commit parents are preserved even
+presentation. This module layers Git-style parent records on top without
+changing which commits are selected. Raw commit parents are preserved even
 when a parent is outside an excluded range; commits recorded as shallow
 boundaries are presented as roots, matching traversal semantics.
 """
@@ -41,6 +41,23 @@ def _shallow_boundaries(repo: Repository) -> Set[str]:
     }
 
 
+def parent_oids(repo: Repository, oid: str) -> Tuple[str, ...]:
+    """Return the parents visible to revision traversal for one commit.
+
+    Stored parents remain visible even when they are excluded from the selected
+    output. A shallow boundary is the exception: Git presents it as a synthetic
+    root, so its stored parents are intentionally hidden.
+    """
+
+    oid = oid.lower()
+    if oid in _shallow_boundaries(repo):
+        return ()
+    obj = repo.store.read(oid)
+    if not isinstance(obj, CommitObject):
+        raise RuntimeError(f"Object {oid} in rev-list traversal is not a commit")
+    return tuple(parent.lower() for parent in obj.parents)
+
+
 def rev_list_parents(
     repo: Repository,
     revisions: Sequence[str] = (),
@@ -56,11 +73,11 @@ def rev_list_parents(
     """Return selected commits with Git-style raw parent metadata.
 
     Selection, ordering, exclusions, symmetric ranges, limits, and side markers
-    are delegated to :func:`rev_list`.  Parent display itself is intentionally
+    are delegated to :func:`rev_list`. Parent display itself is intentionally
     not filtered by the selected set: an excluded range boundary can still be a
-    real parent of an emitted commit.  ``--first-parent`` changes traversal but
-    does not rewrite the stored parent list.  A shallow boundary is the one
-    exception because Git treats it as a synthetic root for revision walking.
+    real parent of an emitted commit. ``--first-parent`` changes traversal but
+    does not rewrite the stored parent list. Shallow boundaries are presented as
+    roots.
     """
 
     entries = rev_list(
@@ -74,16 +91,11 @@ def rev_list_parents(
         max_count=max_count,
         left_right=left_right,
     )
-    shallow = _shallow_boundaries(repo)
-    output = []
-    for entry in entries:
-        oid = entry.oid.lower()
-        if oid in shallow:
-            parents: Tuple[str, ...] = ()
-        else:
-            obj = repo.store.read(oid)
-            if not isinstance(obj, CommitObject):
-                raise RuntimeError(f"Object {oid} in rev-list traversal is not a commit")
-            parents = tuple(parent.lower() for parent in obj.parents)
-        output.append(RevListParentEntry(oid=oid, parents=parents, side=entry.side))
-    return tuple(output)
+    return tuple(
+        RevListParentEntry(
+            oid=entry.oid.lower(),
+            parents=parent_oids(repo, entry.oid),
+            side=entry.side,
+        )
+        for entry in entries
+    )
