@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+from types import SimpleNamespace
 from typing import Sequence
 
 from .entrypoint import _find_repo
 from .multi_pack_index import verify_multi_pack_index, write_multi_pack_index
 from .multi_pack_index_expire import expire_multi_pack_index
+from .multi_pack_index_object_dir import resolve_multi_pack_index_object_dir
 from .multi_pack_index_repack import repack_multi_pack_index
 from .multi_pack_index_stdin import write_multi_pack_index_from_packs
 
@@ -43,10 +45,15 @@ def run_multi_pack_index(argv: Sequence[str]) -> int:
         prog="pygit multi-pack-index",
         description="Write, verify, expire, or repack the shared index for multiple pygit packfiles.",
     )
+    parser.add_argument(
+        "--object-dir",
+        metavar="DIR",
+        help="operate on a configured alternate object directory",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     write_parser = subparsers.add_parser(
         "write",
-        help="write .pygit/objects/pack/multi-pack-index from current pack indexes",
+        help="write objects/pack/multi-pack-index from current pack indexes",
     )
     write_parser.add_argument(
         "--preferred-pack",
@@ -80,7 +87,8 @@ def run_multi_pack_index(argv: Sequence[str]) -> int:
     args = parser.parse_args(list(argv))
 
     repo = _find_repo()
-    pack_dir = repo.pygit_dir / "objects" / "pack"
+    object_dir = resolve_multi_pack_index_object_dir(repo, args.object_dir)
+    pack_dir = object_dir / "pack"
     midx_path = pack_dir / "multi-pack-index"
     if args.command == "write":
         if args.stdin_packs:
@@ -101,7 +109,13 @@ def run_multi_pack_index(argv: Sequence[str]) -> int:
         expire_multi_pack_index(midx_path)
         return 0
     if args.command == "repack":
-        repack_multi_pack_index(repo, midx_path, batch_size=args.batch_size)
+        # The repack implementation only needs ``repo.store.root`` as its
+        # installation target; provide an explicit object-store view so an
+        # alternate repack never writes into the primary object database.
+        target_repo = repo
+        if object_dir != repo.store.root.resolve():
+            target_repo = SimpleNamespace(store=SimpleNamespace(root=object_dir))
+        repack_multi_pack_index(target_repo, midx_path, batch_size=args.batch_size)
         return 0
 
     verify_multi_pack_index(midx_path)
