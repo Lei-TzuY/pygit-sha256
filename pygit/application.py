@@ -19,6 +19,7 @@ from .merge_base_cli import run_merge_base
 from .reflog_expire_cli import run_reflog_expire
 from .reflog_show_cli import run_reflog_show
 from .show_ref_cli import run_show_ref
+from .update_ref_cli import run_update_ref
 
 
 _ERRORS = (
@@ -82,6 +83,10 @@ def main() -> None:
 
     if argv and argv[0] == "for-each-ref":
         _run_safe(run_for_each_ref, argv[1:])
+        return
+
+    if argv and argv[0] == "update-ref":
+        _run_safe(run_update_ref, argv[1:])
         return
 
     launcher_main()
