@@ -1,6 +1,6 @@
 # Packed references
 
-Phase 54 adds Git-style packed-reference storage to pygit's native SHA-256 ref backend.
+Phase 54 adds Git-style packed-reference storage to pygit's native SHA-256 ref backend. Phase 114 extends `pack-refs` with Git-style include/exclude pattern selection.
 
 ## Why packed refs exist
 
@@ -46,6 +46,17 @@ Write packed entries but keep the loose files:
 pygit pack-refs --all --no-prune
 ```
 
+Select refs by full-refname glob patterns:
+
+```bash
+pygit pack-refs --include='refs/heads/release/*'
+pygit pack-refs --include='refs/heads/*' --exclude='refs/heads/wip/*'
+```
+
+`--include` and `--exclude` may be repeated. When at least one `--include` is supplied without `--all`, the include union replaces the default tag-only selection. `--all` selects every direct ref regardless of includes. Excludes are applied last in every mode and therefore win over the default tag selection, includes, and `--all`.
+
+Patterns are case-sensitive full-refname globs. As in native `pack-refs`, `*` may span `/`, so `refs/heads/topic*` can match `refs/heads/topic/deep/leaf`.
+
 The command is silent on success.
 
 ## Transparent readers
@@ -74,6 +85,8 @@ pygit update-ref refs/heads/main <new> <old>
 
 The visible value is immediately `<new>` because loose refs take precedence.
 
+Pattern exclusion preserves that rule. If an updated loose ref is excluded from a later `pack-refs` run, its older packed backing value remains untouched and stays safely shadowed by the loose ref.
+
 Deletion is different: both loose and packed copies are removed atomically from the transaction's point of view so the packed value cannot become visible again:
 
 ```bash
@@ -87,12 +100,17 @@ Compare-and-swap checks work against packed-only refs exactly as they do against
 ```python
 from pygit import PackedRef, pack_refs, read_packed_refs
 
-packed = pack_refs(repo, all_refs=True)
+packed = pack_refs(
+    repo,
+    all_refs=False,
+    includes=["refs/heads/release/*"],
+    excludes=["refs/heads/release/wip/*"],
+)
 records = read_packed_refs(repo.pygit_dir)
-print(records["refs/heads/main"].oid)
+print(records["refs/heads/release/v2"].oid)
 ```
 
-`pack_refs(repo, all_refs=False, prune=True)` returns the refs newly packed from loose storage. Existing packed records are preserved unless a loose ref of the same name replaces their value.
+`pack_refs(repo, all_refs=False, prune=True)` returns the refs newly packed from loose storage. Existing packed records are preserved unless a selected loose ref of the same name replaces their value.
 
 ## Safety properties
 
@@ -109,5 +127,7 @@ Phase 54 regression coverage verifies:
 - symbolic refs remaining loose;
 - remote namespace rename/delete across packed storage;
 - strict malformed-file rejection.
+
+Phase 114 additionally verifies include union semantics, exclude precedence, `--all` composition, nested-ref glob matching, `--no-prune` composition, installed CLI behavior, and exclusion of a loose shadow without packed-value resurrection.
 
 The packed file is replaced with an atomic filesystem rename. When pruning loose refs, pygit snapshots the original packed file and loose ref bytes and restores them if a filesystem error interrupts publication.
