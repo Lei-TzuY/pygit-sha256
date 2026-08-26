@@ -52,4 +52,4 @@ The existing `format_batch_object()` and `run_batch_commands()` functions now ac
 
 ## Scope boundary
 
-This phase intentionally does not approximate `--batch-all-objects`, `--unordered`, `--follow-symlinks`, `%(objectsize:disk)`, `%(deltabase)`, textconv/filters, mailmap behavior, or NUL-framed `-Z` input/output. Those features require separate storage or framing semantics and remain focused follow-up work.
+Later phases now implement `--batch-all-objects`, `--unordered`, `--follow-symlinks`, `%(objectsize:disk)`, and NUL-framed `-Z` input/output. `%(deltabase)`, textconv/filters, and mailmap behavior still require separate storage or conversion semantics and remain focused follow-up work.
