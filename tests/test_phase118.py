@@ -90,7 +90,7 @@ def test_explicit_stage_zero_and_colons_in_paths_follow_git_prefix_rules(
 
 
 @pytest.mark.parametrize("stage", [1, 2, 3])
-def test_unmerged_stages_fail_explicitly_until_index_schema_can_store_them(
+def test_unmerged_stage_syntax_is_valid_but_missing_stage_data_fails(
     tmp_path: Path,
     stage: int,
 ) -> None:
@@ -98,7 +98,10 @@ def test_unmerged_stages_fail_explicitly_until_index_schema_can_store_them(
     oid = _blob(repo, b"value")
     _entry(repo, "file.txt", oid)
 
-    with pytest.raises(ValueError, match=f"index stage {stage} is not supported"):
+    # Phase 118 originally rejected these stages because the index could not
+    # represent them. Phase 122 makes the syntax live; absent stage data is now
+    # a normal missing-index-stage error instead of an unsupported-feature error.
+    with pytest.raises(KeyError, match=f"has no index stage {stage}"):
         resolve_revision(repo, f":{stage}:file.txt")
 
 

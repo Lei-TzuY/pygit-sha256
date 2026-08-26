@@ -3,7 +3,9 @@ Index plumbing helpers backing ``update-index`` and ``ls-files``.
 
 The on-disk index remains pygit's readable JSON format, but the behavior mirrors
 Git's low-level staging primitives closely enough for scripts and tests to work
-against the index without going through porcelain commands.
+against the index without going through porcelain commands. Phase 122 extends
+that model with real stages 1-3 for unmerged entries while keeping stage 0
+backward-compatible.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from .repo import Repository
 
 
 _INDEX_MODES = {"100644", "100755", "120000", "160000"}
+_INDEX_STAGES = {0, 1, 2, 3}
 
 
 def _normalize_index_path(repo: Repository, path: str) -> str:
@@ -85,33 +88,58 @@ def _validate_cache_object(repo: Repository, mode: str, oid: str) -> None:
         raise ValueError(f"mode {mode} requires a blob object, got {obj.type_name!r}")
 
 
-def _entry_for_cache(repo: Repository, path: str, mode: str, oid: str) -> IndexEntry:
+def _entry_for_cache(
+    repo: Repository,
+    path: str,
+    mode: str,
+    oid: str,
+    *,
+    stage: int = 0,
+) -> IndexEntry:
     target = repo.worktree / path
     if _path_exists(target):
         st = target.lstat()
-        return IndexEntry(path, oid, mode, st.st_size, st.st_mtime)
+        return IndexEntry(path, oid, mode, st.st_size, st.st_mtime, stage)
     if mode == "160000":
         size = 0
     else:
         obj = repo.store.read(oid)
         size = len(obj.data) if isinstance(obj, BlobObject) else 0
-    return IndexEntry(path, oid, mode, size, 0.0)
+    return IndexEntry(path, oid, mode, size, 0.0, stage)
 
 
-def _check_path_conflict(entries: Dict[str, IndexEntry], path: str) -> None:
+def _all_paths(
+    entries: Dict[str, IndexEntry],
+    unmerged: Dict[Tuple[str, int], IndexEntry],
+) -> Set[str]:
+    return set(entries) | {path for path, _stage in unmerged}
+
+
+def _drop_path(
+    entries: Dict[str, IndexEntry],
+    unmerged: Dict[Tuple[str, int], IndexEntry],
+    path: str,
+) -> None:
+    entries.pop(path, None)
+    for key in [key for key in unmerged if key[0] == path]:
+        unmerged.pop(key, None)
+
+
+def _check_path_conflict(existing_paths: Iterable[str], path: str) -> None:
+    paths = set(existing_paths)
     parts = path.split("/")
     for index in range(1, len(parts)):
         parent = "/".join(parts[:index])
-        if parent in entries:
+        if parent in paths:
             raise RuntimeError(f"index path conflict between {parent!r} and {path!r}")
     prefix = path + "/"
-    for existing in entries:
+    for existing in paths:
         if existing.startswith(prefix):
             raise RuntimeError(f"index path conflict between {path!r} and {existing!r}")
 
 
 def parse_cache_info(repo: Repository, mode: str, object_name: str, path: str) -> IndexEntry:
-    """Build one validated cache-info entry without mutating the index."""
+    """Build one validated stage-0 cache-info entry without mutating the index."""
     normalized = _normalize_index_path(repo, path)
     oid = _resolve_oid(repo, object_name)
     _validate_cache_object(repo, mode, oid)
@@ -122,8 +150,8 @@ def parse_index_info(repo: Repository, record: str) -> Tuple[str, Optional[Index
     """Parse one ``--index-info`` record.
 
     Accepted forms are ``MODE OID<TAB>PATH`` and ``MODE OID STAGE<TAB>PATH``.
-    Stage 0 is the only supported stage because pygit's JSON index does not yet
-    encode unmerged multi-stage entries. Mode 0 removes the named path.
+    Stages 0-3 are stored explicitly. As in Git, a mode-0 record removes every
+    stage for the named path, regardless of an optional stage field.
     """
     metadata, sep, raw_path = record.partition("\t")
     if not sep:
@@ -133,13 +161,19 @@ def parse_index_info(repo: Repository, record: str) -> Tuple[str, Optional[Index
         raise ValueError("--index-info input must be: <mode> <object> [stage]\\t<path>")
 
     mode, oid_text = parts[:2]
-    if len(parts) == 3 and parts[2] != "0":
-        raise ValueError("only index stage 0 is supported")
-    path = _normalize_index_path(repo, raw_path)
+    stage = 0
+    if len(parts) == 3:
+        if not parts[2].isdigit() or int(parts[2]) not in _INDEX_STAGES:
+            raise ValueError("index stage must be 0, 1, 2, or 3")
+        stage = int(parts[2])
 
+    path = _normalize_index_path(repo, raw_path)
     if mode == "0":
         return path, None
-    return path, parse_cache_info(repo, mode, oid_text, path)
+
+    oid = _resolve_oid(repo, oid_text)
+    _validate_cache_object(repo, mode, oid)
+    return path, _entry_for_cache(repo, path, mode, oid, stage=stage)
 
 
 def update_index(
@@ -153,44 +187,53 @@ def update_index(
     cache_info: Sequence[Tuple[str, str, str]] = (),
     index_info: Sequence[str] = (),
 ) -> List[IndexEntry]:
-    """Apply low-level index mutations atomically and return the final entries."""
+    """Apply low-level index mutations atomically and return all final stages."""
     if chmod not in {None, "+x", "-x"}:
         raise ValueError("--chmod must be +x or -x")
     if force_remove and (add or remove or chmod is not None or cache_info or index_info):
         raise ValueError("--force-remove cannot be combined with other update modes")
 
     entries: Dict[str, IndexEntry] = dict(repo.index.entries)
+    unmerged: Dict[Tuple[str, int], IndexEntry] = dict(repo.index.unmerged)
 
     # Validate stdin/cache-info mutations first, then commit all at once.
+    # --cacheinfo writes stage 0 and, like Git, does not implicitly discard
+    # explicitly stored conflict stages for the same path.
     for mode, object_name, raw_path in cache_info:
         entry = parse_cache_info(repo, mode, object_name, raw_path)
-        entries.pop(entry.path, None)
-        _check_path_conflict(entries, entry.path)
+        other_paths = _all_paths(entries, unmerged) - {entry.path}
+        _check_path_conflict(other_paths, entry.path)
         entries[entry.path] = entry
 
     for record in index_info:
         if record == "":
             continue
         path, entry = parse_index_info(repo, record)
-        entries.pop(path, None)
-        if entry is not None:
-            _check_path_conflict(entries, path)
+        if entry is None:
+            _drop_path(entries, unmerged, path)
+            continue
+
+        other_paths = _all_paths(entries, unmerged) - {path}
+        _check_path_conflict(other_paths, path)
+        if entry.stage == 0:
             entries[path] = entry
+        else:
+            unmerged[(path, entry.stage)] = entry
 
     normalized_paths = [_normalize_index_path(repo, path) for path in paths]
     for path in normalized_paths:
         target = repo.worktree / path
-        tracked = path in entries
+        tracked = path in entries or any(candidate == path for candidate, _ in unmerged)
 
         if force_remove:
             if not tracked:
                 raise KeyError(f"path is not in the index: {path}")
-            entries.pop(path, None)
+            _drop_path(entries, unmerged, path)
             continue
 
         if not _path_exists(target):
             if tracked and remove:
-                entries.pop(path, None)
+                _drop_path(entries, unmerged, path)
                 continue
             if tracked:
                 raise FileNotFoundError(f"{path}: needs removal (use --remove)")
@@ -206,28 +249,35 @@ def update_index(
             mode = "100755" if chmod == "+x" else "100644"
 
         oid = repo.store.write(BlobObject(data))
-        entries.pop(path, None)
-        _check_path_conflict(entries, path)
+        # A normal worktree update resolves the conflict for this path, matching
+        # `git add`: stages 1-3 disappear and a single stage-0 entry remains.
+        _drop_path(entries, unmerged, path)
+        _check_path_conflict(_all_paths(entries, unmerged), path)
         entries[path] = IndexEntry(path, oid, mode, size, mtime)
 
     repo.index.entries = entries
+    repo.index.unmerged = unmerged
     repo.index.save()
-    return repo.index.all_entries()
+    return repo.index.all_entries(include_unmerged=True)
 
 
 def refresh_index(repo: Repository, paths: Sequence[str] = ()) -> List[str]:
     """Refresh stat metadata for unchanged tracked paths and return dirty paths."""
     selected: Set[str]
+    all_paths = set(repo.index.paths(include_unmerged=True))
     if paths:
         selected = {_normalize_index_path(repo, path) for path in paths}
-        missing = selected - set(repo.index.entries)
+        missing = selected - all_paths
         if missing:
             raise KeyError(f"path is not in the index: {sorted(missing)[0]}")
     else:
-        selected = set(repo.index.entries)
+        selected = all_paths
 
     dirty: List[str] = []
     for path in sorted(selected):
+        if repo.index.has_unmerged(path):
+            dirty.append(path)
+            continue
         entry = repo.index.entries[path]
         target = repo.worktree / path
         if not _path_exists(target):
@@ -277,40 +327,49 @@ def ls_files(
     *,
     cached: bool = False,
     stage: bool = False,
+    unmerged: bool = False,
     deleted: bool = False,
     modified: bool = False,
     patterns: Sequence[str] = (),
     error_unmatch: bool = False,
 ) -> List[str]:
     """Return formatted index records for the requested ``ls-files`` selectors."""
-    if not any((cached, stage, deleted, modified)):
+    if not any((cached, stage, unmerged, deleted, modified)):
         cached = True
 
-    matched_paths = [
-        path for path in repo.index.paths() if _matches_path(path, patterns)
+    all_records = repo.index.all_entries(include_unmerged=True)
+    matching_records = [
+        entry for entry in all_records if _matches_path(entry.path, patterns)
     ]
+    all_paths = repo.index.paths(include_unmerged=True)
     if patterns and error_unmatch:
         for pattern in patterns:
-            if not any(_matches_path(path, [pattern]) for path in repo.index.paths()):
+            if not any(_matches_path(path, [pattern]) for path in all_paths):
                 raise KeyError(f"pathspec {pattern!r} did not match any index entry")
 
-    selected: Set[str] = set()
+    selected: Dict[Tuple[str, int], IndexEntry] = {}
     if cached or stage:
-        selected.update(matched_paths)
+        for entry in matching_records:
+            selected[(entry.path, entry.stage)] = entry
+    if unmerged:
+        for entry in matching_records:
+            if entry.stage:
+                selected[(entry.path, entry.stage)] = entry
     if deleted:
-        selected.update(
-            path for path in matched_paths if not _path_exists(repo.worktree / path)
-        )
+        for entry in matching_records:
+            if entry.stage == 0 and not _path_exists(repo.worktree / entry.path):
+                selected[(entry.path, entry.stage)] = entry
     if modified:
-        selected.update(
-            path for path in matched_paths if _is_modified(repo, repo.index.entries[path])
-        )
+        for entry in matching_records:
+            if entry.stage == 0 and _is_modified(repo, entry):
+                selected[(entry.path, entry.stage)] = entry
 
+    show_stage = stage or unmerged
     lines: List[str] = []
-    for path in sorted(selected):
-        entry = repo.index.entries[path]
-        if stage:
-            lines.append(f"{entry.mode} {entry.sha} 0\t{path}")
+    for key in sorted(selected):
+        entry = selected[key]
+        if show_stage:
+            lines.append(f"{entry.mode} {entry.sha} {entry.stage}\t{entry.path}")
         else:
-            lines.append(path)
+            lines.append(entry.path)
     return lines
