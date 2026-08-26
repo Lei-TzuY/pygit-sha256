@@ -10,6 +10,12 @@ from .rev_list import rev_list
 from .rev_list_boundary import boundary_children, rev_list_boundary
 from .rev_list_children import rev_list_children
 from .rev_list_object_names import rev_list_named_objects, rev_list_object_edges
+from .rev_list_oldest import (
+    rev_list_oldest,
+    rev_list_oldest_boundary,
+    rev_list_oldest_children,
+    rev_list_oldest_named_objects,
+)
 from .rev_list_parent_filter import (
     rev_list_parent_filter,
     rev_list_parent_filter_boundary,
@@ -135,6 +141,13 @@ def run_rev_list(argv: Sequence[str]) -> int:
         help="limit output to at most N selected commits",
     )
     parser.add_argument(
+        "--max-count-oldest",
+        type=int,
+        default=None,
+        metavar="N",
+        help="limit output to the oldest N commits that would otherwise be shown",
+    )
+    parser.add_argument(
         "revision",
         nargs="*",
         metavar="REV",
@@ -142,15 +155,37 @@ def run_rev_list(argv: Sequence[str]) -> int:
     )
     args = parser.parse_args(list(argv))
 
+    if args.max_count_oldest is not None:
+        if args.max_count_oldest < 0:
+            parser.error("--max-count-oldest must be non-negative")
+        if args.max_count or args.skip:
+            parser.error("--max-count-oldest cannot be used together with --max-count or --skip")
+
     object_mode = args.objects or args.objects_edge
     side_mode = args.left_right or args.left_only or args.right_only
     parent_filter_mode = args.min_parents > 0 or args.max_parents >= 0
+    oldest_mode = args.max_count_oldest is not None
     repo = _find_repo()
 
     child_entries = None
     child_map = {}
     if args.children:
-        if parent_filter_mode:
+        if oldest_mode:
+            child_entries = rev_list_oldest_children(
+                repo,
+                args.revision,
+                max_count_oldest=args.max_count_oldest,
+                all_refs=args.all,
+                first_parent=args.first_parent,
+                topo_order=args.topo_order,
+                reverse=args.reverse,
+                left_right=side_mode,
+                left_only=args.left_only,
+                right_only=args.right_only,
+                min_parents=args.min_parents,
+                max_parents=args.max_parents,
+            )
+        elif parent_filter_mode:
             child_entries = rev_list_parent_filter_children(
                 repo,
                 args.revision,
@@ -183,7 +218,22 @@ def run_rev_list(argv: Sequence[str]) -> int:
     boundary_entries = None
     boundary_child_map = {}
     if args.boundary:
-        if parent_filter_mode:
+        if oldest_mode:
+            boundary_entries = rev_list_oldest_boundary(
+                repo,
+                args.revision,
+                max_count_oldest=args.max_count_oldest,
+                all_refs=args.all,
+                first_parent=args.first_parent,
+                topo_order=args.topo_order,
+                reverse=args.reverse,
+                side_mode=side_mode,
+                left_only=args.left_only,
+                right_only=args.right_only,
+                min_parents=args.min_parents,
+                max_parents=args.max_parents,
+            )
+        elif parent_filter_mode:
             boundary_entries = rev_list_parent_filter_boundary(
                 repo,
                 args.revision,
@@ -227,7 +277,19 @@ def run_rev_list(argv: Sequence[str]) -> int:
                 "--left-right/--left-only/--right-only"
             )
 
-        if parent_filter_mode:
+        if oldest_mode:
+            objects = rev_list_oldest_named_objects(
+                repo,
+                args.revision,
+                max_count_oldest=args.max_count_oldest,
+                all_refs=args.all,
+                first_parent=args.first_parent,
+                topo_order=args.topo_order,
+                reverse=args.reverse,
+                min_parents=args.min_parents,
+                max_parents=args.max_parents,
+            )
+        elif parent_filter_mode:
             objects = rev_list_parent_filter_named_objects(
                 repo,
                 args.revision,
@@ -320,6 +382,21 @@ def run_rev_list(argv: Sequence[str]) -> int:
         entries = boundary_entries
     elif child_entries is not None:
         entries = child_entries
+    elif oldest_mode:
+        entries = rev_list_oldest(
+            repo,
+            args.revision,
+            max_count_oldest=args.max_count_oldest,
+            all_refs=args.all,
+            first_parent=args.first_parent,
+            topo_order=args.topo_order,
+            reverse=args.reverse,
+            left_right=side_mode,
+            left_only=args.left_only,
+            right_only=args.right_only,
+            min_parents=args.min_parents,
+            max_parents=args.max_parents,
+        )
     elif parent_filter_mode:
         entries = rev_list_parent_filter(
             repo,
