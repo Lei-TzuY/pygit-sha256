@@ -17,7 +17,8 @@ Eligible redundant pack families remove the `.pack`, `.idx`, `.rev`, and `.bitma
 - A sibling `.keep` file protects a redundant pack from expiration.
 - Corrupt MIDX data or a missing/corrupt tracked pack aborts before deletion because verification runs first.
 - Pygit has no cruft-pack format, so Git's cruft-pack exception has no pygit analogue yet.
-- This phase does not implement `multi-pack-index repack`, incremental MIDX chains, bitmaps, or preferred-pack selection.
+- Phase 106 adds `multi-pack-index repack`; `repack` intentionally leaves its source packs in place so this `expire` step can remove them only after the rewritten MIDX is independently verified.
+- Incremental MIDX chains, bitmaps, and general preferred-pack selection remain out of scope.
 - The operation only removes packs that are already redundant according to a verified MIDX; it does not rewrite object contents.
 
 Git's native `multi-pack-index expire` uses the same core rule: delete MIDX-tracked packfiles that have no objects referenced by the MIDX, except protected packs, then rewrite the MIDX.
