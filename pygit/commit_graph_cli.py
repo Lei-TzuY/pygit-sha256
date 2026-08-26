@@ -7,7 +7,10 @@ import sys
 from typing import Sequence
 
 from .commit_graph import CommitGraph
-from .commit_graph_reachability import write_reachable_commit_graph
+from .commit_graph_reachability import (
+    verify_commit_graph_coverage,
+    write_reachable_commit_graph,
+)
 from .entrypoint import _find_repo
 
 
@@ -26,8 +29,24 @@ def run_commit_graph(argv: Sequence[str]) -> int:
         action="store_true",
         help="read commit-ish roots from stdin instead of all repository refs plus HEAD",
     )
-    sub.add_parser("verify", help="verify graph structure and referenced commit metadata")
+    verify_parser = sub.add_parser(
+        "verify",
+        help="verify graph structure and referenced commit metadata",
+    )
+    verify_parser.add_argument(
+        "--reachable",
+        action="store_true",
+        help="also require coverage of every commit reachable from the selected roots",
+    )
+    verify_parser.add_argument(
+        "--stdin-commits",
+        action="store_true",
+        help="read coverage roots from stdin; requires --reachable",
+    )
     args = parser.parse_args(list(argv))
+
+    if args.command == "verify" and args.stdin_commits and not args.reachable:
+        verify_parser.error("--stdin-commits requires --reachable")
 
     repo = _find_repo()
     if args.command == "write":
@@ -41,6 +60,23 @@ def run_commit_graph(argv: Sequence[str]) -> int:
         # object database as a final end-to-end check before reporting success.
         CommitGraph(repo.pygit_dir).verify(repo.store)
         print(f"Wrote commit-graph to {path}")
+        return 0
+
+    if args.reachable:
+        revisions = None
+        if args.stdin_commits:
+            revisions = [line.strip() for line in sys.stdin if line.strip()]
+            if not revisions:
+                raise ValueError(
+                    "commit-graph verify --stdin-commits received no commits"
+                )
+        coverage = verify_commit_graph_coverage(repo, revisions)
+        path = CommitGraph(repo.pygit_dir).graph_file
+        print(
+            f"{path}: ok "
+            f"({coverage.expected_count} reachable, "
+            f"{coverage.indexed_count} indexed, {coverage.extra_count} extra)"
+        )
         return 0
 
     result = CommitGraph(repo.pygit_dir).verify(repo.store)
