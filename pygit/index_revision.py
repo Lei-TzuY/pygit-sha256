@@ -63,10 +63,14 @@ def resolve_index_expression(repo: Repository, expression: str) -> str:
     stage, path = parse_index_expression(repo, expression)
     entry = repo.index.get(path, stage)
     if entry is None:
+        if stage == 0:
+            raise KeyError(f"Path {path!r} is not in the index")
         raise KeyError(f"Path {path!r} has no index stage {stage}")
 
     oid = entry.sha.lower()
     if not repo.store.exists(oid):
+        if stage == 0:
+            raise KeyError(f"Index path {path!r} names missing object {oid}")
         raise KeyError(
             f"Index path {path!r} stage {stage} names missing object {oid}"
         )
