@@ -17,9 +17,11 @@ For a new pair, publication order is deliberately:
 1. publish the `.pack` with `os.replace()`;
 2. publish the `.idx` last as the discovery/commit point.
 
-Both temporary files exist and are durable before step 1 begins. If the second rename fails synchronously, the newly published pack is removed and remaining temporary files are cleaned up, so the failed call leaves no new final pair.
+Both temporary files exist and are durable before step 1 begins. If index publication fails, the already-published matching pack is intentionally retained as a pack-only orphan. The index is the discovery point, so that orphan is not advertised by normal index-driven lookup and a later identical write can install only the missing index.
 
-This is a two-file protocol rather than a claim of filesystem-wide transactional rename. An abrupt process or machine failure between the two final renames may leave a pack-only orphan. That state is intentionally non-discoverable by normal index-driven lookup, and a later identical write recognizes the matching content-derived orphan and installs only the missing index.
+The writer deliberately does **not** unlink the final pack as rollback after an index rename failure. Final pack paths are shared immutable publication targets: without an ownership token, a losing concurrent writer cannot prove that the current final pack still belongs exclusively to it. Deleting that path could remove the pack just committed by another identical writer and leave a visible `.idx` without its sibling pack.
+
+This is a two-file protocol rather than a claim of filesystem-wide transactional rename. An abrupt process or machine failure between the two final renames may likewise leave a pack-only orphan; the recovery rule is the same.
 
 ## Immutable target and recovery rules
 
@@ -39,4 +41,4 @@ Phase 117 changes only how the already-generated pair is installed on disk.
 
 ## Regression coverage
 
-`tests/test_phase117.py` covers normal readable output, idempotent complete-pair writes, `fsync` failure before publication, rollback when index publication fails, recovery from matching pack-only and index-only orphans, collision rejection, and temporary-file cleanup.
+`tests/test_phase117.py` covers normal readable output, idempotent complete-pair writes, `fsync` failure before publication, safe pack-only retention when index publication fails, deterministic concurrent-writer interleaving, recovery from matching pack-only and index-only orphans, collision rejection, and temporary-file cleanup.
