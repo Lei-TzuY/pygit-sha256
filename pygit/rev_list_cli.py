@@ -7,14 +7,15 @@ from typing import Sequence
 
 from .entrypoint import _find_repo
 from .rev_list import rev_list
+from .rev_list_children import rev_list_children
 from .rev_list_object_names import rev_list_named_objects, rev_list_object_edges
 from .rev_list_parents import parent_oids
 from .rev_list_sides import count_sides, rev_list_sides
 
 
-def _format_commit_line(oid: str, *, marker: str = "", parents=()) -> str:
+def _format_commit_line(oid: str, *, marker: str = "", related=()) -> str:
     prefix = marker or ""
-    suffix = "" if not parents else " " + " ".join(parents)
+    suffix = "" if not related else " " + " ".join(related)
     return f"{prefix}{oid}{suffix}"
 
 
@@ -40,10 +41,16 @@ def run_rev_list(argv: Sequence[str]) -> int:
         action="store_true",
         help="suppress pathname annotations in --objects/--objects-edge output",
     )
-    parser.add_argument(
+    relation_group = parser.add_mutually_exclusive_group()
+    relation_group.add_argument(
         "--parents",
         action="store_true",
         help="print each selected commit followed by its parent object IDs",
+    )
+    relation_group.add_argument(
+        "--children",
+        action="store_true",
+        help="print each selected commit followed by its child object IDs",
     )
     parser.add_argument(
         "--left-right",
@@ -83,6 +90,24 @@ def run_rev_list(argv: Sequence[str]) -> int:
 
     object_mode = args.objects or args.objects_edge
     side_mode = args.left_right or args.left_only or args.right_only
+    repo = _find_repo()
+
+    child_entries = None
+    child_map = {}
+    if args.children:
+        child_entries = rev_list_children(
+            repo,
+            args.revision,
+            all_refs=args.all,
+            first_parent=args.first_parent,
+            topo_order=args.topo_order,
+            reverse=args.reverse,
+            skip=args.skip,
+            max_count=args.max_count,
+            left_right=side_mode,
+        )
+        child_map = {entry.oid: entry.children for entry in child_entries}
+
     if object_mode:
         if side_mode:
             parser.error(
@@ -90,7 +115,6 @@ def run_rev_list(argv: Sequence[str]) -> int:
                 "--left-right/--left-only/--right-only"
             )
 
-        repo = _find_repo()
         objects = rev_list_named_objects(
             repo,
             args.revision,
@@ -118,14 +142,15 @@ def run_rev_list(argv: Sequence[str]) -> int:
 
         for entry in objects:
             if entry.type_name == "commit" and args.parents:
-                print(_format_commit_line(entry.oid, parents=parent_oids(repo, entry.oid)))
+                print(_format_commit_line(entry.oid, related=parent_oids(repo, entry.oid)))
+            elif entry.type_name == "commit" and args.children:
+                print(_format_commit_line(entry.oid, related=child_map.get(entry.oid, ())))
             elif args.no_object_names or entry.path is None:
                 print(entry.oid)
             else:
                 print(f"{entry.oid} {entry.path}")
         return 0
 
-    repo = _find_repo()
     if side_mode:
         entries = rev_list_sides(
             repo,
@@ -139,6 +164,8 @@ def run_rev_list(argv: Sequence[str]) -> int:
             left_only=args.left_only,
             right_only=args.right_only,
         )
+    elif child_entries is not None:
+        entries = child_entries
     else:
         entries = rev_list(
             repo,
@@ -162,6 +189,11 @@ def run_rev_list(argv: Sequence[str]) -> int:
 
     for entry in entries:
         marker = entry.side if args.left_right else ""
-        parents = parent_oids(repo, entry.oid) if args.parents else ()
-        print(_format_commit_line(entry.oid, marker=marker or "", parents=parents))
+        if args.parents:
+            related = parent_oids(repo, entry.oid)
+        elif args.children:
+            related = child_map.get(entry.oid, ())
+        else:
+            related = ()
+        print(_format_commit_line(entry.oid, marker=marker or "", related=related))
     return 0
