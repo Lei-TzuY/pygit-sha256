@@ -108,8 +108,11 @@ class PackWriter:
         For a new pair, both files are fully staged and fsynced before either
         final path appears. The pack is installed first and the index last, so a
         crash cannot make an index advertise a pack that has not been published.
-        If the second rename fails synchronously, the newly published pack is
-        rolled back and all remaining temporary files are removed.
+        If index publication fails, the matching pack-only orphan is deliberately
+        retained. Final pack paths are shared immutable publication targets, and
+        without an ownership token this writer cannot safely unlink one after a
+        concurrent identical writer may have started using it. A later identical
+        write recognizes the orphan and installs only the missing index.
         """
         pack_exists = pack_path.exists()
         idx_exists = idx_path.exists()
@@ -123,7 +126,6 @@ class PackWriter:
 
         pack_temp: Optional[Path] = None
         idx_temp: Optional[Path] = None
-        published_new_pack = False
         try:
             if not pack_exists:
                 pack_temp = cls._stage_bytes(pack_path, pack_data)
@@ -133,19 +135,10 @@ class PackWriter:
             if pack_temp is not None:
                 os.replace(pack_temp, pack_path)
                 pack_temp = None
-                published_new_pack = True
 
             if idx_temp is not None:
-                try:
-                    os.replace(idx_temp, idx_path)
-                    idx_temp = None
-                except Exception:
-                    if published_new_pack:
-                        try:
-                            pack_path.unlink()
-                        except OSError:
-                            pass
-                    raise
+                os.replace(idx_temp, idx_path)
+                idx_temp = None
         finally:
             for temp_path in (pack_temp, idx_temp):
                 if temp_path is not None:
