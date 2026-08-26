@@ -309,7 +309,14 @@ class PackReader:
     def get_shas(self) -> List[str]:
         return list(self._shas)
 
-    def read_object(self, sha: str) -> Optional[GitObject]:
+    def read_store_bytes(self, sha: str) -> Optional[bytes]:
+        """Return the exact validated object envelope stored for *sha*.
+
+        The returned bytes are ``<type> <size>\x00<payload>`` exactly as encoded
+        in the pack entry. Pack checksum, index metadata, entry boundary, CRC,
+        canonical envelope, and object ID validation are all performed before
+        the bytes are exposed.
+        """
         if sha not in self._offsets:
             return None
 
@@ -353,6 +360,12 @@ class PackReader:
             raise ValueError(
                 f"pack index object ID mismatch: requested {sha}, decoded {actual_oid}"
             )
+        return store_bytes
+
+    def read_object(self, sha: str) -> Optional[GitObject]:
+        store_bytes = self.read_store_bytes(sha)
+        if store_bytes is None:
+            return None
 
         from .store import ObjectStore
 

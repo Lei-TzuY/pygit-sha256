@@ -132,6 +132,85 @@ class ObjectStore:
     # Reading
     # ------------------------------------------------------------------
 
+    def read_store_bytes(self, sha: str) -> bytes:
+        """Return the exact validated ``<type> <size>\x00<payload>`` envelope.
+
+        Loose and packed storage use the same object-selection semantics as
+        :meth:`read`: a loose copy wins, multi-pack-index mappings are preferred,
+        damaged selected packed copies fall back to redundant valid copies, and
+        packs added after a stale MIDX remain visible. The bytes are validated as
+        a readable pygit object before being returned but are never re-serialized,
+        so headers not modeled by the in-memory object classes are preserved.
+        """
+        obj_path = self._path_for(sha)
+        if obj_path.exists():
+            compressed = obj_path.read_bytes()
+            store_bytes = zlib.decompress(compressed)
+            actual_sha = hashlib.new(HASH_ALGO, store_bytes).hexdigest()
+            if actual_sha != sha:
+                raise ValueError(f"Object {sha} is corrupt (stored hash is {actual_sha})")
+            self._parse(store_bytes)
+            return store_bytes
+
+        from .pack import PackReader
+
+        pack_dir = self.root / "pack"
+        if pack_dir.exists():
+            midx = self._load_multi_pack_index(pack_dir)
+            first_error = None
+            selected_idx = None
+            covered = set()
+
+            if midx is not None:
+                covered.update(midx.pack_names)
+                mapping = midx.lookup(sha)
+                if mapping is not None:
+                    selected_idx = pack_dir / mapping.pack_name
+                    if not selected_idx.is_file():
+                        first_error = FileNotFoundError(selected_idx)
+                    elif not selected_idx.with_suffix(".pack").is_file():
+                        first_error = FileNotFoundError(selected_idx.with_suffix(".pack"))
+                    else:
+                        try:
+                            reader = PackReader(selected_idx)
+                            if not reader.has_object(sha):
+                                first_error = ValueError(
+                                    f"multi-pack-index mapping for {sha} is absent from {mapping.pack_name}"
+                                )
+                            else:
+                                store_bytes = reader.read_store_bytes(sha)
+                                if store_bytes is not None:
+                                    self._parse(store_bytes)
+                                    return store_bytes
+                                first_error = ValueError(
+                                    f"multi-pack-index could not read {sha} from {mapping.pack_name}"
+                                )
+                        except (ValueError, OSError, zlib.error) as exc:
+                            first_error = exc
+
+            for idx_file in pack_dir.glob("*.idx"):
+                if selected_idx is not None and idx_file == selected_idx:
+                    continue
+                if selected_idx is None and idx_file.name in covered:
+                    continue
+                try:
+                    reader = PackReader(idx_file)
+                    if not reader.has_object(sha):
+                        continue
+                    store_bytes = reader.read_store_bytes(sha)
+                    if store_bytes is not None:
+                        self._parse(store_bytes)
+                        return store_bytes
+                except (ValueError, OSError, zlib.error) as exc:
+                    if first_error is None:
+                        first_error = exc
+                    continue
+
+            if first_error is not None:
+                raise first_error
+
+        raise KeyError(f"Object not found: {sha}")
+
     def read(self, sha: str) -> GitObject:
         """
         Read the object identified by *sha* from disk (loose or pack).
@@ -343,7 +422,7 @@ class ObjectStore:
     @staticmethod
     def _parse(store_bytes: bytes) -> GitObject:
         """
-        Decode the object envelope ``<type> <size>\\x00<payload>``
+        Decode the object envelope ``<type> <size>\x00<payload>``
         and return a populated concrete GitObject.
         """
         null_pos = store_bytes.index(b"\x00")
