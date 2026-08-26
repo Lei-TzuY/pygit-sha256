@@ -11,7 +11,6 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Optional, Tuple
 
-from .objects import GitObject
 from .repo import Repository
 from .revision import resolve_revision
 
@@ -74,14 +73,32 @@ def object_disk_size(repo: Repository, oid: str) -> int:
     raise KeyError(f"Object not found: {oid}")
 
 
+def _split_store_bytes(store_bytes: bytes) -> Tuple[str, bytes]:
+    """Extract the exact type name and payload from a validated object envelope."""
+    try:
+        nul = store_bytes.index(b"\x00")
+        type_bytes, size_bytes = store_bytes[:nul].split(b" ", 1)
+        declared_size = int(size_bytes)
+        type_name = type_bytes.decode("ascii")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError("invalid object envelope") from exc
+
+    content = store_bytes[nul + 1 :]
+    if len(content) != declared_size:
+        raise ValueError(
+            f"Size mismatch: header says {declared_size}, got {len(content)}"
+        )
+    return type_name, content
+
+
 def inspect_object(repo: Repository, expression: str) -> CatFileRecord:
     oid = resolve_revision(repo, expression)
-    obj: GitObject = repo.store.read(oid)
-    content = obj.serialize()
+    store_bytes = repo.store.read_store_bytes(oid)
+    type_name, content = _split_store_bytes(store_bytes)
     return CatFileRecord(
         expression=expression,
         oid=oid,
-        type_name=obj.type_name.decode("ascii"),
+        type_name=type_name,
         size=len(content),
         content=content,
         disk_size=object_disk_size(repo, oid),
