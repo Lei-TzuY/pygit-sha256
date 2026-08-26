@@ -303,8 +303,35 @@ def parse_multi_pack_index(path: Path) -> ParsedMultiPackIndex:
     return parse_multi_pack_index_bytes(path.read_bytes())
 
 
-def write_multi_pack_index(pack_dir: Path) -> Path:
-    """Create/update ``multi-pack-index`` for all current ``*.idx`` files."""
+def _normalize_preferred_pack_name(preferred_pack: str) -> str:
+    """Normalize a CLI/API preferred pack basename to pygit's ``.idx`` name."""
+    if (
+        not preferred_pack
+        or preferred_pack in {".", ".."}
+        or "/" in preferred_pack
+        or "\\" in preferred_pack
+        or "\x00" in preferred_pack
+    ):
+        raise ValueError(f"invalid preferred multi-pack-index pack: {preferred_pack!r}")
+    if preferred_pack.endswith(".pack"):
+        return preferred_pack[:-5] + ".idx"
+    if preferred_pack.endswith(".idx"):
+        return preferred_pack
+    return preferred_pack + ".idx"
+
+
+def write_multi_pack_index(
+    pack_dir: Path,
+    *,
+    preferred_pack: Optional[str] = None,
+) -> Path:
+    """Create/update ``multi-pack-index`` with Git-style duplicate selection.
+
+    An explicit ``preferred_pack`` wins whenever it contains a duplicate object.
+    Without one, the oldest pack is treated as the default preferred pack. For
+    duplicate objects absent from the preferred pack, the newest pack copy wins.
+    Equal mtimes are resolved by pack-index basename for deterministic output.
+    """
     pack_dir = Path(pack_dir)
     pack_dir.mkdir(parents=True, exist_ok=True)
     idx_paths = sorted(pack_dir.glob("*.idx"), key=lambda path: path.name)
@@ -313,16 +340,58 @@ def write_multi_pack_index(pack_dir: Path) -> Path:
 
     pack_names = tuple(path.name for path in idx_paths)
     _encode_pack_names(pack_names)
-    selected: Dict[str, Tuple[int, int]] = {}
-    for pack_id, idx_path in enumerate(idx_paths):
+    pack_ids = {name: pack_id for pack_id, name in enumerate(pack_names)}
+
+    indexes: Dict[str, ParsedPackIndex] = {}
+    mtimes: Dict[str, int] = {}
+    for idx_path in idx_paths:
         pack_path = idx_path.with_suffix(".pack")
         if not pack_path.is_file():
             raise FileNotFoundError(pack_path)
-        index: ParsedPackIndex = parse_index(idx_path)
+        indexes[idx_path.name] = parse_index(idx_path)
+        # Git's duplicate-copy selection is based on pack mtime. Use second
+        # resolution to mirror the timestamp granularity used by Git's pack
+        # ordering while retaining basename ordering as a deterministic tie.
+        mtimes[idx_path.name] = int(pack_path.stat().st_mtime)
+
+    if preferred_pack is None:
+        preferred_idx = min(pack_names, key=lambda name: (mtimes[name], name))
+    else:
+        preferred_idx = _normalize_preferred_pack_name(preferred_pack)
+        if preferred_idx not in pack_ids:
+            raise ValueError(
+                f"preferred multi-pack-index pack is missing: {preferred_pack}"
+            )
+
+    if not indexes[preferred_idx].entries:
+        raise ValueError("preferred multi-pack-index pack must contain at least one object")
+
+    # oid -> (idx_name, offset, mtime)
+    selected_meta: Dict[str, Tuple[str, int, int]] = {}
+    for idx_name in pack_names:
+        index = indexes[idx_name]
+        mtime = mtimes[idx_name]
         for entry in index.entries:
-            # A duplicate object may legitimately be present in multiple packs.
-            # Select the lexicographically first pack deterministically.
-            selected.setdefault(entry.oid, (pack_id, entry.offset))
+            current = selected_meta.get(entry.oid)
+            if current is None:
+                selected_meta[entry.oid] = (idx_name, entry.offset, mtime)
+                continue
+
+            current_name, _current_offset, current_mtime = current
+            if idx_name == preferred_idx:
+                selected_meta[entry.oid] = (idx_name, entry.offset, mtime)
+                continue
+            if current_name == preferred_idx:
+                continue
+            if mtime > current_mtime or (
+                mtime == current_mtime and idx_name < current_name
+            ):
+                selected_meta[entry.oid] = (idx_name, entry.offset, mtime)
+
+    selected: Dict[str, Tuple[int, int]] = {
+        oid: (pack_ids[idx_name], offset)
+        for oid, (idx_name, offset, _mtime) in selected_meta.items()
+    }
 
     data = _build_bytes(pack_names, selected)
     output = pack_dir / "multi-pack-index"
