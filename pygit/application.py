@@ -14,6 +14,7 @@ from .checkout_index_cli import run_checkout_index
 from .commit_graph_cli import run_commit_graph
 from .count_objects_cli import run_count_objects
 from .for_each_ref_cli import run_for_each_ref
+from .fsck_cli import run_fsck
 from .gc_cli import run_gc
 from .launcher import main as launcher_main
 from .ls_files_cli import run_ls_files
@@ -66,6 +67,10 @@ def main() -> None:
 
     if argv and argv[0] == "gc":
         _run_safe(run_gc, argv[1:])
+        return
+
+    if argv and argv[0] == "fsck":
+        _run_safe(run_fsck, argv[1:])
         return
 
     if argv and argv[0] == "ls-tree":
