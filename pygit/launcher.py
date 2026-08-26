@@ -17,6 +17,7 @@ from .hash_object import hash_object_data, write_object_data
 from .merge_file import merge_file
 from .merge_tree import merge_tree
 from .mktag import make_tag
+from .multi_pack_index_cli import run_multi_pack_index
 from .pack_cli import run_index_pack, run_unpack_objects
 from .pack_objects_cli import run_pack_objects
 from .prune_cli import run_prune
@@ -334,6 +335,7 @@ def main() -> None:
         "prune-packed",
         "prune",
         "repack",
+        "multi-pack-index",
     }
     if not argv or argv[0] not in commands:
         runtime_main()
@@ -364,6 +366,8 @@ def main() -> None:
             code = run_prune_packed(argv[1:])
         elif argv[0] == "prune":
             code = run_prune(argv[1:])
+        elif argv[0] == "multi-pack-index":
+            code = run_multi_pack_index(argv[1:])
         else:
             code = run_repack(argv[1:])
     except (RuntimeError, ValueError, KeyError, FileNotFoundError, FileExistsError, OSError) as exc:

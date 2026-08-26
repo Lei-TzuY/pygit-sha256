@@ -61,6 +61,8 @@ class ObjectStore:
     def __init__(self, objects_dir: Path) -> None:
         self.root = objects_dir
         self.root.mkdir(parents=True, exist_ok=True)
+        self._midx_cache_key = None
+        self._midx_cache = None
 
     # ------------------------------------------------------------------
     # Writing
@@ -119,16 +121,68 @@ class ObjectStore:
                 raise ValueError(f"Object {sha} is corrupt (stored hash is {actual_sha})")
             return self._parse(store_bytes)
 
-        # Check packfiles
+        # Check packfiles. A multi-pack-index provides a direct pack choice.
+        # If that copy is damaged, keep searching for a redundant valid copy;
+        # only surface the first storage error when no usable copy remains.
+        # Packs created after the MIDX are also searched as a stale-index
+        # compatibility path until the next MIDX refresh.
         from .pack import PackReader
         pack_dir = self.root / "pack"
         if pack_dir.exists():
+            midx = self._load_multi_pack_index(pack_dir)
+            first_error = None
+            selected_idx = None
+            covered = set()
+
+            if midx is not None:
+                covered.update(midx.pack_names)
+                mapping = midx.lookup(sha)
+                if mapping is not None:
+                    selected_idx = pack_dir / mapping.pack_name
+                    if not selected_idx.is_file():
+                        first_error = FileNotFoundError(selected_idx)
+                    elif not selected_idx.with_suffix(".pack").is_file():
+                        first_error = FileNotFoundError(selected_idx.with_suffix(".pack"))
+                    else:
+                        try:
+                            reader = PackReader(selected_idx)
+                            if not reader.has_object(sha):
+                                first_error = ValueError(
+                                    f"multi-pack-index mapping for {sha} is absent from {mapping.pack_name}"
+                                )
+                            else:
+                                obj = reader.read_object(sha)
+                                if obj is not None:
+                                    return obj
+                                first_error = ValueError(
+                                    f"multi-pack-index could not read {sha} from {mapping.pack_name}"
+                                )
+                        except (ValueError, OSError, zlib.error) as exc:
+                            first_error = exc
+
+            # With a healthy MIDX miss, covered packs cannot contain the OID and
+            # only newer/uncovered indexes need inspection. After a selected
+            # copy fails, however, scan every other index so a duplicate object
+            # in another covered pack can preserve the repository's redundancy.
             for idx_file in pack_dir.glob("*.idx"):
-                reader = PackReader(idx_file)
-                if reader.has_object(sha):
+                if selected_idx is not None and idx_file == selected_idx:
+                    continue
+                if selected_idx is None and idx_file.name in covered:
+                    continue
+                try:
+                    reader = PackReader(idx_file)
+                    if not reader.has_object(sha):
+                        continue
                     obj = reader.read_object(sha)
-                    if obj:
+                    if obj is not None:
                         return obj
+                except (ValueError, OSError, zlib.error) as exc:
+                    if first_error is None:
+                        first_error = exc
+                    continue
+
+            if first_error is not None:
+                raise first_error
 
         raise KeyError(f"Object not found: {sha}")
 
@@ -139,7 +193,26 @@ class ObjectStore:
         from .pack import PackReader
         pack_dir = self.root / "pack"
         if pack_dir.exists():
-            for idx_file in pack_dir.glob("*.idx"):
+            midx = self._load_multi_pack_index(pack_dir)
+            covered = set()
+            if midx is not None:
+                covered.update(midx.pack_names)
+                mapping = midx.lookup(sha)
+                if mapping is not None:
+                    idx_file = pack_dir / mapping.pack_name
+                    if not idx_file.is_file() or not idx_file.with_suffix(".pack").is_file():
+                        raise ValueError(
+                            f"multi-pack-index references missing pack {mapping.pack_name}"
+                        )
+                    if not PackReader(idx_file).has_object(sha):
+                        raise ValueError(
+                            f"multi-pack-index mapping for {sha} is absent from {mapping.pack_name}"
+                        )
+                    return True
+
+            for idx_file in sorted(pack_dir.glob("*.idx")):
+                if idx_file.name in covered:
+                    continue
                 if PackReader(idx_file).has_object(sha):
                     return True
         return False
@@ -166,7 +239,14 @@ class ObjectStore:
         from .pack import PackReader
         pack_dir = self.root / "pack"
         if pack_dir.exists():
-            for idx_file in pack_dir.glob("*.idx"):
+            midx = self._load_multi_pack_index(pack_dir)
+            covered = set()
+            if midx is not None:
+                covered.update(midx.pack_names)
+                shas.update(entry.oid for entry in midx.entries)
+            for idx_file in sorted(pack_dir.glob("*.idx")):
+                if idx_file.name in covered:
+                    continue
                 shas.update(PackReader(idx_file).get_shas())
         return sorted(shas)
 
@@ -175,7 +255,8 @@ class ObjectStore:
         Resolve a short SHA prefix (4+ hex chars) to a full 64-char SHA.
 
         Returns full SHA if unique match found, raises ValueError if ambiguous,
-        returns None if no object matches.
+        returns None if no object matches. Loose objects, MIDX-covered packs,
+        and packs added after the MIDX was written all participate.
         """
         prefix = prefix.lower()
         if len(prefix) == 64:
@@ -183,17 +264,7 @@ class ObjectStore:
         if len(prefix) < 4:
             return None
 
-        dir_prefix = prefix[:2]
-        file_prefix = prefix[2:]
-        target_dir = self.root / dir_prefix
-        if not target_dir.is_dir():
-            return None
-
-        matches = [
-            dir_prefix + f.name
-            for f in target_dir.iterdir()
-            if f.is_file() and f.name.startswith(file_prefix)
-        ]
+        matches = [sha for sha in self.all_shas() if sha.startswith(prefix)]
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
@@ -203,6 +274,22 @@ class ObjectStore:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _load_multi_pack_index(self, pack_dir: Path):
+        midx_path = pack_dir / "multi-pack-index"
+        if not midx_path.is_file():
+            self._midx_cache_key = None
+            self._midx_cache = None
+            return None
+
+        stat = midx_path.stat()
+        key = (stat.st_mtime_ns, stat.st_size)
+        if self._midx_cache_key != key:
+            from .multi_pack_index import parse_multi_pack_index
+
+            self._midx_cache = parse_multi_pack_index(midx_path)
+            self._midx_cache_key = key
+        return self._midx_cache
 
     def _path_for(self, sha: str) -> Path:
         """Map a hex SHA to its on-disk path."""
