@@ -1,9 +1,10 @@
 """Child metadata presentation for ``rev-list --children``.
 
-Git computes child links from the revision walk before output limiting.  That
+Git computes child links from the revision walk before output limiting. That
 means a commit removed by ``--skip`` can still appear as a child of the first
-emitted commit.  This module keeps that detail separate from the core commit
-selector while reusing the same revision semantics.
+emitted commit. Child ordering is likewise established before ``--reverse``.
+This module keeps those details separate from the core commit selector while
+reusing the same revision semantics.
 """
 
 from __future__ import annotations
@@ -32,14 +33,13 @@ def _child_map(
     all_refs: bool,
     first_parent: bool,
     topo_order: bool,
-    reverse: bool,
     left_right: bool,
 ) -> Dict[str, Tuple[str, ...]]:
     """Return child links for the complete selected revision set.
 
-    ``skip`` and ``max-count`` are deliberately absent. Git builds child
-    metadata before those presentation limits. Child ordering follows the
-    unbounded rev-list order so output remains deterministic.
+    ``skip``, ``max-count``, and ``reverse`` are deliberately absent. Git
+    builds child metadata before those presentation transforms. Child ordering
+    therefore follows the unbounded, forward rev-list order.
     """
 
     complete = rev_list(
@@ -48,7 +48,7 @@ def _child_map(
         all_refs=all_refs,
         first_parent=first_parent,
         topo_order=topo_order,
-        reverse=reverse,
+        reverse=False,
         skip=0,
         max_count=0,
         left_right=left_right,
@@ -85,10 +85,10 @@ def rev_list_children(
 
     Selection, ordering, exclusions, symmetric ranges, and side markers are
     delegated to :func:`rev_list`. Child links are derived from the complete
-    selected walk before ``skip`` / ``max_count`` are applied, matching native
-    Git. ``--first-parent`` restricts both traversal and child edges to first
-    parent links. Shallow-boundary parent suppression is inherited from
-    :func:`parent_oids`.
+    selected walk before ``skip`` / ``max_count`` / ``reverse`` are applied,
+    matching native Git. ``--first-parent`` restricts both traversal and child
+    edges to first-parent links. Shallow-boundary parent suppression is
+    inherited from :func:`parent_oids`.
     """
 
     child_map = _child_map(
@@ -97,7 +97,6 @@ def rev_list_children(
         all_refs=all_refs,
         first_parent=first_parent,
         topo_order=topo_order,
-        reverse=reverse,
         left_right=left_right,
     )
     entries = rev_list(
