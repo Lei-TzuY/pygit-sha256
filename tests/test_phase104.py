@@ -154,6 +154,32 @@ def test_object_store_uses_midx_fast_path_for_covered_packs(tmp_path: Path) -> N
     assert repo.store.exists(target_oid)
 
 
+def test_corrupt_midx_selected_copy_falls_back_to_redundant_pack(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    shared = BlobObject(b"redundant-through-midx\n")
+    pack_a, idx_a, oids_a = _pack(repo, shared, BlobObject(b"unique-a\n"))
+    pack_b, idx_b, oids_b = _pack(repo, shared, BlobObject(b"unique-b\n"))
+    shared_oid = oids_a[0]
+    assert shared_oid == oids_b[0]
+
+    midx = parse_multi_pack_index(
+        write_multi_pack_index(repo.pygit_dir / "objects" / "pack")
+    )
+    selected_name = midx.lookup(shared_oid).pack_name
+    selected_pack = pack_a if idx_a.name == selected_name else pack_b
+    alternate_pack = pack_b if selected_pack == pack_a else pack_a
+    assert alternate_pack != selected_pack
+    assert repo.store.delete(shared_oid)
+
+    data = bytearray(selected_pack.read_bytes())
+    data[-1] ^= 0x01
+    selected_pack.write_bytes(data)
+
+    obj = repo.store.read(shared_oid)
+    assert isinstance(obj, BlobObject)
+    assert obj.data == b"redundant-through-midx\n"
+
+
 def test_stale_midx_falls_back_to_pack_added_after_write(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     _, _, first_oids = _pack(repo, BlobObject(b"before-midx\n"))
