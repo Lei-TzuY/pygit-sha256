@@ -26,9 +26,9 @@ This replaces the earlier Phase 104 implementation that always selected the lexi
 
 The writer still validates every source `.idx`, requires every sibling `.pack`, keeps pack names sorted in the MIDX image, and atomically replaces `multi-pack-index` only after selection succeeds. A missing or empty explicit preferred pack fails before replacing an existing MIDX.
 
-The on-disk MIDX format is unchanged. ObjectStore lookup, Phase 107 full verification, Phase 105 expire, and Phase 106 repack continue to consume the same structure; only duplicate-copy ownership chosen at write time changes.
+The on-disk MIDX format is unchanged. ObjectStore lookup, Phase 107 full verification, Phase 105 expire, and Phase 106 repack continue to consume the same structure; only duplicate-copy ownership chosen at write time changes. Phase 111 reuses these exact selection rules when `write --stdin-packs` narrows the pack universe.
 
-Pygit still does not implement MIDX bitmaps, incremental MIDX chains, `--stdin-packs`, or alternate-object-directory routing.
+Pygit still does not implement MIDX bitmaps, incremental MIDX chains, `--refs-snapshot`, or alternate-object-directory routing.
 
 ## Regression coverage
 
