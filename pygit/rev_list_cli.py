@@ -7,6 +7,7 @@ from typing import Sequence
 
 from .entrypoint import _find_repo
 from .rev_list import rev_list
+from .rev_list_boundary import boundary_children, rev_list_boundary
 from .rev_list_children import rev_list_children
 from .rev_list_object_names import rev_list_named_objects, rev_list_object_edges
 from .rev_list_parents import parent_oids
@@ -40,6 +41,11 @@ def run_rev_list(argv: Sequence[str]) -> int:
         "--no-object-names",
         action="store_true",
         help="suppress pathname annotations in --objects/--objects-edge output",
+    )
+    parser.add_argument(
+        "--boundary",
+        action="store_true",
+        help="include excluded commits at the boundary of the visible commit set",
     )
     relation_group = parser.add_mutually_exclusive_group()
     relation_group.add_argument(
@@ -108,6 +114,29 @@ def run_rev_list(argv: Sequence[str]) -> int:
         )
         child_map = {entry.oid: entry.children for entry in child_entries}
 
+    boundary_entries = None
+    boundary_child_map = {}
+    if args.boundary:
+        boundary_entries = rev_list_boundary(
+            repo,
+            args.revision,
+            all_refs=args.all,
+            first_parent=args.first_parent,
+            topo_order=args.topo_order,
+            reverse=args.reverse,
+            skip=args.skip,
+            max_count=args.max_count,
+            side_mode=side_mode,
+            left_only=args.left_only,
+            right_only=args.right_only,
+        )
+        if args.children:
+            boundary_child_map = boundary_children(
+                repo,
+                boundary_entries,
+                first_parent=args.first_parent,
+            )
+
     if object_mode:
         if side_mode:
             parser.error(
@@ -126,32 +155,73 @@ def run_rev_list(argv: Sequence[str]) -> int:
             max_count=args.max_count,
         )
 
+        edge_oids = ()
         if args.objects_edge:
-            for oid in rev_list_object_edges(
+            edge_oids = rev_list_object_edges(
                 repo,
                 args.revision,
                 all_refs=args.all,
                 first_parent=args.first_parent,
                 topo_order=args.topo_order,
-            ):
+            )
+            for oid in edge_oids:
                 print(f"-{oid}")
 
+        boundary_oids = () if boundary_entries is None else tuple(
+            entry.oid for entry in boundary_entries if entry.boundary
+        )
+
         if args.count:
-            print(len(objects))
+            print(len(objects) + len(boundary_oids))
             return 0
 
-        for entry in objects:
-            if entry.type_name == "commit" and args.parents:
-                print(_format_commit_line(entry.oid, related=parent_oids(repo, entry.oid)))
-            elif entry.type_name == "commit" and args.children:
-                print(_format_commit_line(entry.oid, related=child_map.get(entry.oid, ())))
-            elif args.no_object_names or entry.path is None:
+        commit_objects = {entry.oid: entry for entry in objects if entry.type_name == "commit"}
+        other_objects = [entry for entry in objects if entry.type_name != "commit"]
+        emitted_edges = set(edge_oids)
+
+        if boundary_entries is not None:
+            for relation_entry in boundary_entries:
+                oid = relation_entry.oid
+                if relation_entry.boundary:
+                    if oid in emitted_edges:
+                        continue
+                    if args.parents:
+                        related = parent_oids(repo, oid)
+                    elif args.children:
+                        related = boundary_child_map.get(oid, ())
+                    else:
+                        related = ()
+                    print(_format_commit_line(oid, marker="-", related=related))
+                    continue
+
+                if oid not in commit_objects:
+                    continue
+                if args.parents:
+                    related = parent_oids(repo, oid)
+                elif args.children:
+                    related = child_map.get(oid, ())
+                else:
+                    related = ()
+                print(_format_commit_line(oid, related=related))
+        else:
+            for entry in commit_objects.values():
+                if args.parents:
+                    print(_format_commit_line(entry.oid, related=parent_oids(repo, entry.oid)))
+                elif args.children:
+                    print(_format_commit_line(entry.oid, related=child_map.get(entry.oid, ())))
+                else:
+                    print(entry.oid)
+
+        for entry in other_objects:
+            if args.no_object_names or entry.path is None:
                 print(entry.oid)
             else:
                 print(f"{entry.oid} {entry.path}")
         return 0
 
-    if side_mode:
+    if boundary_entries is not None:
+        entries = boundary_entries
+    elif side_mode:
         entries = rev_list_sides(
             repo,
             args.revision,
@@ -188,9 +258,12 @@ def run_rev_list(argv: Sequence[str]) -> int:
         return 0
 
     for entry in entries:
-        marker = entry.side if args.left_right else ""
+        is_boundary = bool(getattr(entry, "boundary", False))
+        marker = "-" if is_boundary else (entry.side if args.left_right else "")
         if args.parents:
             related = parent_oids(repo, entry.oid)
+        elif args.children and is_boundary:
+            related = boundary_child_map.get(entry.oid, ())
         elif args.children:
             related = child_map.get(entry.oid, ())
         else:
