@@ -29,36 +29,41 @@ Only the prefixes `:0:`, `:1:`, `:2:`, and `:3:` have stage syntax. Other
 colons remain part of the path. For example `:4:a` addresses a literal stage-0
 index path named `4:a`, while `:0:0:a` explicitly addresses stage 0 of `0:a`.
 
-## Conflict-stage boundary
+## Conflict-stage evolution
 
-The current readable JSON index stores one `IndexEntry` per path and therefore
-has no representation for Git's unmerged stages 1, 2, and 3. Phase 118 does not
-invent synthetic conflict entries: `:1:path`, `:2:path`, and `:3:path` fail
-explicitly. Multi-stage resolution should be added together with a future index
-schema upgrade so `update-index`, `ls-files`, merge state, and revision lookup
-share one source of truth.
+At the Phase 118 boundary, pygit's readable JSON index stored one `IndexEntry`
+per path and had no representation for Git's unmerged stages 1, 2, and 3. The
+phase therefore rejected `:1:path`, `:2:path`, and `:3:path` explicitly rather
+than inventing synthetic conflict data.
+
+Phase 124 later upgrades that same index model with persistent stages 1-3 and
+wires them through `update-index --index-info`, `ls-files --stage`, and the
+shared revision resolver. The Phase 118 grammar and stage-0 behavior stay
+unchanged; the formerly unavailable conflict-stage expressions now resolve real
+stored entries.
 
 ## Shared resolver composition
 
-The new syntax lives behind `pygit.revision.resolve_revision()`, so every
-plumbing command already using the unified resolver inherits stage-0 lookup.
-Typed peeling continues to work, including `:path^{object}` and
-`:path^{blob}`. Existing `REV:path` tree traversal is unchanged and remains a
-separate namespace.
+The syntax lives behind `pygit.revision.resolve_revision()`, so every plumbing
+command already using the unified resolver inherits index lookup. Typed peeling
+continues to work, including `:path^{object}` and `:path^{blob}`. Existing
+`REV:path` tree traversal is unchanged and remains a separate namespace.
 
-A missing index path or an index entry whose backing object is absent fails
-rather than returning an unusable object ID. Resolution is read-only and does
-not modify the index, worktree, refs, or reflogs.
+A missing index path/stage or an index entry whose backing object is absent
+fails rather than returning an unusable object ID. Resolution is read-only and
+does not modify the index, worktree, refs, or reflogs.
 
 ## Regression coverage
 
-`tests/test_phase118.py` covers:
+`tests/test_phase118.py` covers the original stage-0 contract:
 
 - staged objects remaining distinct from the same path in `HEAD`;
 - implicit and explicit stage 0;
 - colon-containing index paths and Git's stage-prefix disambiguation;
 - cwd-relative `./` and `../` forms plus repository-boundary rejection;
-- explicit failure for unavailable stages 1-3;
+- the original explicit failure boundary for unavailable stages 1-3;
 - typed peeling of index-selected blobs;
 - missing index entries and missing backing objects;
 - installed `rev-parse` and `cat-file` sharing the same resolution path.
+
+Phase 124 adds the regression suite for actual stages 1-3.

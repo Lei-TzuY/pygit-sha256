@@ -1,8 +1,8 @@
 """Git-style index object expressions for the shared revision resolver.
 
-The readable pygit index currently stores one stage-0 entry per path.  This
-module implements ``:<path>`` and ``:0:<path>`` without pretending that the
-JSON format can represent Git's unmerged stages 1-3.
+Phase 118 introduced ``:<path>`` / ``:0:<path>`` for the readable stage-0
+index. Phase 122 extends the same grammar to real conflict stages 1-3 stored by
+the multi-stage index backend.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def _normalize_cwd_relative_path(repo: Repository, path: str) -> str:
 def parse_index_expression(repo: Repository, expression: str) -> tuple[int, str]:
     """Return ``(stage, path)`` for one Git-style ``:<path>`` expression.
 
-    Git only treats ``:0:`` through ``:3:`` as stage prefixes.  Other text after
+    Git only treats ``:0:`` through ``:3:`` as stage prefixes. Other text after
     the first colon is part of the path, so an index entry named ``4:a`` is
     addressed as ``:4:a`` rather than being parsed as an invalid stage.
     """
@@ -52,25 +52,26 @@ def parse_index_expression(repo: Repository, expression: str) -> tuple[int, str]
 
     if not path or "\x00" in path:
         raise KeyError(f"index expression does not name a path: {expression!r}")
-    if stage != 0:
-        raise ValueError(
-            f"index stage {stage} is not supported by pygit's stage-0 JSON index"
-        )
-
     if path.startswith("./") or path.startswith("../"):
         path = _normalize_cwd_relative_path(repo, path)
     return stage, path
 
 
 def resolve_index_expression(repo: Repository, expression: str) -> str:
-    """Resolve ``:<path>`` / ``:0:<path>`` to the staged object ID."""
+    """Resolve a stage-aware index expression to its object ID."""
 
-    _, path = parse_index_expression(repo, expression)
-    entry = repo.index.get(path)
+    stage, path = parse_index_expression(repo, expression)
+    entry = repo.index.get(path, stage)
     if entry is None:
-        raise KeyError(f"Path {path!r} is not in the index")
+        if stage == 0:
+            raise KeyError(f"Path {path!r} is not in the index")
+        raise KeyError(f"Path {path!r} has no index stage {stage}")
 
     oid = entry.sha.lower()
     if not repo.store.exists(oid):
-        raise KeyError(f"Index path {path!r} names missing object {oid}")
+        if stage == 0:
+            raise KeyError(f"Index path {path!r} names missing object {oid}")
+        raise KeyError(
+            f"Index path {path!r} stage {stage} names missing object {oid}"
+        )
     return oid
