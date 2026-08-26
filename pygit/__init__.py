@@ -14,6 +14,10 @@ Quick start::
 """
 
 from .repo import Repository
+from .merge_index_stages import install_repository_merge_stage_support
+
+install_repository_merge_stage_support(Repository)
+
 from .plumbing import is_ancestor, list_refs, merge_bases
 from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
 from .fork_point import fork_point
