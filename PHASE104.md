@@ -35,11 +35,13 @@ Parsing is strict: signature/version/hash version, chunk ordering and bounds, ca
 
 The same object may legitimately appear in more than one pack. The MIDX stores one mapping per object ID and deterministically selects the lexicographically first source `.idx` basename. The object identity itself remains content-addressed, so any valid source copy is equivalent.
 
+The selected MIDX copy is a fast path, not a single point of failure. If that pack is missing or corrupt, `ObjectStore.read()` remembers the storage error and searches the remaining indexes for an independently valid copy of the same object. A valid duplicate is returned; the recorded error is raised only when no usable copy remains. This preserves the repository's pre-existing redundant-pack behavior regardless of directory iteration order.
+
 ## Object-store integration
 
-`ObjectStore.read()` and `ObjectStore.exists()` now consult the MIDX after checking loose storage. A hit chooses the recorded pack directly instead of linearly scanning all covered `.idx` files. MIDX lookup itself is an O(log N) binary search compatible with the Python 3.9 test floor. `all_shas()` enumerates MIDX-covered object IDs without reopening those indexes, and `resolve_prefix()` now resolves abbreviations across loose and packed storage rather than only loose-object directories.
+`ObjectStore.read()` and `ObjectStore.exists()` now consult the MIDX after checking loose storage. A normal hit chooses the recorded pack directly instead of linearly parsing all covered `.idx` files. MIDX lookup itself is an O(log N) binary search compatible with the Python 3.9 test floor. `all_shas()` enumerates MIDX-covered object IDs without reopening those indexes, and `resolve_prefix()` now resolves abbreviations across loose and packed storage rather than only loose-object directories.
 
-A MIDX is an accelerator rather than a requirement. If a new pack appears after the MIDX was written, its `.idx` basename is not in the MIDX pack-name set, so the object store still scans that uncovered index. This gives a safe stale-index transition until the next `multi-pack-index write`. Conversely, a malformed MIDX or a missing pack explicitly referenced by it is treated as storage corruption and fails loudly instead of silently hiding the problem.
+A MIDX is an accelerator rather than a requirement. If a new pack appears after the MIDX was written, its `.idx` basename is not in the MIDX pack-name set, so the object store still scans that uncovered index. This gives a safe stale-index transition until the next `multi-pack-index write`. A malformed MIDX itself still fails strict parsing; failures in a MIDX-selected source pack are surfaced unless another valid redundant copy can satisfy the read.
 
 ## Regression coverage
 
@@ -50,6 +52,7 @@ A MIDX is an accelerator rather than a requirement. If a new pack appears after 
 - checksum and invalid-pack-ID corruption;
 - verification against source indexes and missing pack pairs;
 - MIDX fast-path reads without scanning unrelated covered indexes;
+- fallback from a corrupt MIDX-selected copy to a redundant valid pack;
 - fallback to packs created after the MIDX;
 - packed-object `all_shas()` and abbreviation resolution;
 - installed `multi-pack-index write` / `verify` routing and help/error behavior.
