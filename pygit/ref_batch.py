@@ -29,7 +29,7 @@ class RefRejection:
         return f"rejected {self.refname} {self.new_value} {self.old_value} {self.reason}"
 
 
-def _rejection_reason(exc: BaseException) -> Optional[str]:
+def _rejection_reason(update: RefUpdate, exc: BaseException) -> Optional[str]:
     """Map pygit transaction conflicts to Git-style rejectable categories.
 
     Syntax/protocol errors, invalid object expressions, invalid refnames, branch
@@ -45,6 +45,8 @@ def _rejection_reason(exc: BaseException) -> Optional[str]:
         if "expected symbolic target" in text or "is not a symbolic ref" in text:
             return "expected symref"
         if "cannot lock ref" in text and "expected" in text:
+            if update.action in {"create", "symref-create"}:
+                return "reference already exists"
             return "incorrect old value provided"
         if "symbolic-ref transaction would create a cycle" in text:
             return "name conflict"
@@ -90,7 +92,7 @@ def _try_queue(
     try:
         _plan_updates(repo, [*pending, update], deref=deref)
     except (RuntimeError, ValueError) as exc:
-        reason = _rejection_reason(exc)
+        reason = _rejection_reason(update, exc)
         if reason is None:
             raise
         new_value, old_value = _display_values(update)
