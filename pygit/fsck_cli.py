@@ -9,6 +9,7 @@ from typing import Sequence
 from .entrypoint import _find_repo
 from .fsck import fsck
 from .fsck_lost_found import write_lost_found
+from .fsck_references import verify_references
 
 
 def run_fsck(argv: Sequence[str]) -> int:
@@ -53,6 +54,11 @@ def run_fsck(argv: Sequence[str]) -> int:
         help="also treat index entries as heads when explicit objects are supplied",
     )
     parser.add_argument(
+        "--no-references",
+        action="store_true",
+        help="skip the independent reference-database consistency check",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="treat fsck warnings as a failing result",
@@ -73,6 +79,8 @@ def run_fsck(argv: Sequence[str]) -> int:
         heads=args.objects,
         include_index=True if args.cache else None,
     )
+    if not args.no_references:
+        report.issues.extend(verify_references(repo))
 
     for issue in sorted(
         report.issues,
