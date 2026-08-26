@@ -16,7 +16,7 @@ pygit rev-list --all
 
 Positive revisions contribute their reachable commits. `^REV` subtracts `REV` and its reachable ancestry. `A..B` is therefore equivalent to `B ^A`. A single `A...B` selects the symmetric difference of the two ancestry sets; `--left-right` prefixes those commits with `<` or `>`.
 
-Phase 129 extends that symmetric-range presentation with `--left-only` / `--right-only` and native-style two-column `--left-right --count` output while leaving the Phase 68 graph engine unchanged.
+Phase 131 extends that symmetric-range presentation with `--left-only` / `--right-only` and native-style two-column `--left-right --count` output while leaving the Phase 68 graph engine unchanged.
 
 Annotated tags are peeled to commits. `--all` starts from every commit-ish loose or packed ref while ignoring refs whose final object is not a commit. Traversal respects `.pygit/shallow` boundaries.
 
@@ -29,9 +29,9 @@ Annotated tags are peeled to commits. `--all` starts from every commit-ish loose
 - `--skip N`: omit the first N selected commits.
 - `-n N` / `--max-count N`: cap the selected output.
 - `--reverse`: reverse the selected output after skip/max-count are applied.
-- `--count`: print the final selected count; with Phase 129 `--left-right`, print left and right counts as two tab-separated columns.
+- `--count`: print the final selected count; with Phase 131 `--left-right`, print left and right counts as two tab-separated columns.
 
-For Phase 129 side filters, left/right filtering occurs before skip/max-count and reverse remains the final presentation transform.
+For Phase 131 side filters, left/right filtering occurs before skip/max-count and reverse remains the final presentation transform.
 
 ## Python API
 
@@ -48,7 +48,7 @@ for entry in entries:
     print(entry.side or "", entry.oid)
 ```
 
-`rev_list()` returns immutable `RevListEntry` records and does not modify refs, the index, the worktree, or the object database. Phase 129's focused side filtering/count helpers live separately in `pygit.rev_list_sides`.
+`rev_list()` returns immutable `RevListEntry` records and does not modify refs, the index, the worktree, or the object database. Phase 131's focused side filtering/count helpers live separately in `pygit.rev_list_sides`.
 
 ## Scope boundary
 
