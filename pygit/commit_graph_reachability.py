@@ -8,20 +8,22 @@ of commit-ish roots (for example through ``--stdin-commits``).
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
 
 from .commit_graph import CommitGraph
 from .objects import CommitObject
 from .plumbing import list_refs
-from .repo import Repository
 from .rev_list import rev_list
+
+if TYPE_CHECKING:
+    from .repo import Repository
 
 
 CommitGraphInput = Tuple[str, str, List[str]]
 
 
 def collect_commit_graph_commits(
-    repo: Repository,
+    repo: "Repository",
     revisions: Optional[Sequence[str]] = None,
 ) -> List[CommitGraphInput]:
     """Return deterministic commit-graph input for the requested roots.
@@ -60,7 +62,7 @@ def collect_commit_graph_commits(
 
 
 def write_reachable_commit_graph(
-    repo: Repository,
+    repo: "Repository",
     revisions: Optional[Sequence[str]] = None,
 ):
     """Atomically write a graph for repository-wide or explicit reachability."""
