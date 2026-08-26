@@ -26,26 +26,29 @@ real Git.
 """
 
 from __future__ import annotations
-import hashlib
-import zlib
-import os
-from pathlib import Path
-from typing import Union
 
-from .objects.base   import GitObject, HASH_ALGO
-from .objects.blob   import BlobObject
-from .objects.tree   import TreeObject
+import hashlib
+import os
+import tempfile
+import zlib
+from pathlib import Path
+from typing import List, Optional
+
+from .objects.base import GitObject, HASH_ALGO
+from .objects.blob import BlobObject
 from .objects.commit import CommitObject
-from .objects.tag    import TagObject
+from .objects.tag import TagObject
+from .objects.tree import TreeObject
 
 
 # Map type-name bytes → concrete class for deserialisation
 _TYPE_MAP = {
-    b"blob":   BlobObject,
-    b"tree":   TreeObject,
+    b"blob": BlobObject,
+    b"tree": TreeObject,
     b"commit": CommitObject,
-    b"tag":    TagObject,
+    b"tag": TagObject,
 }
+_LOOSE_HEX = frozenset("0123456789abcdef")
 
 
 class ObjectStore:
@@ -68,23 +71,51 @@ class ObjectStore:
     # Writing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _valid_loose_object(path: Path, sha: str) -> bool:
+        """Return whether *path* already stores exactly the requested object."""
+        try:
+            store_bytes = zlib.decompress(path.read_bytes())
+        except zlib.error:
+            return False
+        return hashlib.new(HASH_ALGO, store_bytes).hexdigest() == sha
+
     def write(self, obj: GitObject) -> str:
         """
-        Serialise *obj*, compress with zlib, and write to disk.
+        Serialise *obj*, compress with zlib, and atomically publish it.
 
         Returns the hex-digest (the object's "name" in the store).
 
-        If the object already exists on disk this is a no-op (content-
-        addressed storage is idempotent by definition).
+        A valid existing loose object is an idempotent no-op. If an object path
+        exists but its bytes do not match the content-addressed name, the new
+        verified bytes repair it through the same atomic replacement path.
+        Interrupted writes never expose a partial final object: compressed bytes
+        are written to a same-directory temporary file, flushed, fsynced, then
+        installed with ``os.replace``.
         """
         store_bytes = obj._build_store_bytes()
         sha = hashlib.new(HASH_ALGO, store_bytes).hexdigest()
-
         obj_path = self._path_for(sha)
-        if not obj_path.exists():
-            obj_path.parent.mkdir(parents=True, exist_ok=True)
-            compressed = zlib.compress(store_bytes)
-            obj_path.write_bytes(compressed)
+
+        if obj_path.exists() and self._valid_loose_object(obj_path, sha):
+            return sha
+
+        obj_path.parent.mkdir(parents=True, exist_ok=True)
+        compressed = zlib.compress(store_bytes)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".tmp-{sha}-",
+            dir=str(obj_path.parent),
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(compressed)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, obj_path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
 
         return sha
 
@@ -127,6 +158,7 @@ class ObjectStore:
         # Packs created after the MIDX are also searched as a stale-index
         # compatibility path until the next MIDX refresh.
         from .pack import PackReader
+
         pack_dir = self.root / "pack"
         if pack_dir.exists():
             midx = self._load_multi_pack_index(pack_dir)
@@ -191,6 +223,7 @@ class ObjectStore:
         if self._path_for(sha).exists():
             return True
         from .pack import PackReader
+
         pack_dir = self.root / "pack"
         if pack_dir.exists():
             midx = self._load_multi_pack_index(pack_dir)
@@ -228,15 +261,27 @@ class ObjectStore:
         return False
 
     def all_shas(self) -> List[str]:
-        """Return a list of all 64-char object SHAs stored on disk (loose and pack)."""
+        """Return all canonical 64-hex object IDs in loose and pack storage."""
         shas: set = set()
         if self.root.exists():
             for prefix_dir in sorted(self.root.iterdir()):
-                if prefix_dir.is_dir() and len(prefix_dir.name) == 2:
-                    for obj_file in sorted(prefix_dir.iterdir()):
-                        if obj_file.is_file():
-                            shas.add(prefix_dir.name + obj_file.name)
+                prefix = prefix_dir.name
+                if (
+                    not prefix_dir.is_dir()
+                    or len(prefix) != 2
+                    or any(ch not in _LOOSE_HEX for ch in prefix)
+                ):
+                    continue
+                for obj_file in sorted(prefix_dir.iterdir()):
+                    suffix = obj_file.name
+                    if (
+                        obj_file.is_file()
+                        and len(suffix) == 62
+                        and all(ch in _LOOSE_HEX for ch in suffix)
+                    ):
+                        shas.add(prefix + suffix)
         from .pack import PackReader
+
         pack_dir = self.root / "pack"
         if pack_dir.exists():
             midx = self._load_multi_pack_index(pack_dir)
@@ -302,10 +347,10 @@ class ObjectStore:
         and return a populated concrete GitObject.
         """
         null_pos = store_bytes.index(b"\x00")
-        header   = store_bytes[:null_pos]
-        payload  = store_bytes[null_pos + 1:]
+        header = store_bytes[:null_pos]
+        payload = store_bytes[null_pos + 1 :]
 
-        parts   = header.split(b" ", 1)
+        parts = header.split(b" ", 1)
         type_name = parts[0]
         declared_size = int(parts[1])
 
