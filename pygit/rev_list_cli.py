@@ -8,7 +8,14 @@ from typing import Sequence
 from .entrypoint import _find_repo
 from .rev_list import rev_list
 from .rev_list_object_names import rev_list_named_objects, rev_list_object_edges
+from .rev_list_parents import parent_oids
 from .rev_list_sides import count_sides, rev_list_sides
+
+
+def _format_commit_line(oid: str, *, marker: str = "", parents=()) -> str:
+    prefix = marker or ""
+    suffix = "" if not parents else " " + " ".join(parents)
+    return f"{prefix}{oid}{suffix}"
 
 
 def run_rev_list(argv: Sequence[str]) -> int:
@@ -32,6 +39,11 @@ def run_rev_list(argv: Sequence[str]) -> int:
         "--no-object-names",
         action="store_true",
         help="suppress pathname annotations in --objects/--objects-edge output",
+    )
+    parser.add_argument(
+        "--parents",
+        action="store_true",
+        help="print each selected commit followed by its parent object IDs",
     )
     parser.add_argument(
         "--left-right",
@@ -105,7 +117,9 @@ def run_rev_list(argv: Sequence[str]) -> int:
             return 0
 
         for entry in objects:
-            if args.no_object_names or entry.path is None:
+            if entry.type_name == "commit" and args.parents:
+                print(_format_commit_line(entry.oid, parents=parent_oids(repo, entry.oid)))
+            elif args.no_object_names or entry.path is None:
                 print(entry.oid)
             else:
                 print(f"{entry.oid} {entry.path}")
@@ -148,5 +162,6 @@ def run_rev_list(argv: Sequence[str]) -> int:
 
     for entry in entries:
         marker = entry.side if args.left_right else ""
-        print(f"{marker or ''}{entry.oid}")
+        parents = parent_oids(repo, entry.oid) if args.parents else ()
+        print(_format_commit_line(entry.oid, marker=marker or "", parents=parents))
     return 0
