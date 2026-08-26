@@ -33,7 +33,7 @@ The staging area copies only selected index files; pack contents are not duplica
 
 ## Compatibility boundary
 
-This phase implements the non-incremental `--stdin-packs` write path. MIDX bitmaps, incremental MIDX chains, `--refs-snapshot`, and alternate object-directory routing remain separate work.
+This phase implements the non-incremental `--stdin-packs` write path. Phase 112 adds alternate object-directory routing and composes it with this command. MIDX bitmaps, incremental MIDX chains, and `--refs-snapshot` remain separate work.
 
 ## Regression coverage
 
