@@ -5,7 +5,8 @@ SHA-256 object database. Phase 57 consolidates revision resolution into
 `pygit.revision`, which is also used by the advanced `cat-file` plumbing.
 That keeps object names consistent across commands instead of maintaining
 separate ref/SHA/path parsers. Phase 78 extends the same shared resolver with
-strict numeric reflog selectors.
+strict numeric reflog selectors, and Phase 118 adds stage-0 index object
+expressions.
 
 ## Object-ish expressions
 
@@ -27,6 +28,11 @@ HEAD^2
 HEAD^2~1
 HEAD:path/to/file
 HEAD:                # root tree
+:file.txt            # stage-0 index entry
+:0:file.txt          # explicit stage 0
+:./file.txt          # cwd-relative index path
+:../root.txt         # cwd-relative path from a subdirectory
+:file.txt^{blob}
 v1^{}
 v1^{tag}
 v1^{commit}
@@ -50,9 +56,30 @@ selectors are intentionally outside the current compatibility boundary.
 walks stop at entries in `.pygit/shallow`. Tree paths reject absolute paths,
 empty components, `.` and `..` rather than silently normalizing them.
 
-Typed peeling supports `object`, `tag`, `commit`, `tree`, and `blob`.
-Annotated tags are peeled recursively where the requested type permits it.
+## Index expressions
 
+`:path` and `:0:path` resolve the object currently recorded in the staging
+index, not the object from `HEAD`. This distinction is useful after staging a
+change: `HEAD:file.txt` still names the committed blob while `:file.txt` names
+the staged blob.
+
+Plain index paths are repository-root-relative. A leading `./` or `../`
+switches to Git's current-working-directory-relative form; normalization may
+walk back toward the repository root but cannot escape it. Only `:0:` through
+`:3:` are interpreted as stage prefixes, so paths containing colons keep their
+native meaning: for example `:4:a` addresses a stage-0 path literally named
+`4:a`, while `:0:0:a` explicitly addresses stage 0 of path `0:a`.
+
+pygit's readable JSON index currently stores one entry per path and therefore
+represents only stage 0. Expressions for unmerged stages `:1:path`, `:2:path`,
+and `:3:path` are rejected explicitly rather than fabricating conflict data.
+They can be added when the index schema itself grows multi-stage entries.
+
+Typed peeling composes with index expressions, so `:file.txt^{blob}` uses the
+same `object` / `tag` / `commit` / `tree` / `blob` selector machinery as other
+object-ish forms.
+
+Annotated tags are peeled recursively where the requested type permits it.
 Abbreviated object IDs are resolved against both loose objects and packfiles.
 This matters after `pygit repack`, where the old loose-only prefix lookup could
 no longer find an otherwise valid short SHA.
@@ -63,6 +90,8 @@ no longer find an otherwise valid short SHA.
 pygit rev-parse HEAD HEAD~1 v1^{tree}
 pygit rev-parse --verify HEAD@{1}
 pygit rev-parse --verify HEAD@{1}^{tree}
+pygit rev-parse --verify :file.txt
+pygit rev-parse --verify :0:file.txt^{blob}
 pygit rev-parse --verify --quiet maybe-missing
 pygit rev-parse --short=12 HEAD
 pygit rev-parse --symbolic-full-name HEAD
@@ -74,6 +103,7 @@ the shared resolver inherits it too, for example:
 
 ```bash
 pygit cat-file -t 'main@{2}:README.md'
+pygit cat-file -p ':README.md'
 pygit ls-tree --name-only 'HEAD@{1}'
 pygit rev-list 'HEAD@{3}..HEAD@{0}'
 ```
@@ -126,6 +156,7 @@ from pygit import (
 )
 
 oid = resolve_revision(repo, "HEAD@{1}^{tree}")
+staged = resolve_revision(repo, ":README.md")
 short = abbreviate_oid(repo, oid, 12)
 full = symbolic_refname(repo, "main")
 ```

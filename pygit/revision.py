@@ -2,8 +2,9 @@
 
 The resolver is intentionally read-only. It understands pygit's SHA-256
 object IDs, loose/packed refs, abbreviated IDs, numeric reflog selectors,
-commit ancestry expressions, ``REV:path`` tree walks, and Git-style
-``^{type}`` peeling without touching the index or worktree.
+commit ancestry expressions, stage-0 index ``:path`` expressions, ``REV:path``
+tree walks, and Git-style ``^{type}`` peeling without touching the index or
+worktree.
 """
 
 from __future__ import annotations
@@ -232,7 +233,7 @@ def _treeish_oid(repo: Repository, oid: str, display: str) -> str:
 def _resolve_tree_path(repo: Repository, expression: str) -> str:
     base, path = expression.split(":", 1)
     if not base:
-        raise ValueError("index-style :path expressions are not supported")
+        raise ValueError(f"Invalid tree path expression: {expression!r}")
 
     base_oid = _resolve_commit_expression(repo, base)
     tree_oid = _treeish_oid(repo, base_oid, expression)
@@ -313,6 +314,10 @@ def resolve_revision(repo: Repository, expression: str) -> str:
         oid = resolve_revision(repo, base)
         return _apply_peel_selector(repo, oid, selector, expression)
 
+    if expression.startswith(":"):
+        from .index_revision import resolve_index_expression
+
+        return resolve_index_expression(repo, expression)
     if ":" in expression:
         return _resolve_tree_path(repo, expression)
     return _resolve_commit_expression(repo, expression)
