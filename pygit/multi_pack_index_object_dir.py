@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 from .repo import Repository
 
@@ -33,7 +33,7 @@ def configured_alternates(repo: Repository) -> Tuple[Path, ...]:
 
 def resolve_multi_pack_index_object_dir(
     repo: Repository,
-    requested: str | None,
+    requested: Optional[str],
 ) -> Path:
     """Resolve and validate the object directory used by MIDX maintenance.
 
