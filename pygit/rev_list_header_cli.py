@@ -70,16 +70,12 @@ def _raw_header_payload(store_bytes: bytes) -> bytes:
 
     separator = payload.find(b"\n\n")
     if separator < 0:
-        # Commit parsing already validates ordinary objects, but keep malformed
-        # raw envelopes from silently producing an ambiguous header record.
         raise ValueError("commit payload has no header/message separator")
     headers = payload[: separator + 2]
     message = payload[separator + 2 :]
     if not message:
         return headers
 
-    # Native raw display indents every logical message line by four spaces,
-    # including blank lines. Preserve original bytes and newline termination.
     lines = message.splitlines(keepends=True)
     body = b"".join(b"    " + line for line in lines)
     if message and not lines:
@@ -104,8 +100,6 @@ def run_rev_list_header(argv: Sequence[str]) -> int:
     code, output = _run_captured(cleaned)
     if code:
         return code
-
-    # --count suppresses commit records, so --header has nothing to decorate.
     if "--count" in cleaned:
         print(output, end="")
         return 0
@@ -114,8 +108,16 @@ def run_rev_list_header(argv: Sequence[str]) -> int:
     target = getattr(sys.stdout, "buffer", None)
     if target is None:
         raise RuntimeError("rev-list --header requires a binary stdout stream")
+    object_edge_mode = "--objects-edge" in cleaned
 
     for line in output.splitlines():
+        # Native --objects-edge prints its leading excluded edge records as
+        # plain `-OID` lines; they are not commit-header records.
+        first = line.split(" ", 1)[0]
+        if object_edge_mode and first.startswith("-"):
+            target.write(line.encode("utf-8", "surrogateescape") + b"\n")
+            continue
+
         oid = _candidate_oid(line)
         if oid is None:
             target.write(line.encode("utf-8", "surrogateescape") + b"\n")
