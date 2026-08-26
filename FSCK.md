@@ -3,7 +3,8 @@
 Phase 60 adds a repository checker for pygit's native SHA-256 object database.
 It validates storage before trusting graph traversal, then checks connectivity
 from repository roots. Phase 142 adds Git-style reflog reachability to the
-installed command while preserving the historical Python API default.
+installed command while preserving the historical Python API default. Phase 143
+adds recovery materialization for dangling tips through `--lost-found`.
 
 ## CLI
 
@@ -13,6 +14,7 @@ pygit fsck --full
 pygit fsck --connectivity-only
 pygit fsck --unreachable
 pygit fsck --no-dangling
+pygit fsck --lost-found
 pygit fsck --no-reflogs
 pygit fsck --strict
 ```
@@ -33,6 +35,26 @@ The installed `pygit fsck` command treats reflog entries as reachability roots b
 default, matching Git's recovery model. `--no-reflogs` disables that policy and
 restores the ref/index/shallow-only view. This applies to both full and
 `--connectivity-only` scans.
+
+## Lost-found recovery
+
+`pygit fsck --lost-found` materializes the already-computed dangling tips under
+`.pygit/lost-found`, following Git's recovery layout:
+
+- dangling commits -> `.pygit/lost-found/commit/<oid>` containing `<oid>\n`;
+- dangling trees and tags -> `.pygit/lost-found/other/<oid>` containing `<oid>\n`;
+- dangling blobs -> `.pygit/lost-found/other/<oid>` containing the exact raw blob bytes.
+
+Only dangling tips are written; the complete unreachable closure below a dangling
+commit is not duplicated. Reflog-protected objects therefore remain absent from
+`lost-found` by default, while `--no-reflogs --lost-found` can deliberately
+surface historical tips that are retained only by reflogs.
+
+Recovery is fail-closed. All selected dangling objects are readable before any
+recovery file is created, fsck integrity errors suppress materialization, and
+symlinked/non-directory `lost-found` paths are rejected. Individual files are
+written through temporary files and atomically replaced, making repeated runs
+idempotent and preventing stale recovery content from winning.
 
 ## Storage verification
 
@@ -120,12 +142,14 @@ were never reached.
 
 It is useful for a fast "can the published/staged/recoverable graph be
 traversed?" check. Add `--no-reflogs` when only the currently published/staged
-graph should participate.
+graph should participate. Because unrelated dangling objects are not inventoried,
+`--connectivity-only --lost-found` does not synthesize recovery files for them.
 
 ## Python API
 
 ```python
 from pygit import fsck
+from pygit.fsck_lost_found import write_lost_found
 
 report = fsck(repo)
 assert report.ok
@@ -134,16 +158,20 @@ print(report.reachable)
 print(report.dangling)
 
 recovery_report = fsck(repo, include_reflogs=True)
+write_lost_found(repo, sorted(report.dangling))
 
 for issue in report.issues:
     print(issue.render())
 ```
 
-The exported API consists of:
+The exported fsck API consists of:
 
 - `fsck(repo, connectivity_only=False, include_reflogs=False)`
 - `FsckReport`
 - `FsckIssue`
+
+The recovery helper is `write_lost_found(repo, dangling_oids)` and returns
+`LostFoundRecord` entries describing the files it wrote.
 
 For backward compatibility, direct Python callers keep the Phase 60 root set
 unless `include_reflogs=True` is requested. The installed CLI intentionally uses
