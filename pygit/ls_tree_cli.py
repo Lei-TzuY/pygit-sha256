@@ -8,6 +8,7 @@ from typing import Sequence, Tuple
 
 from .entrypoint import _find_repo
 from .ls_tree import format_ls_tree, ls_tree
+from .ls_tree_long import format_ls_tree_long
 
 
 def _split_pathspec(argv: Sequence[str]) -> Tuple[Sequence[str], Sequence[str]]:
@@ -39,6 +40,12 @@ def run_ls_tree(argv: Sequence[str]) -> int:
         help="include tree entries while recursing",
     )
     output = parser.add_mutually_exclusive_group()
+    output.add_argument(
+        "-l",
+        "--long",
+        action="store_true",
+        help="include Git-style object size column",
+    )
     output.add_argument("--name-only", action="store_true", help="show only path names")
     output.add_argument("--object-only", action="store_true", help="show only object IDs")
     output.add_argument(
@@ -70,15 +77,23 @@ def run_ls_tree(argv: Sequence[str]) -> int:
         show_trees=args.show_trees,
         patterns=patterns,
     )
-    data = format_ls_tree(
-        repo,
-        entries,
-        name_only=args.name_only,
-        object_only=args.object_only,
-        format_string=args.format_string,
-        abbrev=args.abbrev,
-        nul_terminated=args.z,
-    )
+    if args.long:
+        data = format_ls_tree_long(
+            repo,
+            entries,
+            abbrev=args.abbrev,
+            nul_terminated=args.z,
+        )
+    else:
+        data = format_ls_tree(
+            repo,
+            entries,
+            name_only=args.name_only,
+            object_only=args.object_only,
+            format_string=args.format_string,
+            abbrev=args.abbrev,
+            nul_terminated=args.z,
+        )
     output_stream = getattr(sys.stdout, "buffer", None)
     if output_stream is not None:
         output_stream.write(data)
