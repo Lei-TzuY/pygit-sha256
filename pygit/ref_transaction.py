@@ -20,14 +20,16 @@ from .refs import ZERO_SHA
 
 _HEX = frozenset("0123456789abcdef")
 _MAX_SYMREF_DEPTH = 32
+_TRANSACTION_CONTROLS = frozenset({"start", "prepare", "commit", "abort", "option"})
 
 
 @dataclass(frozen=True)
 class RefUpdate:
     action: str
-    refname: str
+    refname: str = ""
     new_oid: Optional[str] = None
     old_oid: Optional[str] = None
+    deref: Optional[bool] = None
 
 
 def _is_oid(value: str) -> bool:
@@ -141,12 +143,30 @@ def _validate_target(repo: Repository, physical_refname: str, oid: str) -> None:
 
 
 def parse_update_records(records: Sequence[str]) -> List[RefUpdate]:
-    """Parse a useful core of ``git update-ref --stdin`` transaction commands."""
+    """Parse ``update-ref --stdin`` direct-ref and transaction-control commands.
+
+    Supported transaction controls are ``start``, ``prepare``, ``commit``,
+    ``abort``, and the one-shot ``option no-deref`` modifier.  Symbolic-ref
+    transaction commands and NUL framing intentionally remain separate work.
+    """
     updates: List[RefUpdate] = []
     for record in records:
         if not record.strip():
             continue
         command, _, rest = record.partition(" ")
+
+        if command in {"start", "prepare", "commit", "abort"}:
+            if rest.strip():
+                raise ValueError(f"{command} takes no arguments")
+            updates.append(RefUpdate(command))
+            continue
+
+        if command == "option":
+            if rest.strip() != "no-deref":
+                raise ValueError(f"unsupported update-ref option: {rest.strip()!r}")
+            updates.append(RefUpdate("option", "no-deref"))
+            continue
+
         if command not in {"update", "create", "delete", "verify"}:
             raise ValueError(f"unsupported update-ref command: {command!r}")
         parts = rest.split()
@@ -180,25 +200,23 @@ def _log_path(repo: Repository, refname: str) -> Path:
     return repo.pygit_dir / "logs" / ("HEAD" if refname == "HEAD" else refname)
 
 
-def update_refs(
+def _plan_updates(
     repo: Repository,
     updates: Sequence[RefUpdate],
     *,
-    message: str = "update-ref",
-    deref: bool = True,
-) -> None:
-    """Validate and publish a ref transaction atomically across loose/packed refs.
-
-    New values are always materialized as loose refs, shadowing any packed value.
-    Deletion removes both loose and packed representations so an old packed value
-    cannot reappear after the loose file is removed.
-    """
-    planned = []
+    deref: bool,
+) -> List[Tuple[str, Optional[str], Optional[str]]]:
+    """Resolve and validate one direct-ref transaction without publishing it."""
+    planned: List[Tuple[str, Optional[str], Optional[str]]] = []
     touched = set()
 
     for update in updates:
+        if update.action in _TRANSACTION_CONTROLS:
+            raise ValueError(f"transaction control {update.action!r} is not valid inside a prepared batch")
+
         _validate_refname(update.refname)
-        physical, current = _resolve_direct(repo, update.refname, deref=deref)
+        effective_deref = deref if update.deref is None else update.deref
+        physical, current = _resolve_direct(repo, update.refname, deref=effective_deref)
         if physical in touched:
             raise ValueError(f"multiple updates for the same ref in one transaction: {physical}")
         touched.add(physical)
@@ -212,13 +230,28 @@ def update_refs(
                 raise ValueError("update requires a new object ID")
             new_oid = _resolve_new_oid(repo, update.new_oid)
             if new_oid == ZERO_SHA:
-                raise ValueError("zero object ID is not valid for update/create")
+                if update.action == "create":
+                    raise ValueError("zero object ID is not valid for create")
+                planned.append((physical, current, None))
+                continue
             _validate_target(repo, physical, new_oid)
             planned.append((physical, current, new_oid))
         elif update.action == "delete":
             planned.append((physical, current, None))
         else:
             raise ValueError(f"unsupported ref action: {update.action!r}")
+
+    return planned
+
+
+def _apply_updates(
+    repo: Repository,
+    updates: Sequence[RefUpdate],
+    *,
+    message: str,
+    deref: bool,
+) -> None:
+    planned = _plan_updates(repo, updates, deref=deref)
 
     packed_deletes = [
         refname
@@ -279,6 +312,101 @@ def update_refs(
         for _, _, _, _, temp in prepared:
             if temp is not None and temp.exists():
                 temp.unlink()
+
+
+def update_refs(
+    repo: Repository,
+    updates: Sequence[RefUpdate],
+    *,
+    message: str = "update-ref",
+    deref: bool = True,
+) -> None:
+    """Validate and publish one or more ref transactions.
+
+    Ordinary ``RefUpdate`` sequences retain the original all-or-nothing batch
+    behavior.  When transaction-control records are present, the sequence is
+    interpreted as an ``update-ref --stdin`` session: ``start`` makes the
+    current transaction explicit, ``prepare`` performs complete preflight,
+    ``commit`` publishes it, and ``abort`` discards it.  An explicit or prepared
+    transaction is automatically aborted at end-of-input, while an implicit
+    transaction is committed at EOF.  ``option no-deref`` affects only the next
+    ref-naming command.
+
+    ``prepare`` intentionally performs validation rather than acquiring Git's
+    cross-process ref backend lockfiles; commit revalidates immediately before
+    publication.  The existing file replacement/snapshot rollback guarantees
+    remain unchanged.
+    """
+    if not any(update.action in _TRANSACTION_CONTROLS for update in updates):
+        _apply_updates(repo, updates, message=message, deref=deref)
+        return
+
+    pending: List[RefUpdate] = []
+    explicit = False
+    prepared = False
+    next_no_deref = False
+
+    for update in updates:
+        action = update.action
+
+        if action == "option":
+            if update.refname != "no-deref":
+                raise ValueError(f"unsupported update-ref option: {update.refname!r}")
+            if prepared:
+                raise RuntimeError("prepared transactions can only be closed")
+            next_no_deref = True
+            continue
+
+        if action == "start":
+            if prepared:
+                raise RuntimeError("prepared transactions can only be closed")
+            if explicit:
+                raise RuntimeError("transaction already started")
+            explicit = True
+            continue
+
+        if action == "prepare":
+            if prepared:
+                raise RuntimeError("transaction already prepared")
+            _plan_updates(repo, pending, deref=deref)
+            prepared = True
+            explicit = True
+            continue
+
+        if action == "commit":
+            _apply_updates(repo, pending, message=message, deref=deref)
+            pending.clear()
+            explicit = False
+            prepared = False
+            next_no_deref = False
+            continue
+
+        if action == "abort":
+            pending.clear()
+            explicit = False
+            prepared = False
+            next_no_deref = False
+            continue
+
+        if prepared:
+            raise RuntimeError("prepared transactions can only be closed")
+
+        effective_deref = False if next_no_deref else deref
+        next_no_deref = False
+        pending.append(
+            RefUpdate(
+                action=update.action,
+                refname=update.refname,
+                new_oid=update.new_oid,
+                old_oid=update.old_oid,
+                deref=effective_deref,
+            )
+        )
+
+    if explicit or prepared:
+        return
+    if pending:
+        _apply_updates(repo, pending, message=message, deref=deref)
 
 
 def update_ref(
