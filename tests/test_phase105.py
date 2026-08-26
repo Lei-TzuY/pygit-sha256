@@ -19,19 +19,22 @@ def _repo(tmp_path: Path) -> Repository:
     return Repository.init(str(tmp_path / "repo"))
 
 
-def _write_pack(repo: Repository, objects: list[BlobObject]):
+def _write_pack(repo: Repository, objects: list[BlobObject], *, prefix: str = "pack"):
     pairs = []
     for obj in objects:
         oid = repo.store.write(obj)
         pairs.append((oid, obj))
-    return PackWriter(pairs).write_pack_and_idx(repo.pygit_dir / "objects" / "pack")
+    return PackWriter(pairs).write_pack_and_idx(
+        repo.pygit_dir / "objects" / "pack",
+        name_prefix=prefix,
+    )
 
 
 def _duplicate_pack_pair(repo: Repository):
     first = BlobObject(b"shared-first\n")
     second = BlobObject(b"shared-second\n")
-    pack_a, idx_a = _write_pack(repo, [first, second])
-    pack_b, idx_b = _write_pack(repo, [second, first])
+    pack_a, idx_a = _write_pack(repo, [first, second], prefix="pack-a")
+    pack_b, idx_b = _write_pack(repo, [first, second], prefix="pack-b")
     assert idx_a != idx_b
     path = write_multi_pack_index(repo.pygit_dir / "objects" / "pack")
     parsed = parse_multi_pack_index(path)
@@ -121,8 +124,8 @@ def test_expire_is_noop_when_every_pack_is_referenced(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     first = BlobObject(b"one\n")
     second = BlobObject(b"two\n")
-    _, idx_a = _write_pack(repo, [first])
-    _, idx_b = _write_pack(repo, [second])
+    _, idx_a = _write_pack(repo, [first], prefix="pack-a")
+    _, idx_b = _write_pack(repo, [second], prefix="pack-b")
     path = write_multi_pack_index(repo.pygit_dir / "objects" / "pack")
     before = path.read_bytes()
 
