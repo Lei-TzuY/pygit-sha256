@@ -4,7 +4,7 @@ Phase 109 fixes the root-selection layer behind the strict Phase 103 commit-grap
 
 ## Problem
 
-The older `Repository.write_commit_graph()` populated the graph from `log(all_branches=True)`. That history walk seeded only local branch tips, falling back to `HEAD` only when no local branch existed. As a result, a valid repository-wide write could omit commits reachable solely from:
+The older installed write path delegated to `Repository.write_commit_graph()`, which populated the graph from `log(all_branches=True)`. That history walk seeded only local branch tips, falling back to `HEAD` only when no local branch existed. As a result, a repository-wide CLI write could omit commits reachable solely from:
 
 - remote-tracking refs;
 - lightweight or annotated tags;
@@ -15,7 +15,7 @@ Those omissions are especially confusing for an acceleration artifact: the objec
 
 ## Repository-wide selection
 
-The modern `commit-graph write` path now composes the existing `rev-list` traversal with the Phase 103 codec. A default write uses every commit-ish ref plus `HEAD` as roots:
+The modern `commit-graph write` command now composes the existing `rev-list` traversal with the Phase 103 codec. A default installed-command write uses every commit-ish ref plus `HEAD` as roots:
 
 ```bash
 pygit commit-graph write
@@ -40,7 +40,7 @@ Blank-only stdin is rejected rather than falling back to repository-wide mode. U
 
 ## Compatibility and safety boundary
 
-The on-disk file remains pygit's educational SHA-256 `CGPH` format, not Git's native commit-graph format. Phase 109 changes only which commits feed that existing codec.
+The on-disk file remains pygit's educational SHA-256 `CGPH` format, not Git's native commit-graph format. Phase 109 changes only which commits feed that existing codec from the modern CLI path.
 
 The Phase 103 write guarantees still apply after selection: canonical IDs, cycle/generation validation, self-parse, temporary-file write, `fsync`, atomic replacement, and final repository-aware verification.
 
