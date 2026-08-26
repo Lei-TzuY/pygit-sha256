@@ -8,6 +8,7 @@ from typing import Sequence
 
 from .entrypoint import _find_repo
 from .fsck import fsck
+from .fsck_diagnostics import annotated_tags, format_tag_diagnostic, root_commits
 from .fsck_lost_found import write_lost_found
 from .fsck_references import verify_references
 
@@ -37,6 +38,16 @@ def run_fsck(argv: Sequence[str]) -> int:
         "--no-dangling",
         action="store_true",
         help="suppress dangling-object output",
+    )
+    parser.add_argument(
+        "--root",
+        action="store_true",
+        help="report root commits found during a full object scan",
+    )
+    parser.add_argument(
+        "--tags",
+        action="store_true",
+        help="report annotated tag objects and their targets",
     )
     parser.add_argument(
         "--lost-found",
@@ -100,6 +111,17 @@ def run_fsck(argv: Sequence[str]) -> int:
         except Exception as exc:
             recovery_failed = True
             print(f"error: lost-found: {exc}", file=sys.stderr)
+
+    # Native fsck's --root/--tags are full-scan diagnostics.  In
+    # --connectivity-only mode Git suppresses them rather than presenting an
+    # incomplete view of the object database.
+    if not args.connectivity_only:
+        if args.root:
+            for oid in root_commits(repo, report):
+                print(f"root {oid}")
+        if args.tags:
+            for entry in annotated_tags(repo, report):
+                print(format_tag_diagnostic(entry))
 
     if args.unreachable:
         selected = report.unreachable
