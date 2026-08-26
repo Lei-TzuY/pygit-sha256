@@ -25,7 +25,7 @@ def run_fsck(argv: Sequence[str]) -> int:
     scan.add_argument(
         "--connectivity-only",
         action="store_true",
-        help="walk only objects reachable from refs, index, shallow, and reflog roots",
+        help="walk only objects reachable from the selected fsck roots",
     )
     parser.add_argument(
         "--unreachable",
@@ -48,9 +48,20 @@ def run_fsck(argv: Sequence[str]) -> int:
         help="do not treat reflog entries as reachability roots",
     )
     parser.add_argument(
+        "--cache",
+        action="store_true",
+        help="also treat index entries as heads when explicit objects are supplied",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="treat fsck warnings as a failing result",
+    )
+    parser.add_argument(
+        "objects",
+        nargs="*",
+        metavar="OBJECT",
+        help="objects to use as the complete reachability head set",
     )
     args = parser.parse_args(list(argv))
 
@@ -59,6 +70,8 @@ def run_fsck(argv: Sequence[str]) -> int:
         repo,
         connectivity_only=args.connectivity_only,
         include_reflogs=not args.no_reflogs,
+        heads=args.objects,
+        include_index=True if args.cache else None,
     )
 
     for issue in sorted(
