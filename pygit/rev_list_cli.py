@@ -175,27 +175,42 @@ def run_rev_list(argv: Sequence[str]) -> int:
             print(len(objects) + len(boundary_oids))
             return 0
 
-        commit_objects = [entry for entry in objects if entry.type_name == "commit"]
+        commit_objects = {entry.oid: entry for entry in objects if entry.type_name == "commit"}
         other_objects = [entry for entry in objects if entry.type_name != "commit"]
-        for entry in commit_objects:
-            if args.parents:
-                print(_format_commit_line(entry.oid, related=parent_oids(repo, entry.oid)))
-            elif args.children:
-                print(_format_commit_line(entry.oid, related=child_map.get(entry.oid, ())))
-            else:
-                print(entry.oid)
-
         emitted_edges = set(edge_oids)
-        for oid in boundary_oids:
-            if oid in emitted_edges:
-                continue
-            if args.parents:
-                related = parent_oids(repo, oid)
-            elif args.children:
-                related = boundary_child_map.get(oid, ())
-            else:
-                related = ()
-            print(_format_commit_line(oid, marker="-", related=related))
+
+        if boundary_entries is not None:
+            for relation_entry in boundary_entries:
+                oid = relation_entry.oid
+                if relation_entry.boundary:
+                    if oid in emitted_edges:
+                        continue
+                    if args.parents:
+                        related = parent_oids(repo, oid)
+                    elif args.children:
+                        related = boundary_child_map.get(oid, ())
+                    else:
+                        related = ()
+                    print(_format_commit_line(oid, marker="-", related=related))
+                    continue
+
+                if oid not in commit_objects:
+                    continue
+                if args.parents:
+                    related = parent_oids(repo, oid)
+                elif args.children:
+                    related = child_map.get(oid, ())
+                else:
+                    related = ()
+                print(_format_commit_line(oid, related=related))
+        else:
+            for entry in commit_objects.values():
+                if args.parents:
+                    print(_format_commit_line(entry.oid, related=parent_oids(repo, entry.oid)))
+                elif args.children:
+                    print(_format_commit_line(entry.oid, related=child_map.get(entry.oid, ())))
+                else:
+                    print(entry.oid)
 
         for entry in other_objects:
             if args.no_object_names or entry.path is None:
