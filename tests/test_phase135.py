@@ -199,16 +199,16 @@ def test_cli_left_right_boundary_count_matches_native_boundary_accounting(tmp_pa
     assert result.stdout == b"2\t1\n"
 
 
-def test_cli_objects_boundary_inserts_commit_before_named_tree_objects(tmp_path: Path) -> None:
+def test_cli_objects_boundary_inserts_limit_boundaries_before_named_tree_objects(tmp_path: Path) -> None:
     repo, h = _graph(tmp_path)
 
-    result = _run(repo, "rev-list", "--objects", "--boundary", "--topo-order", "base..main")
+    result = _run(repo, "rev-list", "--objects", "--boundary", "--topo-order", "-n", "1", "main")
 
     assert result.returncode == 0, result.stderr.decode()
     lines = result.stdout.decode().splitlines()
-    assert lines[:4] == [h["merge"], h["right"], h["left"], f"-{h['base']}"]
-    assert any(line.startswith(h["tree"]) for line in lines[4:])
-    assert any(line == f"{h['blob']} file.txt" for line in lines[4:])
+    assert lines[:3] == [h["merge"], f"-{h['right']}", f"-{h['left']}"]
+    assert any(line.startswith(h["tree"]) for line in lines[3:])
+    assert any(line == f"{h['blob']} file.txt" for line in lines[3:])
 
 
 def test_cli_objects_reverse_moves_boundary_before_selected_commits(tmp_path: Path) -> None:
