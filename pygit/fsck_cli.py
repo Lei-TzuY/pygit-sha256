@@ -1,4 +1,4 @@
-"""Modern CLI adapter for ``pygit fsck`` reflog reachability semantics."""
+"""Modern CLI adapter for ``pygit fsck`` reflog and recovery semantics."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Sequence
 
 from .entrypoint import _find_repo
 from .fsck import fsck
+from .fsck_lost_found import write_lost_found
 
 
 def run_fsck(argv: Sequence[str]) -> int:
@@ -35,6 +36,11 @@ def run_fsck(argv: Sequence[str]) -> int:
         "--no-dangling",
         action="store_true",
         help="suppress dangling-object output",
+    )
+    parser.add_argument(
+        "--lost-found",
+        action="store_true",
+        help="write dangling objects below .pygit/lost-found for recovery",
     )
     parser.add_argument(
         "--no-reflogs",
@@ -66,6 +72,14 @@ def run_fsck(argv: Sequence[str]) -> int:
     ):
         print(issue.render(), file=sys.stderr)
 
+    recovery_failed = False
+    if args.lost_found and not report.errors:
+        try:
+            write_lost_found(repo, sorted(report.dangling))
+        except Exception as exc:
+            recovery_failed = True
+            print(f"error: lost-found: {exc}", file=sys.stderr)
+
     if args.unreachable:
         selected = report.unreachable
         label = "unreachable"
@@ -83,5 +97,5 @@ def run_fsck(argv: Sequence[str]) -> int:
             kind = "object"
         print(f"{label} {kind} {oid}")
 
-    failed = bool(report.errors) or (args.strict and bool(report.warnings))
+    failed = bool(report.errors) or recovery_failed or (args.strict and bool(report.warnings))
     return 1 if failed else 0
