@@ -33,7 +33,7 @@ Parsing is strict: signature/version/hash version, chunk ordering and bounds, ca
 
 ## Duplicate objects
 
-The same object may legitimately appear in more than one pack. The MIDX stores one mapping per object ID and deterministically selects the lexicographically first source `.idx` basename. The object identity itself remains content-addressed, so any valid source copy is equivalent.
+The same object may legitimately appear in more than one pack. The MIDX stores one mapping per object ID. **Since Phase 108**, duplicate selection follows Git-style preferred-pack semantics: an explicit preferred pack wins; otherwise the oldest pack becomes the default preferred pack; duplicates not present there use the newest pack mtime, with basename ordering only as a deterministic equal-mtime tie-break. The object identity itself remains content-addressed, so any valid source copy is equivalent.
 
 The selected MIDX copy is a fast path, not a single point of failure. If that pack is missing or corrupt, `ObjectStore.read()` remembers the storage error and searches the remaining indexes for an independently valid copy of the same object. A valid duplicate is returned; the recorded error is raised only when no usable copy remains. This preserves the repository's pre-existing redundant-pack behavior regardless of directory iteration order.
 
@@ -48,7 +48,7 @@ A MIDX is an accelerator rather than a requirement. If a new pack appears after 
 `tests/test_phase104.py` covers:
 
 - writing/parsing multiple packs and object lookup;
-- deterministic duplicate-object selection;
+- deterministic equal-mtime duplicate-object selection;
 - checksum and invalid-pack-ID corruption;
 - verification against source indexes and missing pack pairs;
 - MIDX fast-path reads without scanning unrelated covered indexes;
@@ -57,4 +57,4 @@ A MIDX is an accelerator rather than a requirement. If a new pack appears after 
 - packed-object `all_shas()` and abbreviation resolution;
 - installed `multi-pack-index write` / `verify` routing and help/error behavior.
 
-Phase 107 adds focused regressions for full pack-payload verification and fail-before-delete maintenance safety.
+Phase 107 adds focused regressions for full pack-payload verification and fail-before-delete maintenance safety. Phase 108 adds preferred-pack and mtime-selection regressions.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import struct
 import subprocess
 import sys
@@ -72,16 +73,18 @@ def test_write_parse_and_lookup_multiple_packs(tmp_path: Path) -> None:
     assert parsed.lookup("not-an-object") is None
 
 
-def test_duplicate_object_chooses_first_pack_deterministically(tmp_path: Path) -> None:
+def test_duplicate_object_uses_basename_for_equal_mtime_tie(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     shared = BlobObject(b"shared\n")
     unique_a = BlobObject(b"only-a\n")
     unique_b = BlobObject(b"only-b\n")
 
-    _, idx_a, oids_a = _pack(repo, shared, unique_a)
-    _, idx_b, oids_b = _pack(repo, shared, unique_b)
+    pack_a, idx_a, oids_a = _pack(repo, shared, unique_a)
+    pack_b, idx_b, oids_b = _pack(repo, shared, unique_b)
     shared_oid = oids_a[0]
     assert shared_oid == oids_b[0]
+    for path in (pack_a, idx_a, pack_b, idx_b):
+        os.utime(path, (1_700_000_000, 1_700_000_000))
 
     parsed = parse_multi_pack_index(
         write_multi_pack_index(repo.pygit_dir / "objects" / "pack")

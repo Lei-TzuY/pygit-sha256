@@ -42,9 +42,14 @@ def run_multi_pack_index(argv: Sequence[str]) -> int:
         description="Write, verify, expire, or repack the shared index for multiple pygit packfiles.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser(
+    write_parser = subparsers.add_parser(
         "write",
         help="write .pygit/objects/pack/multi-pack-index from current pack indexes",
+    )
+    write_parser.add_argument(
+        "--preferred-pack",
+        metavar="PACK",
+        help="prefer this pack when duplicate object copies exist",
     )
     subparsers.add_parser(
         "verify",
@@ -71,7 +76,7 @@ def run_multi_pack_index(argv: Sequence[str]) -> int:
     pack_dir = repo.pygit_dir / "objects" / "pack"
     midx_path = pack_dir / "multi-pack-index"
     if args.command == "write":
-        write_multi_pack_index(pack_dir)
+        write_multi_pack_index(pack_dir, preferred_pack=args.preferred_pack)
         return 0
     if args.command == "expire":
         expire_multi_pack_index(midx_path)
