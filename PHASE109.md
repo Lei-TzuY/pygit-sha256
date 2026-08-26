@@ -26,6 +26,14 @@ pygit commit-graph verify
 
 An empty repository remains valid and produces an empty graph with commit count and maximum generation both zero.
 
+Phase 113 adds an optional read-only coverage check for this exact root set:
+
+```bash
+pygit commit-graph verify --reachable
+```
+
+Plain `verify` intentionally remains structural/repository-aware only so deliberately partial graphs stay valid.
+
 ## Explicit roots from stdin
 
 For scripts that need a deliberately smaller graph, Phase 109 adds:
@@ -37,6 +45,8 @@ printf '%s\n' main topic | pygit commit-graph write --stdin-commits
 Each non-empty input line is a commit-ish root. Only those roots and their reachable commit ancestry are written; unrelated repository refs are not implicitly added. Annotated tags are peeled through the shared revision resolver.
 
 Blank-only stdin is rejected rather than falling back to repository-wide mode. Unknown or non-commit roots fail before `CommitGraph.write()` runs, so an already-installed valid graph is not replaced by a failed explicit selection.
+
+Phase 113 can verify coverage of the same explicit-root semantics through `commit-graph verify --stdin-commits`.
 
 ## Compatibility and safety boundary
 
