@@ -23,6 +23,7 @@ from .ref_transaction import (
     update_ref,
     update_refs,
 )
+from .update_ref_protocol import parse_update_records_z
 
 _COMMANDS = {
     "write-tree",
@@ -85,14 +86,24 @@ def _run_update_ref(argv: Sequence[str]) -> int:
     parser.add_argument("-m", metavar="REASON", default="update-ref", help="reflog message")
     parser.add_argument("--no-deref", action="store_true", help="update a symbolic ref itself instead of its target")
     parser.add_argument("--stdin", action="store_true", help="read a batch transaction from stdin")
+    parser.add_argument("-z", action="store_true", help="use NUL-delimited --stdin command fields")
     parser.add_argument("args", nargs="*", metavar="ARG")
     args = parser.parse_args(list(argv))
     repo = _find_repo()
 
+    if args.z and not args.stdin:
+        parser.error("-z requires --stdin")
+
     if args.stdin:
         if args.args or args.delete:
             parser.error("--stdin cannot be combined with positional refs or --delete")
-        updates = parse_update_records(_stdin_records())
+        if args.z:
+            binary_input = getattr(sys.stdin, "buffer", None)
+            if binary_input is None:
+                raise RuntimeError("update-ref -z requires a binary stdin stream")
+            updates = parse_update_records_z(binary_input.read())
+        else:
+            updates = parse_update_records(_stdin_records())
         update_refs(repo, updates, message=args.m, deref=not args.no_deref)
         return 0
 
