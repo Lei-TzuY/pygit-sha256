@@ -34,6 +34,8 @@ Phase 84 exports:
 
 The existing `format_batch_object()` and `run_batch_commands()` functions now accept `format_string=` as well.
 
+As of Phase 119, successful object metadata and batch contents are derived from the exact validated stored object envelope rather than by re-serializing the Python object model. This preserves unmodeled headers such as commit `gpgsig` blocks and makes `%(objectsize)` byte-faithful for both loose and packed objects.
+
 ## Verification
 
 `tests/test_phase84.py` covers:
@@ -52,4 +54,4 @@ The existing `format_batch_object()` and `run_batch_commands()` functions now ac
 
 ## Scope boundary
 
-Later phases now implement `--batch-all-objects`, `--unordered`, `--follow-symlinks`, `%(objectsize:disk)`, and NUL-framed `-Z` input/output. `%(deltabase)`, textconv/filters, and mailmap behavior still require separate storage or conversion semantics and remain focused follow-up work.
+Later phases now implement `--batch-all-objects`, `--unordered`, `--follow-symlinks`, `%(objectsize:disk)`, NUL-framed `-Z` input/output, and exact loose/packed stored-payload reads. `%(deltabase)`, textconv/filters, and mailmap behavior still require separate storage or conversion semantics and remain focused follow-up work.
