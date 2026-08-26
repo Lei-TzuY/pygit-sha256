@@ -3,7 +3,8 @@
 The checker deliberately does not trust the normal happy-path object lookup.
 It inventories loose and packed storage first, validates storage metadata, then
 walks refs/index/shallow roots through the object graph while checking object
-relationships and expected types.
+relationships and expected types. Callers may additionally include strict
+reflog old/new object IDs as recovery roots.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from .repo import Repository
 
 
 _HEX = frozenset("0123456789abcdef")
+_ZERO_OID = "0" * 64
 _TREE_MODES = {"040000", "100644", "100755", "120000", "160000"}
 _INDEX_MODES = {"100644", "100755", "120000", "160000"}
 _TYPE_BY_MODE = {
@@ -269,6 +271,32 @@ def _index_roots(repo: Repository, report: FsckReport) -> None:
         _add_root(report, source, entry.sha)
 
 
+def _reflog_roots(repo: Repository, report: FsckReport) -> None:
+    """Strictly add every non-zero reflog old/new OID as a recovery root."""
+    # Local import avoids a module cycle: reflog expiry itself imports fsck for
+    # current-ref reachability calculations. The shared parser gives fsck the
+    # same safe-path and record validation rules as reflog show/expire.
+    from .reflog_expire import _read_records, _target_logs
+
+    try:
+        logs = _target_logs(repo, (), all_refs=True)
+    except Exception as exc:
+        _issue(report, "error", "bad-reflog", str(exc), source="logs")
+        return
+
+    for ref, path in logs:
+        try:
+            records = _read_records(ref, path)
+        except Exception as exc:
+            _issue(report, "error", "bad-reflog", str(exc), source=ref)
+            continue
+        for index, record in enumerate(records, 1):
+            for side, oid in (("old", record.old_oid), ("new", record.new_oid)):
+                if oid == _ZERO_OID:
+                    continue
+                _add_root(report, f"reflog:{ref}:{index}:{side}", oid)
+
+
 def _object_type(obj: GitObject) -> str:
     return obj.type_name.decode("ascii", "replace")
 
@@ -363,12 +391,25 @@ def _detect_cycles(report: FsckReport, edges: Mapping[str, Sequence[Tuple[str, s
             visit(oid)
 
 
-def fsck(repo: Repository, *, connectivity_only: bool = False) -> FsckReport:
-    """Validate storage, roots, object links, types, cycles, and reachability."""
+def fsck(
+    repo: Repository,
+    *,
+    connectivity_only: bool = False,
+    include_reflogs: bool = False,
+) -> FsckReport:
+    """Validate storage, roots, object links, types, cycles, and reachability.
+
+    ``include_reflogs=True`` adds every non-zero old/new OID from every strict
+    reflog below ``.pygit/logs`` as a recovery root. The Python API keeps this
+    opt-in for backward compatibility; the installed ``pygit fsck`` command
+    enables it by default, matching Git's CLI reachability model.
+    """
     report = FsckReport()
     shallow = _shallow_boundaries(repo, report)
     _ref_roots(repo, report)
     _index_roots(repo, report)
+    if include_reflogs:
+        _reflog_roots(repo, report)
     for oid in sorted(shallow):
         _add_root(report, f"shallow:{oid}", oid)
 
