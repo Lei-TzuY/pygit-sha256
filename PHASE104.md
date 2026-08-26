@@ -11,7 +11,7 @@ pygit multi-pack-index verify
 
 `write` scans the current `.pygit/objects/pack/*.idx` files, validates every source index with the existing strict pack-index parser, requires the paired `.pack` file, and atomically replaces `.pygit/objects/pack/multi-pack-index`.
 
-`verify` validates both the MIDX binary image and its relationship to the current source indexes. It checks that the MIDX object set exactly equals the union of the named `.idx` files and that every selected object-to-pack offset still agrees with its source index. Full compressed-object, CRC and pack-trailer validation remains the responsibility of Phase 102 `verify-pack`; MIDX verification does not duplicate that parser.
+`verify` validates both the MIDX binary image and its relationship to the current source indexes. It checks that the MIDX object set exactly equals the union of the named `.idx` files and that every selected object-to-pack offset still agrees with its source index. **Since Phase 107, verification also delegates every tracked pair to the Phase 102 `verify-pack` machinery**, so pack signatures/counts/trailers, bounded decompression, CRC-32, object envelopes/types, and recomputed SHA-256 identities are validated before a MIDX is accepted by explicit verification or maintenance lifecycles.
 
 ## Binary format
 
@@ -56,3 +56,5 @@ A MIDX is an accelerator rather than a requirement. If a new pack appears after 
 - fallback to packs created after the MIDX;
 - packed-object `all_shas()` and abbreviation resolution;
 - installed `multi-pack-index write` / `verify` routing and help/error behavior.
+
+Phase 107 adds focused regressions for full pack-payload verification and fail-before-delete maintenance safety.
