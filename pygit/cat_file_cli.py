@@ -15,6 +15,10 @@ from .cat_file import (
     run_batch_commands,
     split_batch_input,
 )
+from .cat_file_symlink import (
+    format_batch_object_follow_symlinks,
+    run_batch_commands_follow_symlinks,
+)
 from .entrypoint import _find_repo
 from .object_enumeration import iter_object_ids
 from .objects import CommitObject, TreeObject
@@ -112,6 +116,11 @@ def run_cat_file(argv: Sequence[str]) -> int:
         help="buffer batch output until flush or clean end-of-input",
     )
     parser.add_argument(
+        "--follow-symlinks",
+        action="store_true",
+        help="follow in-tree symlinks in REV:path batch expressions",
+    )
+    parser.add_argument(
         "-Z",
         action="store_true",
         dest="zero_framing",
@@ -128,6 +137,8 @@ def run_cat_file(argv: Sequence[str]) -> int:
         parser.error("--batch-all-objects requires --batch, --batch-check, or --batch-command")
     if args.unordered and not args.batch_all_objects:
         parser.error("--unordered requires --batch-all-objects")
+    if args.follow_symlinks and not is_batch:
+        parser.error("--follow-symlinks requires --batch, --batch-check, or --batch-command")
     if args.zero_framing and not is_batch:
         parser.error("-Z requires --batch, --batch-check, or --batch-command")
     if is_batch and args.object is not None:
@@ -190,7 +201,12 @@ def run_cat_file(argv: Sequence[str]) -> int:
     if args.batch_command:
         if output is None:
             raise RuntimeError("cat-file batch-command requires a binary stdout stream")
-        for chunk in run_batch_commands(
+        runner = (
+            run_batch_commands_follow_symlinks
+            if args.follow_symlinks
+            else run_batch_commands
+        )
+        for chunk in runner(
             repo,
             input_records,
             buffered=args.buffer,
@@ -205,6 +221,11 @@ def run_cat_file(argv: Sequence[str]) -> int:
     if args.batch or args.batch_check:
         if output is None:
             raise RuntimeError("cat-file batch modes require a binary stdout stream")
+        formatter = (
+            format_batch_object_follow_symlinks
+            if args.follow_symlinks
+            else format_batch_object
+        )
         for raw in input_records:
             expression, rest = split_batch_input(
                 raw,
@@ -212,7 +233,7 @@ def run_cat_file(argv: Sequence[str]) -> int:
                 record_terminator=input_terminator,
             )
             output.write(
-                format_batch_object(
+                formatter(
                     repo,
                     expression,
                     contents=args.batch,
