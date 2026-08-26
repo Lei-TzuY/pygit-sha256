@@ -4,7 +4,7 @@ The checker deliberately does not trust the normal happy-path object lookup.
 It inventories loose and packed storage first, validates storage metadata, then
 walks refs/index/shallow roots through the object graph while checking object
 relationships and expected types. Callers may additionally include strict
-reflog old/new object IDs as recovery roots.
+reflog old/new object IDs as recovery roots or provide explicit fsck heads.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from .objects import BlobObject, CommitObject, GitObject, TagObject, TreeObject
 from .pack import PackReader
 from .packed_refs import read_packed_refs
 from .repo import Repository
+from .revision import resolve_revision
 
 
 _HEX = frozenset("0123456789abcdef")
@@ -156,7 +157,7 @@ def _validate_pack_pair(idx_path: Path, report: FsckReport) -> Set[str]:
     if shas != sorted(shas) or len(shas) != len(set(shas)):
         _issue(report, "error", "bad-pack-order", "object IDs are not strictly sorted and unique", source=source)
 
-    pos += count * 4  # CRC table
+    pos += count * 4
     offsets = [struct.unpack(">I", idx[pos + i * 4 : pos + (i + 1) * 4])[0] for i in range(count)]
 
     if len(pack) < 44 or pack[:4] != b"PACK":
@@ -183,7 +184,7 @@ def _validate_pack_pair(idx_path: Path, report: FsckReport) -> Set[str]:
                     raise ValueError("object is listed but cannot be read")
                 if obj.hash() != oid:
                     _issue(report, "error", "pack-object-hash", "reconstructed object hash does not match index ID", oid=oid, source=source)
-            except Exception as exc:  # corrupt compressed streams and malformed payloads
+            except Exception as exc:
                 _issue(report, "error", "pack-object-read", str(exc), oid=oid, source=source)
     except Exception as exc:
         _issue(report, "error", "bad-pack-index", str(exc), source=source)
@@ -230,6 +231,18 @@ def _add_root(report: FsckReport, source: str, oid: Optional[str]) -> None:
     report.roots[source] = value
 
 
+def _explicit_roots(repo: Repository, report: FsckReport, heads: Sequence[str]) -> None:
+    """Resolve command/API supplied objects as the complete reachability heads."""
+    for index, expression in enumerate(heads, 1):
+        source = f"argument:{index}:{expression}"
+        try:
+            oid = resolve_revision(repo, expression)
+        except Exception as exc:
+            _issue(report, "error", "bad-root", str(exc), source=source)
+            continue
+        _add_root(report, source, oid)
+
+
 def _ref_roots(repo: Repository, report: FsckReport) -> None:
     try:
         _add_root(report, "HEAD", repo.refs.resolve_head())
@@ -273,9 +286,6 @@ def _index_roots(repo: Repository, report: FsckReport) -> None:
 
 def _reflog_roots(repo: Repository, report: FsckReport) -> None:
     """Strictly add every non-zero reflog old/new OID as a recovery root."""
-    # Local import avoids a module cycle: reflog expiry itself imports fsck for
-    # current-ref reachability calculations. The shared parser gives fsck the
-    # same safe-path and record validation rules as reflog show/expire.
     from .reflog_expire import _read_records, _target_logs
 
     try:
@@ -396,22 +406,33 @@ def fsck(
     *,
     connectivity_only: bool = False,
     include_reflogs: bool = False,
+    heads: Sequence[str] = (),
+    include_index: Optional[bool] = None,
 ) -> FsckReport:
     """Validate storage, roots, object links, types, cycles, and reachability.
 
-    ``include_reflogs=True`` adds every non-zero old/new OID from every strict
-    reflog below ``.pygit/logs`` as a recovery root. The Python API keeps this
-    opt-in for backward compatibility; the installed ``pygit fsck`` command
-    enables it by default, matching Git's CLI reachability model.
+    With no explicit ``heads``, refs, index entries, shallow declarations, and
+    optionally reflogs form the default root set. Supplying one or more heads
+    replaces those implicit reachability roots, matching ``git fsck <object>``;
+    ``include_index=True`` may then opt staged objects back in like ``--cache``.
+    ``include_index=None`` means index roots are enabled only in default-root
+    mode. Shallow declarations always remain traversal boundaries.
     """
     report = FsckReport()
     shallow = _shallow_boundaries(repo, report)
-    _ref_roots(repo, report)
-    _index_roots(repo, report)
-    if include_reflogs:
-        _reflog_roots(repo, report)
-    for oid in sorted(shallow):
-        _add_root(report, f"shallow:{oid}", oid)
+    explicit = bool(heads)
+    if explicit:
+        _explicit_roots(repo, report, heads)
+        if include_index is True:
+            _index_roots(repo, report)
+    else:
+        _ref_roots(repo, report)
+        if include_index is not False:
+            _index_roots(repo, report)
+        if include_reflogs:
+            _reflog_roots(repo, report)
+        for oid in sorted(shallow):
+            _add_root(report, f"shallow:{oid}", oid)
 
     if connectivity_only:
         storage: Set[str] = set()
