@@ -23,7 +23,7 @@ from .pack_refs_cli import run_pack_refs
 from .read_tree_cli import run_read_tree
 from .reflog_expire_cli import run_reflog_expire
 from .reflog_show_cli import run_reflog_show
-from .rev_list_timestamp_cli import run_rev_list_timestamp
+from .rev_list_header_cli import run_rev_list_header
 from .show_ref_cli import run_show_ref
 from .update_ref_cli import run_update_ref
 from .verify_pack_cli import run_verify_pack
@@ -121,7 +121,7 @@ def main() -> None:
         return
 
     if argv and argv[0] == "rev-list":
-        _run_safe(run_rev_list_timestamp, argv[1:])
+        _run_safe(run_rev_list_header, argv[1:])
         return
 
     launcher_main()
