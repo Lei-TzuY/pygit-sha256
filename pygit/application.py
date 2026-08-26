@@ -10,6 +10,7 @@ import sys
 from typing import Sequence
 
 from .cat_file_cli import run_cat_file
+from .checkout_index_cli import run_checkout_index
 from .commit_graph_cli import run_commit_graph
 from .count_objects_cli import run_count_objects
 from .for_each_ref_cli import run_for_each_ref
@@ -74,6 +75,10 @@ def main() -> None:
 
     if argv and argv[0] == "cat-file":
         _run_safe(run_cat_file, argv[1:])
+        return
+
+    if argv and argv[0] == "checkout-index":
+        _run_safe(run_checkout_index, argv[1:])
         return
 
     if argv and argv[0] == "count-objects":
