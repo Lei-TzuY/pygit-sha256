@@ -121,43 +121,68 @@ class ObjectStore:
                 raise ValueError(f"Object {sha} is corrupt (stored hash is {actual_sha})")
             return self._parse(store_bytes)
 
-        # Check packfiles. A multi-pack-index provides a direct pack choice;
-        # indexes created after the MIDX was written are still scanned as a
-        # compatibility fallback until the next MIDX refresh.
+        # Check packfiles. A multi-pack-index provides a direct pack choice.
+        # If that copy is damaged, keep searching for a redundant valid copy;
+        # only surface the first storage error when no usable copy remains.
+        # Packs created after the MIDX are also searched as a stale-index
+        # compatibility path until the next MIDX refresh.
         from .pack import PackReader
         pack_dir = self.root / "pack"
         if pack_dir.exists():
             midx = self._load_multi_pack_index(pack_dir)
+            first_error = None
+            selected_idx = None
             covered = set()
+
             if midx is not None:
                 covered.update(midx.pack_names)
                 mapping = midx.lookup(sha)
                 if mapping is not None:
-                    idx_file = pack_dir / mapping.pack_name
-                    if not idx_file.is_file() or not idx_file.with_suffix(".pack").is_file():
-                        raise ValueError(
-                            f"multi-pack-index references missing pack {mapping.pack_name}"
-                        )
+                    selected_idx = pack_dir / mapping.pack_name
+                    if not selected_idx.is_file():
+                        first_error = FileNotFoundError(selected_idx)
+                    elif not selected_idx.with_suffix(".pack").is_file():
+                        first_error = FileNotFoundError(selected_idx.with_suffix(".pack"))
+                    else:
+                        try:
+                            reader = PackReader(selected_idx)
+                            if not reader.has_object(sha):
+                                first_error = ValueError(
+                                    f"multi-pack-index mapping for {sha} is absent from {mapping.pack_name}"
+                                )
+                            else:
+                                obj = reader.read_object(sha)
+                                if obj is not None:
+                                    return obj
+                                first_error = ValueError(
+                                    f"multi-pack-index could not read {sha} from {mapping.pack_name}"
+                                )
+                        except (ValueError, OSError, zlib.error) as exc:
+                            first_error = exc
+
+            # With a healthy MIDX miss, covered packs cannot contain the OID and
+            # only newer/uncovered indexes need inspection. After a selected
+            # copy fails, however, scan every other index so a duplicate object
+            # in another covered pack can preserve the repository's redundancy.
+            for idx_file in pack_dir.glob("*.idx"):
+                if selected_idx is not None and idx_file == selected_idx:
+                    continue
+                if selected_idx is None and idx_file.name in covered:
+                    continue
+                try:
                     reader = PackReader(idx_file)
                     if not reader.has_object(sha):
-                        raise ValueError(
-                            f"multi-pack-index mapping for {sha} is absent from {mapping.pack_name}"
-                        )
+                        continue
                     obj = reader.read_object(sha)
-                    if obj is None:
-                        raise ValueError(
-                            f"multi-pack-index could not read {sha} from {mapping.pack_name}"
-                        )
-                    return obj
-
-            for idx_file in sorted(pack_dir.glob("*.idx")):
-                if idx_file.name in covered:
-                    continue
-                reader = PackReader(idx_file)
-                if reader.has_object(sha):
-                    obj = reader.read_object(sha)
-                    if obj:
+                    if obj is not None:
                         return obj
+                except (ValueError, OSError, zlib.error) as exc:
+                    if first_error is None:
+                        first_error = exc
+                    continue
+
+            if first_error is not None:
+                raise first_error
 
         raise KeyError(f"Object not found: {sha}")
 
