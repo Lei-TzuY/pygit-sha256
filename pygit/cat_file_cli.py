@@ -16,6 +16,7 @@ from .cat_file import (
     split_batch_input,
 )
 from .entrypoint import _find_repo
+from .object_enumeration import iter_object_ids
 from .objects import CommitObject, TreeObject
 
 
@@ -101,6 +102,11 @@ def run_cat_file(argv: Sequence[str]) -> int:
         help="ignore stdin and emit every object known to loose or packed storage",
     )
     parser.add_argument(
+        "--unordered",
+        action="store_true",
+        help="with --batch-all-objects, visit objects in storage-local rather than hash order",
+    )
+    parser.add_argument(
         "--buffer",
         action="store_true",
         help="buffer batch output until flush or clean end-of-input",
@@ -120,6 +126,8 @@ def run_cat_file(argv: Sequence[str]) -> int:
         parser.error("--buffer requires --batch, --batch-check, or --batch-command")
     if args.batch_all_objects and not is_batch:
         parser.error("--batch-all-objects requires --batch, --batch-check, or --batch-command")
+    if args.unordered and not args.batch_all_objects:
+        parser.error("--unordered requires --batch-all-objects")
     if args.zero_framing and not is_batch:
         parser.error("-Z requires --batch, --batch-check, or --batch-command")
     if is_batch and args.object is not None:
@@ -144,15 +152,29 @@ def run_cat_file(argv: Sequence[str]) -> int:
     if args.batch_all_objects:
         if output is None:
             raise RuntimeError("cat-file batch modes require a binary stdout stream")
-        for payload in batch_all_objects(
-            repo,
-            contents=args.batch,
-            format_string=format_string,
-            record_terminator=output_terminator,
-        ):
-            output.write(payload)
-            if not args.buffer:
-                output.flush()
+        if args.unordered:
+            for oid in iter_object_ids(repo, unordered=True):
+                output.write(
+                    format_batch_object(
+                        repo,
+                        oid,
+                        contents=args.batch,
+                        format_string=format_string,
+                        record_terminator=output_terminator,
+                    )
+                )
+                if not args.buffer:
+                    output.flush()
+        else:
+            for payload in batch_all_objects(
+                repo,
+                contents=args.batch,
+                format_string=format_string,
+                record_terminator=output_terminator,
+            ):
+                output.write(payload)
+                if not args.buffer:
+                    output.flush()
         if args.buffer:
             output.flush()
         return 0
