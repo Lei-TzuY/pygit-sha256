@@ -8,7 +8,9 @@ rev-parse agree on refs, packed refs, abbreviated SHA-256 IDs, ancestry,
 from __future__ import annotations
 
 import re
+import zlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 from .repo import Repository
@@ -43,33 +45,67 @@ def resolve_object(repo: Repository, expression: str) -> str:
     return resolve_revision(repo, expression)
 
 
-def object_disk_size(repo: Repository, oid: str) -> int:
-    """Return the number of bytes used by the selected on-disk object copy.
-
-    Loose objects use the compressed loose-file size. Packed objects use the
-    exact encoded pack-entry width, including the entry header and compressed
-    payload but excluding neighboring entries and the pack trailer. The lookup
-    order mirrors :meth:`ObjectStore.read`: a loose copy wins over packed copies;
-    when multiple packed copies exist, the first pack in deterministic path
-    order is selected.
-    """
-
-    loose_path = repo.store.root / oid[:2] / oid[2:]
+def _local_object_disk_size(repo: Repository, root: Path, oid: str) -> int:
+    """Return validated storage size for *oid* in exactly one object database."""
+    loose_path = root / oid[:2] / oid[2:]
     if loose_path.is_file():
+        if not repo.store._valid_loose_object(loose_path, oid):
+            raise ValueError(f"Object {oid} is corrupt")
         return loose_path.stat().st_size
 
     from .pack import PackReader
 
-    pack_dir = repo.store.root / "pack"
+    pack_dir = root / "pack"
+    first_error = None
     if pack_dir.is_dir():
         for idx_file in sorted(pack_dir.glob("*.idx")):
-            reader = PackReader(idx_file)
-            if not reader.has_object(oid):
-                continue
-            _, payload_end = reader._load_pack_image()
-            offset = reader._offsets[oid]
-            return reader._entry_end(offset, payload_end) - offset
+            try:
+                reader = PackReader(idx_file)
+                if not reader.has_object(oid):
+                    continue
+                store_bytes = reader.read_store_bytes(oid)
+                if store_bytes is None:
+                    continue
+                _, payload_end = reader._load_pack_image()
+                offset = reader._offsets[oid]
+                return reader._entry_end(offset, payload_end) - offset
+            except (ValueError, OSError, zlib.error) as exc:
+                if first_error is None:
+                    first_error = exc
 
+    if first_error is not None:
+        raise first_error
+    raise KeyError(oid)
+
+
+def object_disk_size(repo: Repository, oid: str) -> int:
+    """Return bytes used by the same visible object-copy class as a read.
+
+    Loose objects use compressed loose-file size. Packed objects use exact
+    encoded pack-entry width. The primary object database is authoritative;
+    after a primary miss, alternate databases are searched in configured order.
+    A damaged alternate copy may fall through to a later valid copy, matching
+    :meth:`ObjectStore.read_store_bytes` rather than reporting an unrelated
+    local-only ``Object not found`` error.
+    """
+    roots = repo.store.storage_roots()
+    try:
+        return _local_object_disk_size(repo, roots[0], oid)
+    except KeyError:
+        pass
+
+    first_error = None
+    for root in roots[1:]:
+        try:
+            return _local_object_disk_size(repo, root, oid)
+        except KeyError:
+            continue
+        except (ValueError, OSError, zlib.error) as exc:
+            if first_error is None:
+                first_error = exc
+
+    if first_error is not None:
+        raise first_error
     raise KeyError(f"Object not found: {oid}")
 
 
