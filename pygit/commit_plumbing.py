@@ -89,18 +89,31 @@ def _normalize_prefix(prefix: Optional[str]) -> Optional[str]:
     return value
 
 
+def _unmerged_index_paths(repo: Repository) -> tuple[str, ...]:
+    """Return unique unmerged index paths in deterministic order."""
+    return tuple(sorted({entry.path for entry in repo.index.stage_entries()}))
+
+
 def write_tree(
     repo: Repository,
     *,
     missing_ok: bool = False,
     prefix: Optional[str] = None,
 ) -> str:
-    """Write the current index as tree objects and return the root tree OID.
+    """Write the current merged index as tree objects and return its root OID.
 
     ``prefix`` selects only entries beneath that directory and strips the
-    prefix before building the returned subtree.  The index itself is never
-    modified.
+    prefix before building the returned subtree. The complete index must still
+    be merged: stage 1/2/3 records are rejected before any tree object is
+    written, even when they fall outside ``prefix`` or ``missing_ok`` is set.
+    The index itself is never modified.
     """
+    unmerged = _unmerged_index_paths(repo)
+    if unmerged:
+        raise RuntimeError(
+            "cannot write tree with unmerged index entries: " + ", ".join(unmerged)
+        )
+
     entries = list(repo.index.all_entries())
     _validate_index_entries(repo, entries, missing_ok=missing_ok)
 
