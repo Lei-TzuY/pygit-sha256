@@ -6,7 +6,8 @@ import argparse
 from typing import Sequence
 
 from .entrypoint import _find_repo
-from .rev_list import rev_list, rev_list_objects
+from .rev_list import rev_list
+from .rev_list_object_names import rev_list_named_objects, rev_list_object_edges
 
 
 def run_rev_list(argv: Sequence[str]) -> int:
@@ -15,11 +16,21 @@ def run_rev_list(argv: Sequence[str]) -> int:
         description="List commits or their object closure without touching repository state.",
     )
     parser.add_argument("--all", action="store_true", help="start from every commit-ish ref")
-    parser.add_argument("--count", action="store_true", help="print only the number of selected commits")
+    parser.add_argument("--count", action="store_true", help="print only the number of selected commits or objects")
     parser.add_argument(
         "--objects",
         action="store_true",
-        help="include the selected commits' required tree/blob object closure (OID-only output)",
+        help="include selected commits' required tree/blob closure with pathname annotations",
+    )
+    parser.add_argument(
+        "--objects-edge",
+        action="store_true",
+        help="like --objects, and prefix uninteresting boundary commits with '-'",
+    )
+    parser.add_argument(
+        "--no-object-names",
+        action="store_true",
+        help="suppress pathname annotations in --objects/--objects-edge output",
     )
     parser.add_argument(
         "--left-right",
@@ -46,13 +57,14 @@ def run_rev_list(argv: Sequence[str]) -> int:
     )
     args = parser.parse_args(list(argv))
 
-    if args.objects:
-        if args.count:
-            parser.error("--objects cannot be combined with --count")
+    object_mode = args.objects or args.objects_edge
+    if object_mode:
         if args.left_right:
-            parser.error("--objects cannot be combined with --left-right")
-        objects = rev_list_objects(
-            _find_repo(),
+            parser.error("--objects/--objects-edge cannot be combined with --left-right")
+
+        repo = _find_repo()
+        objects = rev_list_named_objects(
+            repo,
             args.revision,
             all_refs=args.all,
             first_parent=args.first_parent,
@@ -61,8 +73,26 @@ def run_rev_list(argv: Sequence[str]) -> int:
             skip=args.skip,
             max_count=args.max_count,
         )
+
+        if args.objects_edge:
+            for oid in rev_list_object_edges(
+                repo,
+                args.revision,
+                all_refs=args.all,
+                first_parent=args.first_parent,
+                topo_order=args.topo_order,
+            ):
+                print(f"-{oid}")
+
+        if args.count:
+            print(len(objects))
+            return 0
+
         for entry in objects:
-            print(entry.oid)
+            if args.no_object_names or entry.path is None:
+                print(entry.oid)
+            else:
+                print(f"{entry.oid} {entry.path}")
         return 0
 
     entries = rev_list(
