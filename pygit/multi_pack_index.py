@@ -333,20 +333,22 @@ def write_multi_pack_index(pack_dir: Path) -> Path:
 
 
 def verify_multi_pack_index(path: Path) -> ParsedMultiPackIndex:
-    """Verify MIDX structure and its mappings against current source indexes."""
+    """Fully verify MIDX mappings and every tracked pack/index pair."""
     path = Path(path)
     parsed = parse_multi_pack_index(path)
     pack_dir = path.parent
+
+    # Import lazily so the shared MIDX parser stays lightweight for normal
+    # object-store lookups. Explicit verification/maintenance intentionally
+    # pays the cost of decompressing and validating every tracked object.
+    from .verify_pack import verify_pack
 
     source: Dict[str, Dict[str, int]] = {}
     union = set()
     for pack_name in parsed.pack_names:
         idx_path = pack_dir / pack_name
-        pack_path = idx_path.with_suffix(".pack")
-        if not pack_path.is_file():
-            raise FileNotFoundError(pack_path)
-        index = parse_index(idx_path)
-        mapping = {entry.oid: entry.offset for entry in index.entries}
+        verified = verify_pack(idx_path)
+        mapping = {entry.oid: entry.offset for entry in verified.index.entries}
         source[pack_name] = mapping
         union.update(mapping)
 
