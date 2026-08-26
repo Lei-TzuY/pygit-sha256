@@ -21,7 +21,7 @@ from .cat_file_symlink import (
 )
 from .entrypoint import _find_repo
 from .object_enumeration import iter_object_ids
-from .objects import CommitObject, TreeObject
+from .objects import TreeObject
 
 
 _BATCH_FORMAT_OPTIONS = {
@@ -259,10 +259,14 @@ def run_cat_file(argv: Sequence[str]) -> int:
         print(record.size)
         return 0
 
-    obj = repo.store.read(record.oid)
-    if isinstance(obj, CommitObject):
-        print(obj.pretty_print(record.oid))
-    elif isinstance(obj, TreeObject):
+    # Git pretty-prints tree entries, but commit/tag/blob payloads are already
+    # their display representation.  Use Phase 119's exact stored payload for
+    # those types so single-object mode cannot lose unmodeled headers by
+    # round-tripping through the parsed object model.
+    if record.type_name == "tree":
+        obj = repo.store.read(record.oid)
+        if not isinstance(obj, TreeObject):
+            raise RuntimeError(f"object {record.oid} reported tree but did not parse as one")
         for entry in obj.entries:
             kind = "tree" if entry.is_dir else "blob"
             print(f"{entry.mode} {kind} {entry.sha}\t{entry.name}")
