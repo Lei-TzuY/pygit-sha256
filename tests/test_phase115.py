@@ -51,7 +51,7 @@ def test_fsync_failure_does_not_publish_partial_object(
 ) -> None:
     store = _store(tmp_path)
     blob = BlobObject(b"fsync failure\n")
-    oid = blob.sha
+    oid = blob.hash()
     target = store._path_for(oid)
 
     def fail_fsync(fd: int) -> None:
@@ -71,7 +71,7 @@ def test_replace_failure_cleans_temp_and_preserves_existing_corruption(
 ) -> None:
     store = _store(tmp_path)
     blob = BlobObject(b"replace failure\n")
-    oid = blob.sha
+    oid = blob.hash()
     target = store._path_for(oid)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(b"old corrupt bytes")
@@ -91,7 +91,7 @@ def test_concurrent_same_object_writers_leave_one_valid_object(tmp_path: Path) -
     store = _store(tmp_path)
     payload = b"same content from many writers\n"
     blob = BlobObject(payload)
-    oid = blob.sha
+    oid = blob.hash()
 
     with ThreadPoolExecutor(max_workers=12) as pool:
         written = list(pool.map(lambda _index: store.write(BlobObject(payload)), range(48)))
