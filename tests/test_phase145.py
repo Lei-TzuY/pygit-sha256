@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from pygit import Repository
 from pygit.fsck_references import verify_references
 from pygit.objects import BlobObject, CommitObject, Identity, TreeEntry, TreeObject
@@ -124,6 +126,25 @@ def test_packed_and_loose_namespace_conflict_is_reported(tmp_path: Path) -> None
     issues = verify_references(repo)
 
     assert any(issue.code == "reference-namespace-conflict" for issue in issues)
+
+
+def test_symlinked_loose_ref_is_rejected(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    head = _commit(repo, b"head\n", message="head", timestamp=1)
+    target = tmp_path / "outside-ref"
+    target.write_text(head + "\n", encoding="utf-8")
+    link = repo.pygit_dir / "refs" / "heads" / "linked"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable on this platform")
+
+    issues = verify_references(repo)
+
+    assert any(
+        issue.code == "bad-reference-store" and issue.source == "refs/heads/linked"
+        for issue in issues
+    )
 
 
 def test_reference_error_prevents_lost_found_materialization(tmp_path: Path) -> None:
