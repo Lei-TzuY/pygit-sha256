@@ -20,6 +20,7 @@ _ACTION_FIELDS = {
     "delete": 1,
     "verify": 1,
 }
+_SYMREF_ACTIONS = frozenset({"symref-update", "symref-create", "symref-delete", "symref-verify"})
 
 
 def _decode_field(field: bytes, role: str) -> str:
@@ -29,18 +30,18 @@ def _decode_field(field: bytes, role: str) -> str:
         raise ValueError(f"update-ref -z {role} is not valid UTF-8") from exc
 
 
+def _need_fields(fields: List[bytes], index: int, count: int, label: str) -> None:
+    if index + count > len(fields):
+        raise ValueError(f"{label}: unexpected end of input while reading NUL fields")
+
+
 def parse_update_records_z(data: bytes) -> List[RefUpdate]:
     """Parse Git-style NUL-delimited ``update-ref --stdin -z`` input.
 
-    The command/ref pair occupies the first NUL-terminated field (for example
-    ``b"update refs/heads/main\\0"``). Object values then occupy their own NUL
-    fields. Optional old values are represented by an empty field, not by
-    omitting the field entirely. This mirrors Git's ``-z`` protocol and keeps
-    whitespace literal rather than applying the line-mode tokenizer.
-
-    Symbolic-ref transaction verbs are intentionally left to a later phase;
-    direct-ref actions, transaction controls, and ``option no-deref`` compose
-    with the Phase 98 transaction engine unchanged.
+    The command/ref pair occupies the first NUL-terminated field. Required and
+    optional values then occupy separate fields; an empty optional field means
+    "not supplied". Symbolic-ref commands use the same transaction records as
+    line mode, including the variable ``symref-update`` old-value discriminator.
     """
     if not data:
         return []
@@ -70,43 +71,89 @@ def parse_update_records_z(data: bytes) -> List[RefUpdate]:
             updates.append(RefUpdate("option", "no-deref"))
             continue
 
-        field_count = _ACTION_FIELDS.get(command)
-        if field_count is None:
-            raise ValueError(f"unsupported update-ref command: {command!r}")
         if not sep or not rest:
             raise ValueError(f"malformed update-ref -z command: {header!r}")
-        if index + field_count > len(fields):
-            raise ValueError(
-                f"{command} {rest}: unexpected end of input while reading NUL fields"
-            )
-
-        values = [
-            _decode_field(fields[index + offset], "value")
-            for offset in range(field_count)
-        ]
-        index += field_count
         refname = rest
 
-        if command == "update":
-            new_oid, old_oid = values
-            # Native Git treats an empty required update value as zero (delete)
-            # while an empty optional old value means "not supplied".
-            updates.append(
-                RefUpdate(
-                    "update",
-                    refname,
-                    new_oid or ZERO_SHA,
-                    old_oid or None,
+        field_count = _ACTION_FIELDS.get(command)
+        if field_count is not None:
+            _need_fields(fields, index, field_count, f"{command} {refname}")
+            values = [
+                _decode_field(fields[index + offset], "value")
+                for offset in range(field_count)
+            ]
+            index += field_count
+
+            if command == "update":
+                new_oid, old_oid = values
+                updates.append(
+                    RefUpdate(
+                        "update",
+                        refname,
+                        new_oid or ZERO_SHA,
+                        old_oid or None,
+                    )
                 )
+            elif command == "create":
+                new_oid = values[0]
+                if not new_oid:
+                    raise ValueError("create requires a new object ID")
+                updates.append(RefUpdate("create", refname, new_oid, ZERO_SHA))
+            elif command == "delete":
+                updates.append(RefUpdate("delete", refname, None, values[0] or None))
+            else:
+                updates.append(RefUpdate("verify", refname, None, values[0] or None))
+            continue
+
+        if command not in _SYMREF_ACTIONS:
+            raise ValueError(f"unsupported update-ref command: {command!r}")
+
+        if command in {"symref-create", "symref-delete", "symref-verify"}:
+            _need_fields(fields, index, 1, f"{command} {refname}")
+            value = _decode_field(fields[index], "symbolic-ref value")
+            index += 1
+            if command == "symref-create":
+                if not value:
+                    raise ValueError("symref-create requires a new target")
+                updates.append(RefUpdate(command, refname=refname, new_target=value))
+            else:
+                updates.append(RefUpdate(command, refname=refname, old_target=value or None))
+            continue
+
+        # symref-update: new-target is required. The optional old-value clause
+        # starts with a literal discriminator field ("ref" or "oid"). Since no
+        # command header can be one of those bare words, peeking is unambiguous.
+        _need_fields(fields, index, 1, f"symref-update {refname}")
+        new_target = _decode_field(fields[index], "symbolic-ref target")
+        index += 1
+        if not new_target:
+            raise ValueError("symref-update requires a new target")
+
+        old_kind = None
+        old_target = None
+        old_oid = None
+        if index < len(fields) and fields[index] in {b"ref", b"oid"}:
+            old_kind = _decode_field(fields[index], "symbolic-ref old-value kind")
+            index += 1
+            _need_fields(fields, index, 1, f"symref-update {refname}")
+            old_value = _decode_field(fields[index], "symbolic-ref old value")
+            index += 1
+            if not old_value:
+                raise ValueError("symref-update old-value condition cannot be empty")
+            if old_kind == "ref":
+                old_target = old_value
+            else:
+                old_oid = old_value
+
+        updates.append(
+            RefUpdate(
+                "symref-update",
+                refname=refname,
+                old_oid=old_oid,
+                new_target=new_target,
+                old_target=old_target,
+                old_kind=old_kind,
             )
-        elif command == "create":
-            new_oid = values[0]
-            if not new_oid:
-                raise ValueError("create requires a new object ID")
-            updates.append(RefUpdate("create", refname, new_oid, ZERO_SHA))
-        elif command == "delete":
-            updates.append(RefUpdate("delete", refname, None, values[0] or None))
-        else:  # verify
-            updates.append(RefUpdate("verify", refname, None, values[0] or None))
+        )
 
     return updates
