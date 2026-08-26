@@ -237,7 +237,7 @@ def test_invalid_merge_cli_shapes_fail_without_mutating_index(tmp_path: Path) ->
     update_index(repo, cache_info=[("100644", sentinel, "keep.txt")])
     tree, _ = _tree(repo, {"file.txt": b"value\n"})
 
-    too_few = _run(repo, "read-tree", "-m", tree, tree)
+    too_few = _run(repo, "read-tree", "-m", tree)
     assert too_few.returncode == 2
 
     update = _run(repo, "read-tree", "-m", "-u", tree, tree, tree)
