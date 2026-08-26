@@ -36,7 +36,7 @@ per path and had no representation for Git's unmerged stages 1, 2, and 3. The
 phase therefore rejected `:1:path`, `:2:path`, and `:3:path` explicitly rather
 than inventing synthetic conflict data.
 
-Phase 122 later upgrades that same index model with persistent stages 1-3 and
+Phase 124 later upgrades that same index model with persistent stages 1-3 and
 wires them through `update-index --index-info`, `ls-files --stage`, and the
 shared revision resolver. The Phase 118 grammar and stage-0 behavior stay
 unchanged; the formerly unavailable conflict-stage expressions now resolve real
@@ -66,4 +66,4 @@ does not modify the index, worktree, refs, or reflogs.
 - missing index entries and missing backing objects;
 - installed `rev-parse` and `cat-file` sharing the same resolution path.
 
-Phase 122 adds the regression suite for actual stages 1-3.
+Phase 124 adds the regression suite for actual stages 1-3.
