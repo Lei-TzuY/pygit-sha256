@@ -16,6 +16,7 @@ This is pygit's own SHA-256 format, not Git's native commit-graph format.
 
 from __future__ import annotations
 
+import heapq
 import os
 import struct
 import tempfile
@@ -61,6 +62,7 @@ class CommitGraph:
     CHUNK_COUNT = 1
     HEADER_SIZE = 10
     ENTRY_FIXED_SIZE = 70
+    MAX_GENERATION = 0xFFFFFFFF
 
     def __init__(self, pygit_dir: Path) -> None:
         self.graph_file = pygit_dir / "objects" / "info" / "commit-graph"
@@ -70,29 +72,58 @@ class CommitGraph:
     def _compute_generations(
         commit_map: Dict[str, Tuple[str, List[str]]]
     ) -> Dict[str, int]:
+        """Compute generation numbers without Python-recursive graph walking.
+
+        Included parent edges form the dependency graph. Parents outside the
+        graph remain valid shallow/external boundaries and contribute generation
+        1, preserving the format's historical semantics. A Kahn-style traversal
+        keeps memory bounded by the graph itself and avoids ``RecursionError`` on
+        long linear histories while still detecting cycles deterministically.
+        """
+        if not commit_map:
+            return {}
+
+        remaining_parents: Dict[str, int] = {sha: 0 for sha in commit_map}
+        children: Dict[str, List[str]] = {sha: [] for sha in commit_map}
+        max_parent_generation: Dict[str, int] = {}
+
+        for sha, (_tree_sha, parents) in commit_map.items():
+            # A commit with any parent starts with generation 1 as the minimum
+            # parent generation. This is observable when all parents are outside
+            # the graph, such as directly above a shallow boundary.
+            max_parent_generation[sha] = 1 if parents else 0
+            for parent in parents:
+                if parent not in commit_map:
+                    continue
+                remaining_parents[sha] += 1
+                children[parent].append(sha)
+
+        ready = [sha for sha, count in remaining_parents.items() if count == 0]
+        heapq.heapify(ready)
         generations: Dict[str, int] = {}
-        visiting: set[str] = set()
 
-        def get_gen(sha: str) -> int:
-            if sha in generations:
-                return generations[sha]
-            if sha not in commit_map:
-                # A parent can legitimately sit outside the graph, for example at
-                # a shallow boundary. Preserve the historical pygit convention
-                # that such an external parent has generation 1.
-                return 1
-            if sha in visiting:
-                raise CommitGraphError(f"commit-graph cycle detected at {sha}")
+        while ready:
+            sha = heapq.heappop(ready)
+            _tree_sha, parents = commit_map[sha]
+            generation = 1 if not parents else max_parent_generation[sha] + 1
+            if generation > CommitGraph.MAX_GENERATION:
+                raise CommitGraphError(
+                    f"generation for commit {sha} exceeds 32-bit commit-graph limit"
+                )
+            generations[sha] = generation
 
-            visiting.add(sha)
-            _, parents = commit_map[sha]
-            gen = 1 if not parents else 1 + max(get_gen(parent) for parent in parents)
-            visiting.remove(sha)
-            generations[sha] = gen
-            return gen
+            for child in children[sha]:
+                max_parent_generation[child] = max(
+                    max_parent_generation[child], generation
+                )
+                remaining_parents[child] -= 1
+                if remaining_parents[child] == 0:
+                    heapq.heappush(ready, child)
 
-        for sha in commit_map:
-            get_gen(sha)
+        if len(generations) != len(commit_map):
+            unresolved = min(sha for sha in commit_map if sha not in generations)
+            raise CommitGraphError(f"commit-graph cycle detected at {unresolved}")
+
         return generations
 
     @classmethod

@@ -42,6 +42,8 @@ Parents outside the graph remain valid. This preserves shallow-boundary behavior
 
 `CommitGraph.write()` now validates canonical 64-character lowercase SHA-256 IDs, rejects duplicate input commits and cyclic input graphs, computes deterministic generation numbers, self-parses the complete serialized payload, and installs it with `os.replace()` only after the temporary file has been flushed and `fsync`ed. Failed writes clean up their temporary file without replacing the previous graph.
 
+Since Phase 110, generation calculation and cycle detection use an iterative dependency traversal rather than recursive DFS. This preserves the Phase 103 binary format and shallow-parent semantics while allowing histories far deeper than Python's recursion limit to be written and verified safely.
+
 ## Regression coverage
 
-`tests/test_phase103.py` covers round-trip verification, generation summaries, temporary-file cleanup, bad magic/version/trailing data, truncation, invalid generations, object-database metadata mismatch, cycle/duplicate rejection, modern `commit-graph write` and `verify` routing, and non-zero CLI failure on corrupted graphs.
+`tests/test_phase103.py` covers round-trip verification, generation summaries, temporary-file cleanup, bad magic/version/trailing data, truncation, invalid generations, object-database metadata mismatch, cycle/duplicate rejection, modern `commit-graph write` and `verify` routing, and non-zero CLI failure on corrupted graphs. Phase 110 adds dedicated deep-history and deep-cycle regressions in `tests/test_phase110.py`.
