@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pygit import Repository
 from pygit.entrypoint import dispatch
 
@@ -97,7 +99,9 @@ def test_explicit_exclude_options_require_others(tmp_path: Path, monkeypatch, ca
     monkeypatch.chdir(repo.worktree)
     capsys.readouterr()
 
-    assert dispatch(["ls-files", "-x", "*.tmp"]) != 0
+    with pytest.raises(SystemExit) as exc_info:
+        dispatch(["ls-files", "-x", "*.tmp"])
+    assert exc_info.value.code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "--others" in captured.err
@@ -108,7 +112,9 @@ def test_exclude_from_reports_unreadable_file(tmp_path: Path, monkeypatch, capsy
     monkeypatch.chdir(repo.worktree)
     capsys.readouterr()
 
-    assert dispatch(["ls-files", "--others", "-X", "missing.rules"]) != 0
+    with pytest.raises(SystemExit) as exc_info:
+        dispatch(["ls-files", "--others", "-X", "missing.rules"])
+    assert exc_info.value.code == 2
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "cannot read exclude file" in captured.err
