@@ -9,6 +9,7 @@ from .push_defaults import PushPlan, all_branch_specs, all_tag_specs, delete_spe
 from .push_follow_tags import follow_tag_specs, resolve_follow_tags
 from .push_includes import extract_force_if_includes, resolve_force_if_includes
 from .push_lease import extract_force_with_lease
+from .push_mirror import configured_remote_mirror, mirror_specs
 from .push_options import resolve_push_options
 from .push_prune import prune_specs
 from .push_transport import delete_remote_ref, push_atomic_specs, push_branch, push_ref
@@ -57,6 +58,7 @@ def run_push(argv: Sequence[str]) -> int:
         help="transmit an option string to receive-pack hooks (repeatable)",
     )
     parser.add_argument("--all", "--branches", dest="all_branches", action="store_true", help="push all local branches")
+    parser.add_argument("--mirror", action="store_true", help="mirror every ref under refs/ to the remote")
     parser.add_argument("--tags", action="store_true", help="push all local tags")
     follow_tags = parser.add_mutually_exclusive_group()
     follow_tags.add_argument(
@@ -114,8 +116,20 @@ def run_push(argv: Sequence[str]) -> int:
         resolve_force_if_includes(repo, includes_override)
     )
     follow_tags_enabled = resolve_follow_tags(repo, args.follow_tags)
+    mirror_enabled = bool(args.mirror or configured_remote_mirror(repo, remote))
 
-    if args.delete:
+    if mirror_enabled and args.refspecs:
+        parser.error("--mirror cannot be combined with explicit refspecs")
+    if mirror_enabled and args.all_branches:
+        parser.error("--all cannot be combined with --mirror")
+    if mirror_enabled and args.tags:
+        parser.error("--tags cannot be combined with --mirror")
+    if mirror_enabled and args.delete:
+        parser.error("--delete cannot be combined with --mirror")
+
+    if mirror_enabled:
+        plan = PushPlan(remote, mirror_specs(repo, remote), "mirror")
+    elif args.delete:
         plan = PushPlan(remote, delete_specs(repo, args.refspecs), "delete")
     elif args.all_branches:
         specs = list(all_branch_specs(repo, force=args.force))
@@ -183,6 +197,7 @@ def run_push(argv: Sequence[str]) -> int:
             and plan.specs[0].target == branch
             and (effective_lease is None or single_spec_forces)
             and not push_options
+            and not mirror_enabled
         )
         for spec in plan.specs:
             effective_force = bool(args.force or spec.force)
