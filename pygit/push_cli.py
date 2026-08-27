@@ -15,6 +15,7 @@ from .push_mirror import configured_remote_mirror, mirror_specs
 from .push_options import resolve_push_options
 from .push_prune import prune_specs
 from .push_transport import delete_remote_ref, push_atomic_specs, push_branch, push_ref
+from .push_urls import remote_push_urls, use_push_url
 from .remote_ops import resolve_push_remote
 from .tracking import TrackingSource, find_repo, set_branch_upstream
 
@@ -176,6 +177,40 @@ def _run_one_remote(
             source_note = "" if spec.source == spec.target else f"{spec.source_ref} -> "
             display_target = f"{remote}/{spec.target_ref}"
         print(f"Push result: {result['status']} {source_note}{display_target} ({result['objects']} objects)")
+    return 0
+
+
+# Preserve the Phase176 one-destination implementation and layer URL fan-out on
+# top.  Each destination gets a complete ordinary push pass so mirror/prune/
+# follow-tags can inspect that destination's own receive-pack advertisement.
+_run_one_push_url = _run_one_remote
+
+
+def _run_one_remote(
+    repo,
+    args,
+    parser: argparse.ArgumentParser,
+    remote: str,
+    lease,
+    push_options,
+    follow_tags_enabled: bool,
+) -> int:
+    urls = remote_push_urls(repo, remote)
+    for url in urls:
+        if len(urls) > 1:
+            print(f"Pushing to {url}")
+        with use_push_url(repo, remote, url):
+            status = _run_one_push_url(
+                repo,
+                args,
+                parser,
+                remote,
+                lease,
+                push_options,
+                follow_tags_enabled,
+            )
+        if status != 0:
+            return status
     return 0
 
 
