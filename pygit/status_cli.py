@@ -10,7 +10,8 @@ Phase 153 makes short/porcelain-v1 pathname framing machine-safe and lets ``-z``
 imply porcelain v1, matching Git's command-line protocol. Phase 154 adds Git's
 ``-u/--untracked-files`` display modes while keeping Repository.status()'s
 individual-path API unchanged. Phase 155 extends ``--ignored`` with Git's
-traditional, matching, and no modes.
+traditional, matching, and no modes. Phase 159 adds HEAD-to-index staged rename
+detection shared by long, short, porcelain-v1, and porcelain-v2 presentation.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .repo import Repository
+from .status_renames import RenameMatch, detect_staged_renames, parse_similarity_threshold
 from .status_untracked import apply_status_path_modes
 
 
@@ -58,10 +60,16 @@ class UnmergedStatus:
 
 @dataclass(frozen=True)
 class StatusRecord:
-    """One porcelain-v1/short status record."""
+    """One short/porcelain-v1 status record.
+
+    ``orig_path`` and ``score`` are populated for staged rename records.
+    Existing callers that only consume ``path`` and ``code`` remain compatible.
+    """
 
     path: str
     code: str
+    orig_path: Optional[str] = None
+    score: Optional[int] = None
 
 
 def _find_repo() -> Repository:
@@ -125,13 +133,39 @@ def _normalized_status(
     return result, unmerged
 
 
+def _active_rename_matches(
+    repo: Repository,
+    result: dict,
+    *,
+    renames: bool,
+    rename_threshold: int,
+) -> List[RenameMatch]:
+    """Return rename matches that correspond to ordinary staged D/A pairs."""
+    if not renames:
+        return []
+    staged = {path: kind for kind, path in result["staged"]}
+    return [
+        match
+        for match in detect_staged_renames(repo, threshold=rename_threshold)
+        if staged.get(match.source) == "deleted"
+        and staged.get(match.target) == "new file"
+    ]
+
+
 def status_records(
     repo: Repository,
     *,
     ignored: bool = False,
     untracked_mode: str = "normal",
+    renames: bool = True,
+    rename_threshold: int = 50,
 ) -> List[StatusRecord]:
-    """Return sorted porcelain-v1 records, with unmerged stages taking priority."""
+    """Return sorted short/porcelain-v1 records.
+
+    Unmerged stages take priority. When rename detection is enabled, staged
+    delete/add pairs are collapsed to one ``R`` record whose path is the target
+    and whose ``orig_path`` points at the HEAD pathname.
+    """
     result, unmerged = _normalized_status(
         repo,
         ignored=ignored,
@@ -153,7 +187,41 @@ def status_records(
         for path in result.get("ignored", []):
             codes[path] = ["!", "!"]
 
-    return [StatusRecord(path=path, code="".join(codes[path])) for path in sorted(codes)]
+    rename_meta: Dict[str, Tuple[str, int]] = {}
+    for match in _active_rename_matches(
+        repo,
+        result,
+        renames=renames,
+        rename_threshold=rename_threshold,
+    ):
+        source_code = codes.get(match.source)
+        target_code = codes.get(match.target)
+        if (
+            source_code is None
+            or target_code is None
+            or source_code[0] != "D"
+            or target_code[0] != "A"
+        ):
+            continue
+        target_code[0] = "R"
+        codes.pop(match.source, None)
+        rename_meta[match.target] = (match.source, match.score)
+
+    records: List[StatusRecord] = []
+    for path in sorted(codes):
+        orig_path = None
+        score = None
+        if path in rename_meta:
+            orig_path, score = rename_meta[path]
+        records.append(
+            StatusRecord(
+                path=path,
+                code="".join(codes[path]),
+                orig_path=orig_path,
+                score=score,
+            )
+        )
+    return records
 
 
 def _branch_header(result: dict) -> str:
@@ -188,6 +256,18 @@ def _short_path(path: str, *, nul: bool) -> str:
     return path if nul else _quote_path(path)
 
 
+def _short_record(record: StatusRecord, *, nul: bool) -> str:
+    if record.orig_path is None:
+        return f"{record.code} {_short_path(record.path, nul=nul)}"
+    if nul:
+        # Porcelain-v1 -z reverses the human arrow form: target then source.
+        return f"{record.code} {record.path}\0{record.orig_path}"
+    return (
+        f"{record.code} {_short_path(record.orig_path, nul=False)} -> "
+        f"{_short_path(record.path, nul=False)}"
+    )
+
+
 def _print_short(
     repo: Repository,
     *,
@@ -195,6 +275,8 @@ def _print_short(
     ignored: bool,
     nul: bool = False,
     untracked_mode: str = "normal",
+    renames: bool = True,
+    rename_threshold: int = 50,
 ) -> None:
     result, _unmerged = _normalized_status(
         repo,
@@ -205,11 +287,13 @@ def _print_short(
     if branch:
         lines.append(_branch_header(result))
     lines.extend(
-        f"{record.code} {_short_path(record.path, nul=nul)}"
+        _short_record(record, nul=nul)
         for record in status_records(
             repo,
             ignored=ignored,
             untracked_mode=untracked_mode,
+            renames=renames,
+            rename_threshold=rename_threshold,
         )
     )
     if not lines:
@@ -234,6 +318,8 @@ def _print_full(
     ignored: bool,
     show_stash: bool = False,
     untracked_mode: str = "normal",
+    renames: bool = True,
+    rename_threshold: int = 50,
 ) -> None:
     result, unmerged = _normalized_status(
         repo,
@@ -263,9 +349,23 @@ def _print_full(
             print()
 
         if result["staged"]:
+            matches = _active_rename_matches(
+                repo,
+                result,
+                renames=renames,
+                rename_threshold=rename_threshold,
+            )
+            by_target = {match.target: match for match in matches}
+            sources = {match.source for match in matches}
             print("Changes to be committed:")
             for kind, path in result["staged"]:
-                print(f"\t{kind}:\t{path}")
+                if path in sources:
+                    continue
+                match = by_target.get(path)
+                if match is not None and kind == "new file":
+                    print(f"\trenamed:\t{match.source} -> {match.target}")
+                else:
+                    print(f"\t{kind}:\t{path}")
             print()
 
         if result["unstaged"]:
@@ -334,7 +434,7 @@ def run_status(argv: Sequence[str]) -> int:
         action="store_true",
         help="terminate porcelain records with NUL bytes; implies --porcelain=v1",
     )
-    parser.set_defaults(show_stash=False)
+    parser.set_defaults(show_stash=False, renames=True)
     parser.add_argument(
         "--show-stash",
         dest="show_stash",
@@ -347,10 +447,35 @@ def run_status(argv: Sequence[str]) -> int:
         action="store_false",
         help="suppress stash-count status information",
     )
+    parser.add_argument(
+        "--renames",
+        dest="renames",
+        action="store_true",
+        help="enable staged rename detection",
+    )
+    parser.add_argument(
+        "--no-renames",
+        dest="renames",
+        action="store_false",
+        help="disable staged rename detection",
+    )
+    parser.add_argument(
+        "--find-renames",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="N",
+        help="detect staged renames, optionally setting a similarity threshold",
+    )
     args = parser.parse_args(list(argv))
 
     if args.z and args.porcelain is None:
         args.porcelain = "v1"
+
+    rename_threshold = 50
+    if args.find_renames is not None:
+        rename_threshold = parse_similarity_threshold(args.find_renames)
+        args.renames = True
 
     repo = _find_repo()
     if args.porcelain == "v2":
@@ -364,6 +489,8 @@ def run_status(argv: Sequence[str]) -> int:
                 nul=args.z,
                 show_stash=args.show_stash,
                 untracked_mode=args.untracked_files,
+                renames=args.renames,
+                rename_threshold=rename_threshold,
             )
         )
     elif args.short or args.porcelain is not None:
@@ -373,6 +500,8 @@ def run_status(argv: Sequence[str]) -> int:
             ignored=args.ignored,
             nul=args.z,
             untracked_mode=args.untracked_files,
+            renames=args.renames,
+            rename_threshold=rename_threshold,
         )
     else:
         _print_full(
@@ -380,5 +509,7 @@ def run_status(argv: Sequence[str]) -> int:
             ignored=args.ignored,
             show_stash=args.show_stash,
             untracked_mode=args.untracked_files,
+            renames=args.renames,
+            rename_threshold=rename_threshold,
         )
     return 0
