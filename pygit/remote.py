@@ -17,7 +17,7 @@ import zlib
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from .objects import BlobObject, CommitObject, Identity, TreeObject
+from .objects import BlobObject, CommitObject, Identity, TagObject, TreeObject
 from .store import ObjectStore
 
 
@@ -354,6 +354,22 @@ class NativeExporter:
             lines.append(f"author {obj.author.encode()}")
             lines.append(f"committer {obj.committer.encode()}")
             lines.extend(("", obj.message))
+            data = "\n".join(lines).encode()
+        elif isinstance(obj, TagObject):
+            type_name = "tag"
+            target_type = (
+                obj.target_type.decode()
+                if isinstance(obj.target_type, bytes)
+                else str(obj.target_type)
+            )
+            lines = [
+                f"object {self.export_oid(obj.target_sha)}",
+                f"type {target_type}",
+                f"tag {obj.tag_name}",
+                f"tagger {obj.tagger.encode()}",
+                "",
+                obj.message,
+            ]
             data = "\n".join(lines).encode()
         else:
             raise ValueError(f"Unsupported pygit object type: {type(obj).__name__}")
