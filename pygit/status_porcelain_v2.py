@@ -3,7 +3,7 @@
 This layer reuses Phase 150's normalized status/conflict model and enriches it
 with the index/HEAD metadata required by porcelain v2.  The repository remains
 SHA-256-native, so object-name fields are 64 hexadecimal characters rather
-than Git's SHA-1-width examples.
+than Git's SHA-1-width examples.  Phase 152 adds type-2 staged rename records.
 """
 
 from __future__ import annotations
@@ -74,8 +74,10 @@ def porcelain_v2_lines(
     branch: bool = False,
     ignored: bool = False,
     nul: bool = False,
+    renames: bool = True,
+    rename_threshold: int = 50,
 ) -> List[str]:
-    """Return porcelain-v2 headers and records without terminators."""
+    """Return porcelain-v2 headers and records without final terminators."""
     # Import lazily to avoid making status_cli's command adapter a dependency
     # during module import.
     from .status_cli import _normalized_status, status_records
@@ -88,7 +90,12 @@ def porcelain_v2_lines(
     head_entries = _head_entries(repo)
     unmerged_by_path = {entry.path: entry for entry in unmerged}
 
-    for record in status_records(repo, ignored=ignored):
+    for record in status_records(
+        repo,
+        ignored=ignored,
+        renames=renames,
+        rename_threshold=rename_threshold,
+    ):
         path = record.path
         if record.code in {"??", "!!"}:
             prefix = "?" if record.code == "??" else "!"
@@ -98,13 +105,41 @@ def porcelain_v2_lines(
         conflict = unmerged_by_path.get(path)
         if conflict is not None:
             stages = {stage: repo.index.get(path, stage) for stage in (1, 2, 3)}
-            modes = [stages[stage].mode if stages[stage] is not None else _ZERO_MODE for stage in (1, 2, 3)]
-            oids = [stages[stage].sha if stages[stage] is not None else _ZERO_OID for stage in (1, 2, 3)]
+            modes = [
+                stages[stage].mode if stages[stage] is not None else _ZERO_MODE
+                for stage in (1, 2, 3)
+            ]
+            oids = [
+                stages[stage].sha if stages[stage] is not None else _ZERO_OID
+                for stage in (1, 2, 3)
+            ]
             lines.append(
                 "u "
                 f"{record.code} N... {modes[0]} {modes[1]} {modes[2]} "
                 f"{_worktree_mode(repo, path)} {oids[0]} {oids[1]} {oids[2]} "
                 f"{_path_field(path, nul=nul)}"
+            )
+            continue
+
+        if record.orig_path is not None:
+            source = record.orig_path
+            head_entry = head_entries.get(source)
+            index_entry = repo.index.get(path)
+            if head_entry is None or index_entry is None:
+                raise RuntimeError(
+                    f"rename metadata disappeared while rendering status: {source!r} -> {path!r}"
+                )
+            head_oid, head_mode = head_entry
+            index_oid = index_entry.sha
+            index_mode = index_entry.mode
+            xy = record.code.replace(" ", ".")
+            score = 100 if record.score is None else record.score
+            path_sep = "\0" if nul else "\t"
+            lines.append(
+                "2 "
+                f"{xy} N... {head_mode} {index_mode} {_worktree_mode(repo, path)} "
+                f"{head_oid} {index_oid} R{score} "
+                f"{_path_field(path, nul=nul)}{path_sep}{_path_field(source, nul=nul)}"
             )
             continue
 
@@ -130,9 +165,18 @@ def render_porcelain_v2(
     branch: bool = False,
     ignored: bool = False,
     nul: bool = False,
+    renames: bool = True,
+    rename_threshold: int = 50,
 ) -> str:
     """Render a complete porcelain-v2 stream."""
-    lines = porcelain_v2_lines(repo, branch=branch, ignored=ignored, nul=nul)
+    lines = porcelain_v2_lines(
+        repo,
+        branch=branch,
+        ignored=ignored,
+        nul=nul,
+        renames=renames,
+        rename_threshold=rename_threshold,
+    )
     if not lines:
         return ""
     separator = "\0" if nul else "\n"
