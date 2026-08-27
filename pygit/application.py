@@ -9,8 +9,11 @@ from __future__ import annotations
 import sys
 from typing import Sequence
 
+from .branch_cli import run_branch
 from .cat_file_cli import run_cat_file
+from .checkout_cli import run_checkout
 from .checkout_index_cli import run_checkout_index
+from .clone_cli import run_clone
 from .commit_graph_cli import run_commit_graph
 from .count_objects_cli import run_count_objects
 from .for_each_ref_cli import run_for_each_ref
@@ -76,6 +79,18 @@ def main() -> None:
 
     if argv and argv[0] == "status":
         _run_safe(run_status, argv[1:])
+        return
+
+    if argv and argv[0] == "clone":
+        _run_safe(run_clone, argv[1:])
+        return
+
+    if argv and argv[0] == "branch":
+        _run_safe(run_branch, argv[1:])
+        return
+
+    if argv and argv[0] == "checkout":
+        _run_safe(run_checkout, argv[1:])
         return
 
     if argv and argv[0] == "ls-tree":
