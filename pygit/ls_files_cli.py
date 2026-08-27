@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .index_plumbing import ls_files
+from .ls_files_killed import killed_files
 from .ls_files_others import other_files
 from .repo import Repository
 
@@ -28,52 +29,15 @@ def run_ls_files(argv: Sequence[str]) -> int:
         description="Show information about files in the index and working tree.",
     )
     parser.add_argument("-c", "--cached", action="store_true", help="show cached paths")
-    parser.add_argument(
-        "-s",
-        "--stage",
-        action="store_true",
-        help="show mode, object, stage, and path",
-    )
-    parser.add_argument(
-        "-u",
-        "--unmerged",
-        action="store_true",
-        help="show only unmerged index stages",
-    )
-    parser.add_argument(
-        "-d",
-        "--deleted",
-        action="store_true",
-        help="show tracked paths deleted from the worktree",
-    )
-    parser.add_argument(
-        "-m",
-        "--modified",
-        action="store_true",
-        help="show tracked paths modified in the worktree",
-    )
-    parser.add_argument(
-        "-o",
-        "--others",
-        action="store_true",
-        help="show untracked worktree paths",
-    )
-    parser.add_argument(
-        "-i",
-        "--ignored",
-        action="store_true",
-        help="show only ignored untracked paths (requires --others --exclude-standard)",
-    )
-    parser.add_argument(
-        "--exclude-standard",
-        action="store_true",
-        help="apply .gitignore, .pygitignore, and .pygit/info/exclude rules",
-    )
-    parser.add_argument(
-        "--error-unmatch",
-        action="store_true",
-        help="fail if any supplied path pattern matches no index entry",
-    )
+    parser.add_argument("-s", "--stage", action="store_true", help="show mode, object, stage, and path")
+    parser.add_argument("-u", "--unmerged", action="store_true", help="show only unmerged index stages")
+    parser.add_argument("-d", "--deleted", action="store_true", help="show tracked paths deleted from the worktree")
+    parser.add_argument("-m", "--modified", action="store_true", help="show tracked paths modified in the worktree")
+    parser.add_argument("-o", "--others", action="store_true", help="show untracked worktree paths")
+    parser.add_argument("-k", "--killed", action="store_true", help="show untracked paths obstructing tracked paths")
+    parser.add_argument("-i", "--ignored", action="store_true", help="show only ignored untracked paths (requires --others --exclude-standard)")
+    parser.add_argument("--exclude-standard", action="store_true", help="apply .gitignore, .pygitignore, and .pygit/info/exclude rules")
+    parser.add_argument("--error-unmatch", action="store_true", help="fail if any supplied path pattern matches no index entry")
     parser.add_argument("-z", action="store_true", help="terminate records with NUL")
     parser.add_argument("path", nargs="*", metavar="PATH")
     args = parser.parse_args(list(argv))
@@ -84,17 +48,16 @@ def run_ls_files(argv: Sequence[str]) -> int:
         parser.error("--ignored requires --exclude-standard")
     if args.exclude_standard and not args.others:
         parser.error("--exclude-standard currently applies to --others")
-    if args.error_unmatch and args.others and not any(
+    if args.error_unmatch and (args.others or args.killed) and not any(
         (args.cached, args.stage, args.unmerged, args.deleted, args.modified)
     ):
-        parser.error("--error-unmatch applies to index selectors, not --others-only mode")
+        parser.error("--error-unmatch currently applies to index selectors")
 
     repo = _find_repo()
     lines = []
-    index_selector_requested = any(
-        (args.cached, args.stage, args.unmerged, args.deleted, args.modified)
-    )
-    if index_selector_requested or not args.others:
+    index_selector_requested = any((args.cached, args.stage, args.unmerged, args.deleted, args.modified))
+    worktree_selector_requested = args.others or args.killed
+    if index_selector_requested or not worktree_selector_requested:
         lines.extend(
             ls_files(
                 repo,
@@ -108,17 +71,10 @@ def run_ls_files(argv: Sequence[str]) -> int:
             )
         )
     if args.others:
-        lines.extend(
-            other_files(
-                repo,
-                ignored=args.ignored,
-                exclude_standard=args.exclude_standard,
-                patterns=args.path,
-            )
-        )
+        lines.extend(other_files(repo, ignored=args.ignored, exclude_standard=args.exclude_standard, patterns=args.path))
+    if args.killed:
+        lines.extend(killed_files(repo, patterns=args.path))
 
-    # Preserve index-plumbing order (notably stage 1/2/3 ordering) while
-    # de-duplicating combined selectors. ``other_files`` is already sorted.
     lines = list(dict.fromkeys(lines))
     if lines:
         separator = "\x00" if args.z else "\n"
