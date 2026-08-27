@@ -25,6 +25,13 @@ def _parse_stage(value: str) -> StageArgument:
     return stage
 
 
+def _normalize_cli_path(path: str) -> str:
+    """Normalize shell/find-style repository-root pathnames for index matching."""
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
 def _read_stdin_paths(*, zero: bool) -> List[str]:
     data = sys.stdin.buffer.read()
     if not data:
@@ -39,7 +46,8 @@ def _read_stdin_paths(*, zero: bool) -> List[str]:
     for record in records:
         if record == b"":
             raise ValueError("checkout-index --stdin received an empty path")
-        paths.append(record.decode("utf-8", "surrogateescape"))
+        decoded = record.decode("utf-8", "surrogateescape")
+        paths.append(_normalize_cli_path(decoded))
     return paths
 
 
@@ -125,8 +133,6 @@ def run_checkout_index(argv: Sequence[str]) -> int:
     if args.null and not (args.stdin or temp_mode):
         parser.error("-z/--null requires --stdin, --temp, or --stage=all")
 
-    # Even a no-op checkout-index invocation is repository-scoped. Resolve the
-    # repository before consuming stdin or returning from an empty selection.
     repo = _find_repo()
 
     if args.stdin:
@@ -134,15 +140,11 @@ def run_checkout_index(argv: Sequence[str]) -> int:
             selected_paths = _read_stdin_paths(zero=args.null)
         except ValueError as exc:
             parser.error(str(exc))
-        # An empty stdin stream is a no-op, which keeps shell pipelines safe.
         if not selected_paths:
             return 0
     else:
-        selected_paths = list(args.path)
+        selected_paths = [_normalize_cli_path(path) for path in args.path]
 
-    # Native checkout-index with no paths and without -a performs no work.
-    # Preserve the Python API's stricter validation while keeping the CLI
-    # script-friendly.
     if not args.all and not selected_paths:
         return 0
 
