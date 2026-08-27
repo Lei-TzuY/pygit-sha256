@@ -4,9 +4,9 @@ pygit/refs.py
 Reference storage for loose, symbolic, and packed refs.
 
 Loose refs live below ``.pygit/refs`` and shadow entries from
-``.pygit/packed-refs``. ``HEAD`` may be symbolic or detached. The public API
-keeps the original branch/tag/remote helpers while making packed storage
-transparent to callers.
+``.pygit/packed-refs``. ``HEAD`` and remote default-branch refs may be
+symbolic. The public API keeps the original branch/tag/remote helpers while
+making packed storage transparent to callers.
 """
 
 from __future__ import annotations
@@ -219,6 +219,44 @@ class RefStore:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(sha, encoding="utf-8")
 
+    def get_remote_head(self, remote: str) -> Optional[str]:
+        """Return the branch named by ``refs/remotes/<remote>/HEAD``."""
+        path = self._path_under(self._remotes, f"{remote}/HEAD")
+        if not path.exists():
+            return None
+        raw = path.read_text(encoding="utf-8").strip()
+        prefix = f"ref: refs/remotes/{remote}/"
+        if not raw.startswith(prefix):
+            raise RuntimeError(
+                f"Malformed remote HEAD refs/remotes/{remote}/HEAD: {raw!r}"
+            )
+        branch = raw[len(prefix) :]
+        if not branch:
+            raise RuntimeError(
+                f"Malformed remote HEAD refs/remotes/{remote}/HEAD: {raw!r}"
+            )
+        return branch
+
+    def set_remote_head(self, remote: str, branch: str) -> None:
+        """Point a remote's symbolic ``HEAD`` at one tracking branch."""
+        if not branch:
+            raise ValueError("Remote HEAD branch must be non-empty")
+        # Validate both components through the same traversal guard used for refs.
+        self._path_under(self._remotes, f"{remote}/{branch}")
+        path = self._path_under(self._remotes, f"{remote}/HEAD")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"ref: refs/remotes/{remote}/{branch}",
+            encoding="utf-8",
+        )
+
+    def delete_remote_head(self, remote: str) -> None:
+        """Delete ``refs/remotes/<remote>/HEAD`` if it exists."""
+        path = self._path_under(self._remotes, f"{remote}/HEAD")
+        if path.exists():
+            path.unlink()
+            self._prune_empty_parents(path.parent, self._remotes)
+
     def delete_remote(self, remote: str, branch: Optional[str] = None) -> None:
         p = self._path_under(
             self._remotes,
@@ -256,6 +294,16 @@ class RefStore:
         if old_path.exists():
             new_path.parent.mkdir(parents=True, exist_ok=True)
             old_path.rename(new_path)
+            head_path = new_path / "HEAD"
+            if head_path.exists():
+                raw = head_path.read_text(encoding="utf-8").strip()
+                old_target = f"ref: {old_prefix}"
+                if raw.startswith(old_target):
+                    suffix = raw[len(old_target) :]
+                    head_path.write_text(
+                        f"ref: {new_prefix}{suffix}",
+                        encoding="utf-8",
+                    )
 
         if packed_old:
             rewritten = []
@@ -279,6 +327,10 @@ class RefStore:
 
         root = self._path_under(self._remotes, remote)
         loose = set(self._list_under(root)) if root.exists() else set()
+        # ``HEAD`` is a symbolic alias, not a remote branch. Excluding it from
+        # the branch-only view also prevents prune logic from treating it as a
+        # stale advertised head.
+        loose.discard("HEAD")
         prefix = f"refs/remotes/{remote}/"
         packed = {
             name[len(prefix) :]
@@ -297,7 +349,7 @@ class RefStore:
         old_sha = self.get_stash()
         self._stash.parent.mkdir(parents=True, exist_ok=True)
         self._stash.write_text(sha, encoding="utf-8")
-        self._append_reflog("refs/stash", old_sha, sha, message)
+        self._append_reflog(f"refs/stash", old_sha, sha, message)
 
     def delete_stash(self, message: str = "stash pop") -> None:
         old_sha = self.get_stash()
@@ -347,6 +399,10 @@ class RefStore:
             remote_sha = self.get_remote(remote, branch_name)
             if remote_sha:
                 return remote_sha
+        # Git's revision rules allow a remote name to stand for its symbolic
+        # refs/remotes/<remote>/HEAD target.
+        if self.get_remote_head(name) is not None:
+            return self.get_remote(name, "HEAD")
         return None
 
     # ------------------------------------------------------------------
