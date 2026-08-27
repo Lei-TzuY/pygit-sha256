@@ -25,6 +25,13 @@ def run_fetch(argv: Sequence[str]) -> int:
         description="Download objects and update configured remote-tracking refs.",
     )
     parser.add_argument("remote", nargs="?", metavar="REMOTE")
+    parser.add_argument("refspecs", nargs="*", metavar="REFSPEC")
+    parser.add_argument(
+        "-a",
+        "--append",
+        action="store_true",
+        help="append to FETCH_HEAD instead of overwriting it",
+    )
 
     prune_group = parser.add_mutually_exclusive_group()
     prune_group.add_argument(
@@ -85,6 +92,8 @@ def run_fetch(argv: Sequence[str]) -> int:
         prune=args.prune,
         prune_tags=args.prune_tags,
         tags=args.tags,
+        refspecs=args.refspecs or None,
+        append_fetch_head=args.append,
     )
     suffix = f"; pruned {len(result['pruned'])} refs" if result["pruned"] else ""
     print(f"Fetched {len(result['refs'])} refs from {remote}{suffix}")
