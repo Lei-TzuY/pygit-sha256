@@ -2,7 +2,7 @@
 
 The helpers here intentionally expose the remote's native SHA-1 ref namespace.
 They do not fetch packs, import objects, update tracking refs, or mutate local
-configuration.  pygit's internal object store remains SHA-256 based.
+configuration. pygit's internal object store remains SHA-256 based.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
 from .remote import SmartHttpClient
+from .remote_urls import fetch_url
 from .repo import Repository
 
 
@@ -52,7 +53,7 @@ def resolve_remote_url(source: str, repo: Optional[Repository] = None) -> str:
             f"Unknown remote: {source!r}; use an HTTP(S) URL outside a repository"
         )
     try:
-        url = repo.list_remotes()[source]
+        url = fetch_url(repo, source)
     except KeyError as exc:
         raise KeyError(f"Unknown remote: {source!r}") from exc
     return _validate_http_url(url)
