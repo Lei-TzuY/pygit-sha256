@@ -6,7 +6,8 @@ SHA-256-native, so object-name fields are 64 hexadecimal characters rather
 than Git's SHA-1-width examples. Phase 152 adds the optional stash-count header
 using the repository's strict reflog reader. Phase 154 threads Git's untracked
 path modes through the same normalized presentation layer. Phase 159 adds
-porcelain-v2 type-2 records for staged renames.
+porcelain-v2 type-2 records for staged renames; Phase 160 extends the same
+record form to staged copies using ``C<score>`` metadata.
 """
 
 from __future__ import annotations
@@ -84,6 +85,7 @@ def porcelain_v2_lines(
     show_stash: bool = False,
     untracked_mode: str = "normal",
     renames: bool = True,
+    copies: bool = False,
     rename_threshold: int = 50,
 ) -> List[str]:
     """Return porcelain-v2 headers and records without final terminators."""
@@ -110,6 +112,7 @@ def porcelain_v2_lines(
         ignored=ignored,
         untracked_mode=untracked_mode,
         renames=renames,
+        copies=copies,
         rename_threshold=rename_threshold,
     ):
         path = record.path
@@ -143,18 +146,23 @@ def porcelain_v2_lines(
             index_entry = repo.index.get(path)
             if head_entry is None or index_entry is None:
                 raise RuntimeError(
-                    "rename metadata disappeared while rendering status: "
+                    "rename/copy metadata disappeared while rendering status: "
                     f"{source!r} -> {path!r}"
                 )
             head_oid, head_mode = head_entry
             xy = record.code.replace(" ", ".")
+            similarity_kind = record.code[0]
+            if similarity_kind not in {"R", "C"}:
+                raise RuntimeError(
+                    f"invalid type-2 status code {record.code!r} for {path!r}"
+                )
             score = record.score if record.score is not None else 100
             separator = "\0" if nul else "\t"
             lines.append(
                 "2 "
                 f"{xy} N... {head_mode} {index_entry.mode} "
                 f"{_worktree_mode(repo, path)} {head_oid} {index_entry.sha} "
-                f"R{score} {_path_field(path, nul=nul)}{separator}"
+                f"{similarity_kind}{score} {_path_field(path, nul=nul)}{separator}"
                 f"{_path_field(source, nul=nul)}"
             )
             continue
@@ -184,6 +192,7 @@ def render_porcelain_v2(
     show_stash: bool = False,
     untracked_mode: str = "normal",
     renames: bool = True,
+    copies: bool = False,
     rename_threshold: int = 50,
 ) -> str:
     """Render a complete porcelain-v2 stream."""
@@ -195,6 +204,7 @@ def render_porcelain_v2(
         show_stash=show_stash,
         untracked_mode=untracked_mode,
         renames=renames,
+        copies=copies,
         rename_threshold=rename_threshold,
     )
     if not lines:
