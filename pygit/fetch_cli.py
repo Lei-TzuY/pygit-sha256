@@ -47,6 +47,16 @@ def run_fetch(argv: Sequence[str]) -> int:
         action="store_true",
         help="append to FETCH_HEAD instead of overwriting it",
     )
+    parser.add_argument(
+        "--refmap",
+        action="append",
+        default=None,
+        metavar="REFSPEC",
+        help=(
+            "map command-line fetch refs with REFSPEC instead of "
+            "remote.<name>.fetch; an empty value disables configured mapping"
+        ),
+    )
 
     prune_group = parser.add_mutually_exclusive_group()
     prune_group.add_argument(
@@ -82,9 +92,12 @@ def run_fetch(argv: Sequence[str]) -> int:
     repo = find_repo()
     remote = args.remote or _default_fetch_remote(repo)
 
+    if args.refmap is not None and not args.refspecs:
+        raise RuntimeError("--refmap option is only meaningful with command-line refspec(s)")
+
     # Keep the established Phase183 `fetch_configured` seam for ordinary
-    # configured fetches. Explicit refspecs and --append need the richer
-    # Phase184 porcelain orchestration.
+    # configured fetches. Explicit refspecs, --refmap, and --append need the
+    # richer Phase184/185 porcelain orchestration.
     if not args.refspecs and not args.append:
         result = fetch_configured(
             repo,
@@ -102,6 +115,7 @@ def run_fetch(argv: Sequence[str]) -> int:
             prune_tags=args.prune_tags,
             tags=args.tags,
             refspecs=args.refspecs or None,
+            refmap=args.refmap,
             append_fetch_head=args.append,
         )
 
