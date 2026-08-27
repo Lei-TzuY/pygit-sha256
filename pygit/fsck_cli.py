@@ -10,6 +10,7 @@ from .entrypoint import _find_repo
 from .fsck import fsck
 from .fsck_diagnostics import annotated_tags, format_tag_diagnostic, root_commits
 from .fsck_lost_found import write_lost_found
+from .fsck_names import reachable_object_names, render_issue_with_name
 from .fsck_references import verify_references
 
 
@@ -65,6 +66,11 @@ def run_fsck(argv: Sequence[str]) -> int:
         help="also treat index entries as heads when explicit objects are supplied",
     )
     parser.add_argument(
+        "--name-objects",
+        action="store_true",
+        help="decorate reachable object diagnostics with rev-parse-style names",
+    )
+    parser.add_argument(
         "--no-references",
         action="store_true",
         help="skip the independent reference-database consistency check",
@@ -93,6 +99,7 @@ def run_fsck(argv: Sequence[str]) -> int:
     if not args.no_references:
         report.issues.extend(verify_references(repo))
 
+    names = reachable_object_names(repo, report) if args.name_objects else {}
     for issue in sorted(
         report.issues,
         key=lambda item: (
@@ -102,7 +109,10 @@ def run_fsck(argv: Sequence[str]) -> int:
             item.source or "",
         ),
     ):
-        print(issue.render(), file=sys.stderr)
+        if args.name_objects:
+            print(render_issue_with_name(issue, names), file=sys.stderr)
+        else:
+            print(issue.render(), file=sys.stderr)
 
     recovery_failed = False
     if args.lost_found and not report.errors:
@@ -118,10 +128,13 @@ def run_fsck(argv: Sequence[str]) -> int:
     if not args.connectivity_only:
         if args.root:
             for oid in root_commits(repo, report):
-                print(f"root {oid}")
+                suffix = f" ({names[oid]})" if oid in names else ""
+                print(f"root {oid}{suffix}")
         if args.tags:
             for entry in annotated_tags(repo, report):
-                print(format_tag_diagnostic(entry))
+                text = format_tag_diagnostic(entry)
+                suffix = f" ({names[entry.oid]})" if entry.oid in names else ""
+                print(text + suffix)
 
     if args.unreachable:
         selected = report.unreachable
@@ -138,7 +151,8 @@ def run_fsck(argv: Sequence[str]) -> int:
             kind = repo.store.read(oid).type_name.decode("ascii", "replace")
         except Exception:
             kind = "object"
-        print(f"{label} {kind} {oid}")
+        suffix = f" ({names[oid]})" if oid in names else ""
+        print(f"{label} {kind} {oid}{suffix}")
 
     failed = bool(report.errors) or recovery_failed or (args.strict and bool(report.warnings))
     return 1 if failed else 0
