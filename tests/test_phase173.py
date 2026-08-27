@@ -80,7 +80,10 @@ def test_follow_tags_selects_reachable_annotated_tags_only(tmp_path, monkeypatch
     repo.tag("ann-base", annotated=True, message="base")
     repo.tag("light-base")
 
-    repo.branch("other")
+    # Repository.branch() is a legacy convenience that also switches HEAD.
+    # Create the divergence point directly so this test models native
+    # `git branch other` while leaving main checked out for the next commit.
+    repo.refs.set_branch("other", base, message="test: create other")
     tip = _commit(repo, "main.txt", "main")
     repo.tag("ann-tip", annotated=True, message="tip")
 
