@@ -117,9 +117,9 @@ def run_ls_files(argv: Sequence[str]) -> int:
             )
         )
 
-    # Index selectors and --others can be combined.  Preserve deterministic
-    # output while avoiding duplicate plain path records.
-    lines = sorted(dict.fromkeys(lines))
+    # Preserve index-plumbing order (notably stage 1/2/3 ordering) while
+    # de-duplicating combined selectors. ``other_files`` is already sorted.
+    lines = list(dict.fromkeys(lines))
     if lines:
         separator = "\x00" if args.z else "\n"
         sys.stdout.write(separator.join(lines) + separator)
