@@ -47,15 +47,18 @@ def test_add_rejects_existing_legacy_or_ini_remote(tmp_path):
 def test_rename_moves_multivalue_remote_config_and_references(tmp_path):
     repo = Repository.init(str(tmp_path))
     add_remote(repo, "origin", "https://example.test/fetch-a.git")
-    set_remote_url(repo, "origin", "https://example.test/fetch-b.git", add=True)
-    set_remote_url(repo, "origin", "https://example.test/push-a.git", push=True, add=True)
-    set_remote_url(repo, "origin", "https://example.test/push-b.git", push=True, add=True)
+    # Write scalar config first. GitConfig.set() is the older scalar writer and
+    # intentionally does not preserve duplicate keys; Phase178 set-url is the
+    # source-order-preserving multi-value writer under test here.
     repo.config_set("remote", "origin.mirror", "true")
     repo.config_set("remote", "pushDefault", "origin")
     repo.config_set("branch", "main.remote", "origin")
     repo.config_set("branch", "main.merge", "refs/heads/main")
     repo.config_set("branch", "main.pushRemote", "origin")
     repo.config_set("remotes", "fanout", "origin backup")
+    set_remote_url(repo, "origin", "https://example.test/fetch-b.git", add=True)
+    set_remote_url(repo, "origin", "https://example.test/push-a.git", push=True, add=True)
+    set_remote_url(repo, "origin", "https://example.test/push-b.git", push=True, add=True)
     repo.refs.set_remote("origin", "main", "a" * 64)
     repo._write_native_map({"b" * 64: "c" * 40}, "origin")
 
