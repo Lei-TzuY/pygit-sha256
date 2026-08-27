@@ -63,6 +63,7 @@ def test_ignored_requires_standard_excludes(tmp_path: Path) -> None:
 def test_cli_others_exclude_standard_and_nul(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _repo(tmp_path)
     monkeypatch.chdir(repo.worktree)
+    capsys.readouterr()
     (repo.worktree / ".pygitignore").write_text("*.tmp\n", encoding="utf-8")
     (repo.worktree / "plain.txt").write_text("plain\n", encoding="utf-8")
     (repo.worktree / "scratch.tmp").write_text("tmp\n", encoding="utf-8")
@@ -81,7 +82,8 @@ def test_cli_others_exclude_standard_and_nul(tmp_path: Path, monkeypatch, capsys
 def test_cli_can_union_cached_and_other_paths(tmp_path: Path, monkeypatch, capsys) -> None:
     repo = _repo(tmp_path)
     monkeypatch.chdir(repo.worktree)
+    capsys.readouterr()
     (repo.worktree / "new.txt").write_text("new\n", encoding="utf-8")
 
     assert dispatch(["ls-files", "--cached", "--others"]) == 0
-    assert capsys.readouterr().out.splitlines() == ["new.txt", "tracked.txt"]
+    assert capsys.readouterr().out.splitlines() == ["tracked.txt", "new.txt"]
