@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .index_plumbing import ls_files
+from .ls_files_others import other_files
 from .repo import Repository
 
 
@@ -52,6 +53,23 @@ def run_ls_files(argv: Sequence[str]) -> int:
         help="show tracked paths modified in the worktree",
     )
     parser.add_argument(
+        "-o",
+        "--others",
+        action="store_true",
+        help="show untracked worktree paths",
+    )
+    parser.add_argument(
+        "-i",
+        "--ignored",
+        action="store_true",
+        help="show only ignored untracked paths (requires --others --exclude-standard)",
+    )
+    parser.add_argument(
+        "--exclude-standard",
+        action="store_true",
+        help="apply .gitignore, .pygitignore, and .pygit/info/exclude rules",
+    )
+    parser.add_argument(
         "--error-unmatch",
         action="store_true",
         help="fail if any supplied path pattern matches no index entry",
@@ -60,17 +78,48 @@ def run_ls_files(argv: Sequence[str]) -> int:
     parser.add_argument("path", nargs="*", metavar="PATH")
     args = parser.parse_args(list(argv))
 
+    if args.ignored and not args.others:
+        parser.error("--ignored currently requires --others")
+    if args.ignored and not args.exclude_standard:
+        parser.error("--ignored requires --exclude-standard")
+    if args.exclude_standard and not args.others:
+        parser.error("--exclude-standard currently applies to --others")
+    if args.error_unmatch and args.others and not any(
+        (args.cached, args.stage, args.unmerged, args.deleted, args.modified)
+    ):
+        parser.error("--error-unmatch applies to index selectors, not --others-only mode")
+
     repo = _find_repo()
-    lines = ls_files(
-        repo,
-        cached=args.cached,
-        stage=args.stage,
-        unmerged=args.unmerged,
-        deleted=args.deleted,
-        modified=args.modified,
-        patterns=args.path,
-        error_unmatch=args.error_unmatch,
+    lines = []
+    index_selector_requested = any(
+        (args.cached, args.stage, args.unmerged, args.deleted, args.modified)
     )
+    if index_selector_requested or not args.others:
+        lines.extend(
+            ls_files(
+                repo,
+                cached=args.cached,
+                stage=args.stage,
+                unmerged=args.unmerged,
+                deleted=args.deleted,
+                modified=args.modified,
+                patterns=args.path,
+                error_unmatch=args.error_unmatch,
+            )
+        )
+    if args.others:
+        lines.extend(
+            other_files(
+                repo,
+                ignored=args.ignored,
+                exclude_standard=args.exclude_standard,
+                patterns=args.path,
+            )
+        )
+
+    # Preserve index-plumbing order (notably stage 1/2/3 ordering) while
+    # de-duplicating combined selectors. ``other_files`` is already sorted.
+    lines = list(dict.fromkeys(lines))
     if lines:
         separator = "\x00" if args.z else "\n"
         sys.stdout.write(separator.join(lines) + separator)
