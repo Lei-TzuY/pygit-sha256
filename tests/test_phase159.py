@@ -52,6 +52,9 @@ def test_subdirectory_pathspec_can_reach_parent(tmp_path: Path, monkeypatch, cap
     capsys.readouterr()
 
     assert dispatch(["ls-files", "../root.txt"]) == 0
+    assert capsys.readouterr().out == "../root.txt\n"
+
+    assert dispatch(["ls-files", "--full-name", "../root.txt"]) == 0
     assert capsys.readouterr().out == "root.txt\n"
 
 
