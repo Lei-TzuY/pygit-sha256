@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import posixpath
 import sys
 from pathlib import Path
@@ -48,6 +49,28 @@ def _root_patterns(prefix: str, patterns: Sequence[str]) -> list[str]:
     return translated
 
 
+def _record_path(line: str) -> str:
+    """Extract the repository-relative path from a formatted ls-files record."""
+    _metadata, separator, path = line.rpartition("\t")
+    return path if separator else line
+
+
+def _pattern_matches_record(pattern: str, line: str) -> bool:
+    """Return whether one root-relative pathspec matches an emitted record."""
+    path = _record_path(line).rstrip("/")
+    pattern = pattern.strip("/")
+    if any(ch in pattern for ch in "*?["):
+        return fnmatch.fnmatchcase(path, pattern)
+    return path == pattern or path.startswith(pattern + "/")
+
+
+def _validate_error_unmatch(patterns: Sequence[str], lines: Sequence[str]) -> None:
+    """Require every pathspec to match at least one record selected for output."""
+    for pattern in patterns:
+        if not any(_pattern_matches_record(pattern, line) for line in lines):
+            raise KeyError(f"pathspec {pattern!r} did not match any selected file")
+
+
 def _display_line(line: str, prefix: str, *, full_name: bool) -> str:
     """Render a root-relative ls-files record from the caller's directory."""
     if full_name or not prefix:
@@ -83,7 +106,7 @@ def run_ls_files(argv: Sequence[str]) -> int:
     parser.add_argument("--directory", action="store_true", help="show wholly-untracked directories with a trailing slash")
     parser.add_argument("--no-empty-directory", action="store_true", help="with --directory, suppress trees containing no files")
     parser.add_argument("--full-name", action="store_true", help="show paths relative to the repository root")
-    parser.add_argument("--error-unmatch", action="store_true", help="fail if any supplied path pattern matches no index entry")
+    parser.add_argument("--error-unmatch", action="store_true", help="fail if any supplied path pattern matches no selected file")
     parser.add_argument("-z", action="store_true", help="terminate records with NUL")
     parser.add_argument("path", nargs="*", metavar="PATH")
     args = parser.parse_args(list(argv))
@@ -98,10 +121,6 @@ def run_ls_files(argv: Sequence[str]) -> int:
         parser.error("--directory requires --others")
     if args.no_empty_directory and not args.directory:
         parser.error("--no-empty-directory requires --directory")
-    if args.error_unmatch and (args.others or args.killed) and not any(
-        (args.cached, args.stage, args.unmerged, args.deleted, args.modified)
-    ):
-        parser.error("--error-unmatch currently applies to index selectors")
 
     repo = _find_repo()
     prefix = _cwd_prefix(repo)
@@ -123,7 +142,9 @@ def run_ls_files(argv: Sequence[str]) -> int:
                 deleted=args.deleted,
                 modified=args.modified,
                 patterns=patterns,
-                error_unmatch=args.error_unmatch,
+                # Validate after every selector has contributed so mixed
+                # index/worktree queries use the union of selected records.
+                error_unmatch=False,
             )
         )
     if args.others:
@@ -141,6 +162,9 @@ def run_ls_files(argv: Sequence[str]) -> int:
         lines.extend(killed_files(repo, patterns=patterns))
 
     lines = list(dict.fromkeys(lines))
+    if args.error_unmatch and patterns:
+        _validate_error_unmatch(patterns, lines)
+
     lines = [_display_line(line, prefix, full_name=args.full_name) for line in lines]
     if lines:
         separator = "\x00" if args.z else "\n"
