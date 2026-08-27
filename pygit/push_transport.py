@@ -4,7 +4,8 @@ Phase166 introduced branch-to-branch destination overrides. Phase167 extends the
 same SHA-256-native exporter path to tags and deletion refspecs while keeping
 ``Repository.push(remote, force=...)`` untouched for compatibility. Phase168
 adds an opt-in atomic batch path without changing the historical single-ref
-helpers. Phase169 adds optional force-with-lease checks to both paths.
+helpers. Phase169 adds optional force-with-lease checks to both paths. Phase171
+adds opt-in receive-pack push-options without changing no-option call behavior.
 """
 
 from __future__ import annotations
@@ -15,6 +16,11 @@ from .hooks import HookRunner
 from .push_atomic import AtomicSmartHttpPushClient
 from .push_defaults import PushSpec
 from .push_lease import LeasePolicy, require_lease
+from .push_options import (
+    PushOptionAtomicSmartHttpPushClient,
+    PushOptionSmartHttpPushClient,
+    require_push_options_capability,
+)
 from .remote import NativeExporter, SmartHttpPushClient
 from .repo import Repository
 
@@ -48,6 +54,7 @@ def push_ref(
     *,
     force: bool = False,
     lease: Optional[LeasePolicy] = None,
+    push_options: Sequence[str] = (),
 ) -> Dict[str, object]:
     """Push one fully-qualified local ref to one fully-qualified remote ref."""
     if not source_ref.startswith("refs/") or not target_ref.startswith("refs/"):
@@ -56,11 +63,18 @@ def push_ref(
     if not source_sha:
         raise KeyError(f"Unknown local ref: '{source_ref}'")
 
+    option_values = tuple(push_options)
     settings = _settings(repo, remote)
     url = str(settings["url"])
     _run_pre_push(repo, remote, url)
-    client = SmartHttpPushClient(url)
+    client = (
+        PushOptionSmartHttpPushClient(url)
+        if option_values
+        else SmartHttpPushClient(url)
+    )
     advertisement = client.discover()
+    if option_values:
+        require_push_options_capability(advertisement, option_values)
     old_native = advertisement.refs.get(target_ref, _ZERO_NATIVE_OID)
     native_map = repo._read_native_map(remote)
     old_internal = _internal_for_native(native_map, old_native) if old_native != _ZERO_NATIVE_OID else None
@@ -98,7 +112,16 @@ def push_ref(
             "objects": 0,
         }
 
-    result = client.push(target_ref, new_native, exporter.objects, advertisement=advertisement)
+    if option_values:
+        result = client.push_with_options(
+            target_ref,
+            new_native,
+            exporter.objects,
+            option_values,
+            advertisement=advertisement,
+        )
+    else:
+        result = client.push(target_ref, new_native, exporter.objects, advertisement=advertisement)
     native_map.update(exporter.converted)
     repo._write_native_map(native_map, remote)
     if target_ref.startswith("refs/heads/"):
@@ -122,15 +145,23 @@ def delete_remote_ref(
     *,
     force: bool = False,
     lease: Optional[LeasePolicy] = None,
+    push_options: Sequence[str] = (),
 ) -> Dict[str, object]:
     """Delete one fully-qualified remote ref using a zero object ID update."""
     if not target_ref.startswith("refs/"):
         raise RuntimeError("delete_remote_ref requires a fully-qualified ref")
+    option_values = tuple(push_options)
     settings = _settings(repo, remote)
     url = str(settings["url"])
     _run_pre_push(repo, remote, url)
-    client = SmartHttpPushClient(url)
+    client = (
+        PushOptionSmartHttpPushClient(url)
+        if option_values
+        else SmartHttpPushClient(url)
+    )
     advertisement = client.discover()
+    if option_values:
+        require_push_options_capability(advertisement, option_values)
     old_native = advertisement.refs.get(target_ref, _ZERO_NATIVE_OID)
     native_map = repo._read_native_map(remote)
     if not force:
@@ -138,7 +169,16 @@ def delete_remote_ref(
     if old_native == _ZERO_NATIVE_OID:
         return {"status": "up-to-date", "remote": remote, "ref": target_ref, "objects": 0}
 
-    result = client.push(target_ref, _ZERO_NATIVE_OID, [], advertisement=advertisement)
+    if option_values:
+        result = client.push_with_options(
+            target_ref,
+            _ZERO_NATIVE_OID,
+            {},
+            option_values,
+            advertisement=advertisement,
+        )
+    else:
+        result = client.push(target_ref, _ZERO_NATIVE_OID, [], advertisement=advertisement)
     if target_ref.startswith("refs/heads/"):
         repo.refs.delete_remote(remote, target_ref[len("refs/heads/") :])
     return {
@@ -159,15 +199,18 @@ def push_branch(
     *,
     force: bool = False,
     lease: Optional[LeasePolicy] = None,
+    push_options: Sequence[str] = (),
 ) -> Dict[str, object]:
     """Compatibility wrapper for the Phase166 branch-aware transport."""
+    kwargs = {"force": force, "lease": lease}
+    if push_options:
+        kwargs["push_options"] = push_options
     result = push_ref(
         repo,
         remote,
         f"refs/heads/{source_branch}",
         f"refs/heads/{target_branch}",
-        force=force,
-        lease=lease,
+        **kwargs,
     )
     result["source_branch"] = source_branch
     result["branch"] = target_branch
@@ -181,23 +224,32 @@ def push_atomic_specs(
     *,
     force: bool = False,
     lease: Optional[LeasePolicy] = None,
+    push_options: Sequence[str] = (),
 ) -> List[Tuple[PushSpec, Dict[str, object]]]:
     """Push *specs* as one receive-pack atomic transaction.
 
-    All local/source, lease, and fast-forward checks are completed before the
-    request is sent. Local native mappings and remote-tracking refs are updated
-    only after the atomic receive-pack request succeeds.
+    All local/source, lease, push-option capability, and fast-forward checks are
+    completed before the request is sent. Local native mappings and
+    remote-tracking refs are updated only after the atomic receive-pack request
+    succeeds.
     """
     if not specs:
         return []
 
+    option_values = tuple(push_options)
     settings = _settings(repo, remote)
     url = str(settings["url"])
     _run_pre_push(repo, remote, url)
-    client = AtomicSmartHttpPushClient(url)
+    client = (
+        PushOptionAtomicSmartHttpPushClient(url)
+        if option_values
+        else AtomicSmartHttpPushClient(url)
+    )
     advertisement = client.discover()
     if "atomic" not in advertisement.capabilities:
         raise RuntimeError("Remote does not support atomic pushes.")
+    if option_values:
+        require_push_options_capability(advertisement, option_values)
 
     native_map = repo._read_native_map(remote)
     prepared = []
@@ -307,7 +359,15 @@ def push_atomic_specs(
 
     batch_objects = 0
     if commands:
-        batch = client.push_many(commands, exporter.objects, advertisement=advertisement)
+        if option_values:
+            batch = client.push_many_with_options(
+                commands,
+                exporter.objects,
+                option_values,
+                advertisement=advertisement,
+            )
+        else:
+            batch = client.push_many(commands, exporter.objects, advertisement=advertisement)
         batch_objects = batch.objects_sent
 
     # Do not mutate local state until the atomic server operation has succeeded.
