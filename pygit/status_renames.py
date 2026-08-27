@@ -1,22 +1,25 @@
-"""Rename detection helpers for status porcelain/short rendering.
+"""Rename/copy detection helpers for status rendering.
 
-Phase 159 keeps rename detection outside :mod:`pygit.repo` so the historical
-``Repository.status()`` contract stays stable. Candidates are derived from the
-HEAD tree and stage-zero index: a path deleted from HEAD is paired with a path
-added to the index when their blob contents meet the configured similarity
-threshold.
+Phase 159 added staged HEAD-to-index rename matching. Phase 160 extends the
+same compact similarity engine with Git-style copy candidates while keeping
+``Repository.status()`` unchanged.
 
-Pygit uses a deterministic byte-sequence similarity score. Exact object-id
-matches are always R100; non-identical blobs use ``difflib.SequenceMatcher``.
-This is intentionally compact and educational rather than a byte-for-byte
-reimplementation of Git's diffcore-rename internals.
+The important compatibility boundary is source eligibility: ordinary Git copy
+detection considers a source only when that path itself changed in the same
+HEAD-to-index changeset. Unmodified source files are intentionally not searched
+(the much more expensive ``--find-copies-harder`` behavior is a separate
+feature).
+
+Pygit uses deterministic byte-sequence similarity. Exact object-id matches are
+100; non-identical blobs use ``difflib.SequenceMatcher``. This keeps the public
+threshold contract useful without claiming byte-for-byte diffcore equivalence.
 """
 
 from __future__ import annotations
 
 import difflib
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .objects import BlobObject
 from .repo import Repository
@@ -25,6 +28,15 @@ from .repo import Repository
 @dataclass(frozen=True)
 class RenameMatch:
     """One staged rename from a HEAD pathname to an index pathname."""
+
+    source: str
+    target: str
+    score: int
+
+
+@dataclass(frozen=True)
+class CopyMatch:
+    """One staged copy from a changed HEAD pathname to an added index path."""
 
     source: str
     target: str
@@ -96,6 +108,18 @@ def _similarity_score(
     return max(0, min(100, int(round(ratio * 100))))
 
 
+def _status_trees(
+    repo: Repository,
+) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, object], Set[str]]:
+    head_oid = repo.refs.resolve_head()
+    if not head_oid:
+        return {}, {}, set()
+    head_entries: Dict[str, Tuple[str, str]] = repo._commit_tree_entries(head_oid)
+    index_entries = repo.index.entries
+    conflict_paths = {entry.path for entry in repo.index.stage_entries()}
+    return head_entries, index_entries, conflict_paths
+
+
 def detect_staged_renames(
     repo: Repository,
     *,
@@ -111,12 +135,9 @@ def detect_staged_renames(
     if not 0 <= threshold <= 100:
         raise ValueError("rename similarity threshold must be between 0 and 100")
 
-    head_oid = repo.refs.resolve_head()
-    if not head_oid:
+    head_entries, index_entries, conflict_paths = _status_trees(repo)
+    if not head_entries:
         return []
-    head_entries: Dict[str, Tuple[str, str]] = repo._commit_tree_entries(head_oid)
-    index_entries = repo.index.entries
-    conflict_paths = {entry.path for entry in repo.index.stage_entries()}
 
     deleted = [
         path
@@ -153,3 +174,68 @@ def detect_staged_renames(
         matches.append(RenameMatch(source=source, target=target, score=score))
 
     return sorted(matches, key=lambda match: (match.target, match.source))
+
+
+def detect_staged_copies(
+    repo: Repository,
+    *,
+    threshold: int = 50,
+    exclude_targets: Optional[Set[str]] = None,
+) -> List[CopyMatch]:
+    """Detect copies from changed HEAD paths to newly-added index paths.
+
+    This mirrors normal ``-C`` source eligibility: only paths that exist in
+    both HEAD and the stage-zero index *and changed in that comparison* are
+    considered as copy sources. An unmodified tracked file is not searched as
+    a source; that belongs to Git's expensive ``--find-copies-harder`` mode.
+
+    A source may feed more than one copy target, while each target selects only
+    its best qualifying source. Rename targets can be excluded so rename pairing
+    is applied before copy classification, matching diffcore's user-visible
+    precedence.
+    """
+    if not 0 <= threshold <= 100:
+        raise ValueError("copy similarity threshold must be between 0 and 100")
+
+    head_entries, index_entries, conflict_paths = _status_trees(repo)
+    if not head_entries:
+        return []
+
+    excluded = exclude_targets or set()
+    added = [
+        path
+        for path in index_entries
+        if path not in head_entries
+        and path not in conflict_paths
+        and path not in excluded
+    ]
+    changed_sources = []
+    for path, (head_oid, head_mode) in head_entries.items():
+        if path in conflict_paths:
+            continue
+        index_entry = index_entries.get(path)
+        if index_entry is None:
+            continue
+        if index_entry.sha != head_oid or index_entry.mode != head_mode:
+            changed_sources.append(path)
+
+    if not added or not changed_sources:
+        return []
+
+    cache: Dict[str, Optional[bytes]] = {}
+    matches: List[CopyMatch] = []
+    for target in sorted(added):
+        target_entry = index_entries[target]
+        candidates: List[Tuple[int, str]] = []
+        for source in changed_sources:
+            source_oid, _source_mode = head_entries[source]
+            score = _similarity_score(repo, source_oid, target_entry.sha, cache)
+            if score >= threshold:
+                candidates.append((score, source))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        score, source = candidates[0]
+        matches.append(CopyMatch(source=source, target=target, score=score))
+
+    return matches
