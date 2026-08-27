@@ -106,4 +106,5 @@ def test_status_help_documents_z_implication(tmp_path: Path) -> None:
     result = _run(repo, "status", "--help")
 
     assert result.returncode == 0
-    assert "implies --porcelain=v1" in result.stdout
+    normalized = " ".join(result.stdout.split())
+    assert "implies --porcelain=v1" in normalized
