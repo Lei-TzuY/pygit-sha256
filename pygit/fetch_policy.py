@@ -3,6 +3,8 @@
 Phase183 keeps policy decisions separate from smart-HTTP transport. It resolves
 CLI/config precedence for pruning and tag behavior and parses the fetch
 refspecs used by named remotes, clone mappings, set-branches, and tag pruning.
+Phase184 additionally accepts command-line shorthand destinations such as
+``maint:tmp`` by normalizing ``tmp`` to ``refs/heads/tmp``.
 """
 
 from __future__ import annotations
@@ -104,7 +106,7 @@ def parse_fetch_refspec(raw: str) -> FetchRefspec:
         raise ValueError(f"unsupported fetch refspec pattern: {raw!r}")
     if destination is not None:
         if not destination.startswith("refs/"):
-            raise ValueError(f"fetch destination must start with refs/: {destination!r}")
+            destination = f"refs/heads/{destination}"
         if destination.count("*") > 1:
             raise ValueError(f"unsupported fetch destination pattern: {raw!r}")
         if ("*" in source) != ("*" in destination):
@@ -119,11 +121,8 @@ def configured_fetch_refspecs(repo: Repository, remote: str) -> List[FetchRefspe
     values = config.get_all("remote", f"{remote}.fetch")
     if values:
         return [parse_fetch_refspec(value) for value in values]
-    # Phase182 made an absent fetch key meaningful once Git-style remote config
-    # exists: `remote set-branches <name>` can intentionally clear all mappings.
     if config.get("remote", f"{remote}.url") is not None:
         return []
-    # Historical JSON-only remotes keep pygit's all-heads compatibility default.
     return [parse_fetch_refspec(f"+refs/heads/*:refs/remotes/{remote}/*")]
 
 
