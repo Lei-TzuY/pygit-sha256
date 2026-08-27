@@ -60,13 +60,7 @@ def _display_line(line: str, prefix: str, *, full_name: bool) -> str:
 
     directory = path.endswith("/")
     bare_path = path[:-1] if directory else path
-    if bare_path == prefix:
-        relative = "."
-    elif bare_path.startswith(prefix + "/"):
-        relative = bare_path[len(prefix) + 1 :]
-    else:
-        return line
-
+    relative = posixpath.relpath(bare_path, prefix)
     if directory:
         relative += "/"
     return f"{metadata}\t{relative}" if separator else relative
