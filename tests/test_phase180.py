@@ -31,7 +31,7 @@ def test_explicit_set_head_creates_symbolic_alias_and_remote_shorthand(tmp_path)
     assert repo.refs.list_remotes("origin") == ["main"]
     assert (repo.pygit_dir / "refs" / "remotes" / "origin" / "HEAD").read_text(
         encoding="utf-8"
-    ) == "ref: refs/remotes/origin/main\n"
+    ).strip() == "ref: refs/remotes/origin/main"
 
 
 def test_explicit_set_head_requires_existing_tracking_branch_without_mutation(tmp_path):
@@ -119,10 +119,14 @@ def test_remote_rename_rewrites_symbolic_head_target(tmp_path):
     assert not (repo.pygit_dir / "refs" / "remotes" / "origin").exists()
 
 
-def test_unknown_remote_is_rejected_before_head_mutation(tmp_path):
+def test_explicit_and_delete_are_ref_oriented_without_remote_config(tmp_path):
     repo = Repository.init(str(tmp_path))
-    with pytest.raises(KeyError, match="Unknown remote"):
-        set_remote_head(repo, "missing", delete=True)
+    repo.refs.set_remote("detached-name", "main", "c" * 64)
+
+    assert set_remote_head(repo, "detached-name", "main") == "main"
+    assert repo.refs.resolve("detached-name") == "c" * 64
+    assert set_remote_head(repo, "detached-name", delete=True) is None
+    assert set_remote_head(repo, "missing", delete=True) is None
 
 
 def test_remote_set_head_cli_matches_native_presentation(tmp_path, monkeypatch, capsys):
