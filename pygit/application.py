@@ -24,6 +24,8 @@ from .ls_files_cli import run_ls_files
 from .ls_tree_cli import run_ls_tree
 from .merge_base_cli import run_merge_base
 from .pack_refs_cli import run_pack_refs
+from .pull_cli import run_pull
+from .push_cli import run_push
 from .read_tree_cli import run_read_tree
 from .reflog_expire_cli import run_reflog_expire
 from .reflog_show_cli import run_reflog_show
@@ -91,6 +93,14 @@ def main() -> None:
 
     if argv and argv[0] == "checkout":
         _run_safe(run_checkout, argv[1:])
+        return
+
+    if argv and argv[0] == "pull":
+        _run_safe(run_pull, argv[1:])
+        return
+
+    if argv and argv[0] == "push":
+        _run_safe(run_push, argv[1:])
         return
 
     if argv and argv[0] == "ls-tree":
