@@ -6,11 +6,14 @@ module normalizes its ordinary staged/unstaged/untracked data and overlays the
 seven Git porcelain conflict states derived from stages 1/2/3. Phase 151 adds
 porcelain-v2 rendering without changing that normalized status model. Phase 152
 adds reflog-backed stash-count reporting for long and porcelain-v2 status.
+Phase 153 makes short/porcelain-v1 pathname framing machine-safe and lets ``-z``
+imply porcelain v1, matching Git's command-line protocol.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -150,12 +153,28 @@ def _branch_header(result: dict) -> str:
     return f"## {branch}...{upstream_name}{suffix}"
 
 
+def _quote_path(path: str) -> str:
+    """Return Git-style C-quoted pathname text when a record needs quoting."""
+    if path and all(0x20 <= ord(ch) < 0x7f and ch not in {'"', '\\'} for ch in path):
+        return path
+    return json.dumps(path, ensure_ascii=False)
+
+
+def _short_path(path: str, *, nul: bool) -> str:
+    # Porcelain ``-z`` is explicitly raw: the NUL framing makes quoting
+    # unnecessary and preserves otherwise ambiguous newlines/backslashes.
+    return path if nul else _quote_path(path)
+
+
 def _print_short(repo: Repository, *, branch: bool, ignored: bool, nul: bool = False) -> None:
     result, _unmerged = _normalized_status(repo, ignored=ignored)
     lines: List[str] = []
     if branch:
         lines.append(_branch_header(result))
-    lines.extend(f"{record.code} {record.path}" for record in status_records(repo, ignored=ignored))
+    lines.extend(
+        f"{record.code} {_short_path(record.path, nul=nul)}"
+        for record in status_records(repo, ignored=ignored)
+    )
     if not lines:
         return
     separator = "\0" if nul else "\n"
@@ -245,7 +264,11 @@ def run_status(argv: Sequence[str]) -> int:
     )
     parser.add_argument("-b", "--branch", action="store_true", help="show branch/upstream information")
     parser.add_argument("--ignored", action="store_true", help="show ignored files")
-    parser.add_argument("-z", action="store_true", help="terminate porcelain records with NUL bytes")
+    parser.add_argument(
+        "-z",
+        action="store_true",
+        help="terminate porcelain records with NUL bytes; implies --porcelain=v1",
+    )
     parser.set_defaults(show_stash=False)
     parser.add_argument(
         "--show-stash",
@@ -262,7 +285,7 @@ def run_status(argv: Sequence[str]) -> int:
     args = parser.parse_args(list(argv))
 
     if args.z and args.porcelain is None:
-        parser.error("-z requires --porcelain")
+        args.porcelain = "v1"
 
     repo = _find_repo()
     if args.porcelain == "v2":
