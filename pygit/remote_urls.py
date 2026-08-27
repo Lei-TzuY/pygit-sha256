@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Iterable, Tuple
 
 from .config import GitConfig
@@ -89,12 +88,21 @@ def _replace_multivar(repo: Repository, remote: str, key: str, values: Iterable[
         kept.append("[remote]")
         remote_header_index = len(kept) - 1
 
-    insert_at = remote_header_index + 1
-    kept[insert_at:insert_at] = new_lines
+    kept[remote_header_index + 1 : remote_header_index + 1] = new_lines
     text = "\n".join(kept)
     if text:
         text += "\n"
     path.write_text(text, encoding="utf-8")
+
+
+def _sync_legacy_fetch_url(repo: Repository, remote: str, first_url: str) -> None:
+    """Keep the historical config.json endpoint aligned with the first fetch URL."""
+    config = repo._read_config()
+    settings = config.get("remotes", {}).get(remote)
+    if not settings:
+        raise KeyError(f"Unknown remote: '{remote}'")
+    settings["url"] = first_url
+    repo._write_config(config)
 
 
 def set_remote_url(
@@ -130,8 +138,7 @@ def set_remote_url(
             pattern = re.compile(url)
         except re.error as exc:
             raise ValueError(f"invalid URL regex '{url}': {exc}") from exc
-        matched = [value for value in values if pattern.search(value)]
-        if not matched:
+        if not any(pattern.search(value) for value in values):
             raise RuntimeError(f"No such URL found: {url}")
         remaining = [value for value in values if not pattern.search(value)]
         if not push and not remaining:
@@ -154,4 +161,6 @@ def set_remote_url(
             values[index] = url
 
     _replace_multivar(repo, remote, key, values)
+    if not push:
+        _sync_legacy_fetch_url(repo, remote, values[0])
     return tuple(values)
