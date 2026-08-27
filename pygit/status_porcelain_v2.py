@@ -3,7 +3,8 @@
 This layer reuses Phase 150's normalized status/conflict model and enriches it
 with the index/HEAD metadata required by porcelain v2.  The repository remains
 SHA-256-native, so object-name fields are 64 hexadecimal characters rather
-than Git's SHA-1-width examples.
+than Git's SHA-1-width examples. Phase 152 adds the optional stash-count header
+using the repository's strict reflog reader.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Iterable, List
 
 from .index import _mode_for
+from .reflog_show import show_reflog
 from .repo import Repository
 
 
@@ -68,12 +70,25 @@ def _branch_headers(repo: Repository, result: dict) -> List[str]:
     return lines
 
 
+def stash_count(repo: Repository) -> int:
+    """Return the number of stash entries from ``refs/stash``'s reflog.
+
+    A missing stash reflog is an empty stash. Existing malformed or unsafe
+    reflogs remain hard errors through Phase 72/128's strict reflog parser;
+    status must not silently manufacture a machine-readable count from damaged
+    metadata.
+    """
+
+    return len(show_reflog(repo, "stash"))
+
+
 def porcelain_v2_lines(
     repo: Repository,
     *,
     branch: bool = False,
     ignored: bool = False,
     nul: bool = False,
+    show_stash: bool = False,
 ) -> List[str]:
     """Return porcelain-v2 headers and records without terminators."""
     # Import lazily to avoid making status_cli's command adapter a dependency
@@ -84,6 +99,10 @@ def porcelain_v2_lines(
     lines: List[str] = []
     if branch:
         lines.extend(_branch_headers(repo, result))
+    if show_stash:
+        count = stash_count(repo)
+        if count:
+            lines.append(f"# stash {count}")
 
     head_entries = _head_entries(repo)
     unmerged_by_path = {entry.path: entry for entry in unmerged}
@@ -130,9 +149,16 @@ def render_porcelain_v2(
     branch: bool = False,
     ignored: bool = False,
     nul: bool = False,
+    show_stash: bool = False,
 ) -> str:
     """Render a complete porcelain-v2 stream."""
-    lines = porcelain_v2_lines(repo, branch=branch, ignored=ignored, nul=nul)
+    lines = porcelain_v2_lines(
+        repo,
+        branch=branch,
+        ignored=ignored,
+        nul=nul,
+        show_stash=show_stash,
+    )
     if not lines:
         return ""
     separator = "\0" if nul else "\n"
