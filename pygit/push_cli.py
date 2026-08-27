@@ -79,8 +79,6 @@ def run_push(argv: Sequence[str]) -> int:
         elif legacy_single:
             result = repo.push(remote, force=effective_force)
         elif spec.namespace == "heads":
-            # Retain the public Phase166 helper path so older callers/tests can
-            # still intercept branch destination pushes.
             result = push_branch(repo, remote, spec.source, spec.target, force=effective_force)
         else:
             result = push_ref(repo, remote, spec.source_ref, spec.target_ref, force=effective_force)
@@ -102,12 +100,15 @@ def run_push(argv: Sequence[str]) -> int:
         set_branch_upstream(repo, branch, TrackingSource(remote, spec.target, oid))
 
     for spec, result in results:
-        target = spec.target_ref
         if spec.delete:
-            print(f"Push result: {result['status']} {remote}/{target} ({result['objects']} objects)")
+            display = spec.target if spec.namespace == "heads" else spec.target_ref
+            print(f"Push result: {result['status']} {remote}/{display} ({result['objects']} objects)")
             continue
-        source = spec.source_ref
-        note = "" if source == target else f"{source} -> "
-        display_target = f"{remote}/{target}"
-        print(f"Push result: {result['status']} {note}{display_target} ({result['objects']} objects)")
+        if spec.namespace == "heads":
+            source_note = "" if spec.source == spec.target else f"{spec.source} -> "
+            display_target = f"{remote}/{spec.target}"
+        else:
+            source_note = "" if spec.source == spec.target else f"{spec.source_ref} -> "
+            display_target = f"{remote}/{spec.target_ref}"
+        print(f"Push result: {result['status']} {source_note}{display_target} ({result['objects']} objects)")
     return 0
