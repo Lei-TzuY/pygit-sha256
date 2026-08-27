@@ -50,16 +50,12 @@ def _entry(raw_line: str) -> Optional[Tuple[str, str]]:
 
 
 def _validate_branch(branch: str) -> None:
-    if not branch:
-        raise ValueError("tracked branch name must be non-empty")
+    # Native `git remote set-branches` treats each BRANCH token literally when
+    # constructing the same refspec as `remote add -t`; it does not validate a
+    # conventional branch name here. Keep that permissiveness while refusing
+    # bytes that cannot be represented safely in this text configuration.
     if "\x00" in branch or "\n" in branch or "\r" in branch:
-        raise ValueError("tracked branch name must not contain NUL or newline")
-    if branch.startswith("refs/"):
-        raise ValueError("remote set-branches expects branch names, not full refs")
-    if ":" in branch or branch.startswith(("+", "^")):
-        raise ValueError("remote set-branches expects branch names, not refspecs")
-    if branch.count("*") > 1:
-        raise ValueError("tracked branch patterns may contain at most one '*'")
+        raise ValueError("tracked branch token must not contain NUL or newline")
 
 
 def _fetch_refspec(remote: str, branch: str) -> str:
@@ -76,9 +72,9 @@ def set_remote_branches(
     """Replace or append ``remote.<name>.fetch`` branch mappings.
 
     Git's ``remote set-branches`` is equivalent to re-applying ``remote add -t``
-    branch selections.  Duplicate branch arguments are preserved, ``--add``
+    branch selections. Duplicate branch arguments are preserved, ``--add``
     appends rather than deduplicating, and an empty replacement list removes all
-    configured fetch mappings.  Existing tracking refs are deliberately left in
+    configured fetch mappings. Existing tracking refs are deliberately left in
     place until a later prune/removal operation.
     """
     if remote not in repo.list_remotes():
