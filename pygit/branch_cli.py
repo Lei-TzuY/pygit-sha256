@@ -34,8 +34,6 @@ def run_branch(argv: Sequence[str]) -> int:
     track_group.add_argument(
         "--track",
         dest="track",
-        nargs="?",
-        const="direct",
         choices=("direct", "inherit"),
         metavar="{direct,inherit}",
         help="set upstream tracking when creating a branch",
@@ -62,7 +60,8 @@ def run_branch(argv: Sequence[str]) -> int:
     parser.add_argument("--merged", nargs="?", const="HEAD", metavar="COMMIT")
     parser.add_argument("--no-merged", nargs="?", const="HEAD", metavar="COMMIT")
     parser.add_argument("names", nargs="*", metavar="BRANCH")
-    args = parser.parse_args(list(argv))
+    normalized = ["--track=direct" if token == "--track" else token for token in argv]
+    args = parser.parse_args(normalized)
 
     repo = find_repo()
 
