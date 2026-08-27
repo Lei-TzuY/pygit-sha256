@@ -12,12 +12,7 @@ from .repo import Repository
 
 @dataclass(frozen=True)
 class PushSpec:
-    """One local ref -> remote ref update.
-
-    ``source``/``target`` retain the Phase166 short branch representation for
-    branch pushes. Tag specs use short tag names with ``namespace='tags'``;
-    deletion specs carry an empty source.
-    """
+    """One local ref -> remote ref update."""
 
     source: str
     target: str
@@ -112,7 +107,7 @@ def _pattern_specs(repo: Repository, text: str, *, force: bool) -> Tuple[PushSpe
 
 
 def parse_push_refspec(repo: Repository, text: str) -> Tuple[PushSpec, ...]:
-    """Parse branch/tag, deletion, matching, and one-star pattern refspecs."""
+    """Parse positive branch/tag, deletion, matching, and pattern refspecs."""
     raw = text.strip()
     if not raw:
         raise RuntimeError("empty push refspec")
@@ -121,7 +116,7 @@ def parse_push_refspec(repo: Repository, text: str) -> Tuple[PushSpec, ...]:
     if body == ":":
         return (PushSpec(":", ":", force=force),)
     if body.startswith("^"):
-        raise RuntimeError("negative push refspecs are not supported yet")
+        raise RuntimeError("negative push refspec must be combined with a positive refspec")
     if body.count(":") > 1:
         raise RuntimeError(f"invalid push refspec: '{text}'")
     if "*" in body:
@@ -140,7 +135,6 @@ def parse_push_refspec(repo: Repository, text: str) -> Tuple[PushSpec, ...]:
         source_text, target_text = body.split(":", 1)
         src_ns, source = _source(repo, source_text)
         dst_ns, target = _ref_parts(target_text, field="destination")
-        # Git infers an unqualified destination namespace from the source.
         if not target_text.startswith("refs/"):
             dst_ns = src_ns
         if src_ns != dst_ns:
@@ -152,15 +146,49 @@ def parse_push_refspec(repo: Repository, text: str) -> Tuple[PushSpec, ...]:
     return (PushSpec(source, target, force=force, namespace=dst_ns),)
 
 
+def _negative_pattern(text: str) -> Tuple[str, str]:
+    raw = text.strip()
+    if not raw.startswith("^"):
+        raise RuntimeError("not a negative push refspec")
+    body = raw[1:]
+    if not body or ":" in body or body.startswith("+"):
+        raise RuntimeError("negative push refspecs must contain only a source ref")
+    if len(body) in {40, 64} and all(ch in "0123456789abcdefABCDEF" for ch in body):
+        raise RuntimeError("negative push refspecs cannot use raw object IDs")
+    namespace, pattern = _ref_parts(body, field="source")
+    if pattern.count("*") > 1:
+        raise RuntimeError("negative push refspec supports at most one '*'")
+    return namespace, pattern
+
+
+def _matches_negative(spec: PushSpec, negative: Tuple[str, str]) -> bool:
+    namespace, pattern = negative
+    if spec.delete or spec.namespace != namespace:
+        return False
+    if "*" not in pattern:
+        return spec.source == pattern
+    prefix, suffix = pattern.split("*", 1)
+    return spec.source.startswith(prefix) and spec.source.endswith(suffix)
+
+
 def _expand_refspecs(repo: Repository, remote: str, values: Iterable[str]) -> Tuple[PushSpec, ...]:
-    specs = []
+    positives = []
+    negatives = []
     for value in values:
+        if value.strip().startswith("^"):
+            negatives.append(_negative_pattern(value))
+            continue
         parsed = parse_push_refspec(repo, value)
         if len(parsed) == 1 and parsed[0].source == parsed[0].target == ":":
-            specs.extend(_matching_specs(repo, remote, force=parsed[0].force))
+            positives.extend(_matching_specs(repo, remote, force=parsed[0].force))
         else:
-            specs.extend(parsed)
-    return tuple(specs)
+            positives.extend(parsed)
+    if negatives and not positives:
+        raise RuntimeError("negative push refspec requires at least one positive refspec")
+    return tuple(
+        spec for spec in positives
+        if not any(_matches_negative(spec, negative) for negative in negatives)
+    )
 
 
 def all_branch_specs(repo: Repository, *, force: bool = False) -> Tuple[PushSpec, ...]:
@@ -175,14 +203,14 @@ def delete_specs(repo: Repository, values: Sequence[str]) -> Tuple[PushSpec, ...
     specs = []
     for value in values:
         raw = value[1:] if value.startswith("+") else value
-        if ":" in raw or "*" in raw:
+        if ":" in raw or "*" in raw or raw.startswith("^"):
             raise RuntimeError("--delete accepts ref names, not refspec mappings")
         namespace, target = _ref_parts(raw, field="destination")
         specs.append(PushSpec("", target, namespace=namespace, delete=True))
     return tuple(specs)
 
 
-def _configured_push_refspecs(repo: Repository, remote: str) -> Tuple[str, ...]:
+def configured_push_refspecs(repo: Repository, remote: str) -> Tuple[str, ...]:
     value = repo.config_get("remote", f"{remote}.push")
     return tuple(shlex.split(value)) if value else ()
 
@@ -210,7 +238,7 @@ def resolve_push_plan(repo: Repository, remote: str, refspecs: Sequence[str] = (
     if explicit:
         return PushPlan(remote, _expand_refspecs(repo, remote, explicit), "explicit")
 
-    configured = _configured_push_refspecs(repo, remote)
+    configured = configured_push_refspecs(repo, remote)
     if configured:
         return PushPlan(remote, _expand_refspecs(repo, remote, configured), "remote.push")
 
