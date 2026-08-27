@@ -1,55 +1,37 @@
-"""Configured fetch transport for clone-generated remote-tracking mappings.
+"""Configured fetch transport with Git-style pruning and tag policy.
 
-Phase181 makes the ``remote.<name>.fetch`` written by clone operational rather
-than decorative.  The selector intentionally focuses on branch-source
-selection (including exact, wildcard, and negative source patterns) while
-preserving pygit's existing automatic tag import behavior.
+Phase181 made clone-generated branch mappings operational and Phase182 made an
+intentionally empty tracked-branch list meaningful. Phase183 layers pruning
+and tag policy on top while preserving those compatibility boundaries.
 """
 
 from __future__ import annotations
 
 import fnmatch
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from .config import GitConfig
-from .remote import NativeImporter, SmartHttpClient
+from .fetch_policy import (
+    FetchPolicy,
+    FetchRefspec,
+    configured_fetch_refspecs as _parsed_fetch_refspecs,
+    parse_fetch_refspec,
+    resolve_fetch_policy,
+    source_is_excluded,
+)
+from .remote import Advertisement, NativeImporter, SmartHttpClient
 from .remote_urls import fetch_url
 from .repo import Repository
 
 
 def configured_fetch_refspecs(repo: Repository, remote: str) -> List[str]:
-    """Return the configured fetch refspec list for one remote.
-
-    Older pygit repositories may have only the historical JSON remote metadata;
-    those retain the traditional all-heads mapping as a compatibility fallback.
-    Once a Git-style ``remote.<name>.url`` exists, however, an absent fetch key
-    is meaningful: native ``remote set-branches <name>`` with no branches clears
-    the tracked-branch list, so future fetches must not recreate the wildcard.
-    """
-    config = GitConfig(repo.pygit_dir)
-    values = config.get_all("remote", f"{remote}.fetch")
-    if values:
-        return values
-    if config.get("remote", f"{remote}.url") is not None:
-        return []
-    return [f"+refs/heads/*:refs/remotes/{remote}/*"]
+    """Compatibility wrapper returning raw configured/default refspec strings."""
+    return [spec.raw for spec in _parsed_fetch_refspecs(repo, remote)]
 
 
 def _source_pattern(raw: str) -> tuple[bool, str]:
-    token = raw.strip()
-    negative = token.startswith("^")
-    if negative:
-        token = token[1:]
-    elif token.startswith("+"):
-        token = token[1:]
-    source = token.split(":", 1)[0]
-    if not source:
-        raise ValueError(f"invalid fetch refspec: {raw!r}")
-    if not source.startswith("refs/"):
-        source = f"refs/heads/{source}"
-    if source.count("*") > 1:
-        raise ValueError(f"unsupported fetch refspec pattern: {raw!r}")
-    return negative, source
+    """Compatibility helper retained for Phase181/182 selector callers."""
+    spec = parse_fetch_refspec(raw)
+    return spec.negative, spec.source
 
 
 def _matches(refname: str, pattern: str) -> bool:
@@ -61,12 +43,11 @@ def select_fetch_import_refs(
     remote: str,
     native_refs: Dict[str, str],
 ) -> Dict[str, str]:
-    """Filter advertised refs through ``remote.<name>.fetch`` branch sources.
+    """Compatibility source selector used by earlier phase regressions.
 
-    The advertisement's pseudo-ref ``HEAD`` is metadata, not a tracking ref, so
-    it is never a transfer target here.  Tags retain pygit's historical import
-    behavior.  Positive branch patterns establish the fetched branch domain;
-    negative refspecs subtract from it.
+    Existing direct callers retain the earlier all-tags behavior. The Phase183
+    transport below applies the more precise tag policy instead of using this
+    helper directly.
     """
     positives: List[str] = []
     negatives: List[str] = []
@@ -87,49 +68,301 @@ def select_fetch_import_refs(
     return result
 
 
-def fetch_configured(repo: Repository, remote: str = "origin") -> Dict[str, object]:
-    """Fetch one named remote while honoring its configured branch refspecs."""
-    url = fetch_url(repo, remote)
-    client = SmartHttpClient(url)
-    advertisement = client.discover()
-    native_map = repo._read_native_map(remote)
-    known_by_native = {native: sha for sha, native in native_map.items()}
-    native_refs = repo._advertised_import_refs(advertisement.refs)
-    native_refs = select_fetch_import_refs(repo, remote, native_refs)
+def _advertised_sources(advertisement: Advertisement) -> Dict[str, str]:
+    return {
+        name: oid
+        for name, oid in advertisement.refs.items()
+        if name != "HEAD" and not name.endswith("^{}")
+    }
 
-    if native_refs and all(native_oid in known_by_native for native_oid in native_refs.values()):
-        imported = {
-            ref_name: known_by_native[native_oid]
-            for ref_name, native_oid in native_refs.items()
+
+def _tag_refspec(*, force: bool) -> FetchRefspec:
+    prefix = "+" if force else ""
+    return parse_fetch_refspec(f"{prefix}refs/tags/*:refs/tags/*")
+
+
+def _selection_specs(
+    configured: Sequence[FetchRefspec],
+    policy: FetchPolicy,
+) -> Tuple[List[FetchRefspec], List[FetchRefspec]]:
+    """Return (selection specs, prune-domain specs)."""
+    selected = list(configured)
+    prune_domain = list(configured)
+
+    if policy.prune_tags:
+        # --prune-tags is an explicit tag mapping even without --prune. The
+        # pruning itself only happens when prune policy is enabled.
+        tag_spec = _tag_refspec(force=True)
+        selected.append(tag_spec)
+        prune_domain.append(tag_spec)
+    elif policy.tag_mode == "all":
+        # --tags fetches every tag, but --prune --tags alone does not make tags
+        # part of the pruning domain.
+        selected.append(_tag_refspec(force=False))
+
+    return selected, prune_domain
+
+
+def _select_explicit_sources(
+    advertisement: Advertisement,
+    specs: Sequence[FetchRefspec],
+) -> Tuple[Dict[str, str], Dict[str, List[Tuple[str, bool]]]]:
+    sources = _advertised_sources(advertisement)
+    selected: Dict[str, str] = {}
+    destinations: Dict[str, List[Tuple[str, bool]]] = {}
+    spec_list = list(specs)
+
+    for refname, oid in sources.items():
+        if source_is_excluded(refname, spec_list):
+            continue
+        matches = [
+            spec
+            for spec in spec_list
+            if not spec.negative and spec.matches_source(refname)
+        ]
+        if not matches:
+            continue
+        selected[refname] = oid
+        for spec in matches:
+            destination = spec.destination_for(refname)
+            if destination is not None:
+                destinations.setdefault(refname, []).append((destination, spec.force))
+    return selected, destinations
+
+
+def _fetch_import_sources(
+    repo: Repository,
+    client: SmartHttpClient,
+    advertisement: Advertisement,
+    source_oids: Dict[str, str],
+    native_map: Dict[str, str],
+    known_by_native: Dict[str, str],
+) -> Tuple[Dict[str, str], int]:
+    if not source_oids:
+        return {}, 0
+
+    if all(oid in known_by_native for oid in source_oids.values()):
+        return {name: known_by_native[oid] for name, oid in source_oids.items()}, 0
+
+    # Reuse the mature SmartHttpClient without widening its public API: a
+    # narrowed advertisement naturally generates only the selected wants.
+    selected_advertisement = Advertisement(
+        refs=dict(source_oids),
+        capabilities=set(advertisement.capabilities),
+        symrefs=dict(advertisement.symrefs),
+    )
+    result = client.fetch(
+        haves=native_map.values(),
+        advertisement=selected_advertisement,
+    )
+    importer = NativeImporter(repo.store, result.objects, known=known_by_native)
+    imported = {
+        ref_name: importer.import_oid(native_oid)
+        for ref_name, native_oid in source_oids.items()
+    }
+    known_by_native.update(importer.converted)
+    native_map.update(
+        {
+            pygit_sha: native_oid
+            for native_oid, pygit_sha in importer.converted.items()
         }
-        object_count = 0
-    elif not native_refs:
-        imported = {}
-        object_count = 0
-    else:
+    )
+    return imported, len(result.objects)
+
+
+def _update_destination(
+    repo: Repository,
+    destination: str,
+    sha: str,
+    *,
+    force: bool,
+) -> None:
+    if destination.startswith("refs/remotes/"):
+        remainder = destination[len("refs/remotes/") :]
+        if "/" not in remainder:
+            raise ValueError(f"invalid remote-tracking destination: {destination!r}")
+        remote, branch = remainder.split("/", 1)
+        repo.refs.set_remote(remote, branch, sha)
+        return
+
+    if destination.startswith("refs/tags/"):
+        name = destination[len("refs/tags/") :]
+        current = repo.refs.get_tag(name)
+        if current is not None and current != sha and not force:
+            raise RuntimeError(f"fetch rejected: tag '{name}' would clobber existing tag")
+        repo.refs.set_tag(name, sha)
+        return
+
+    raise ValueError(f"unsupported fetch destination: {destination!r}")
+
+
+def _apply_destinations(
+    repo: Repository,
+    imported: Dict[str, str],
+    destinations: Dict[str, List[Tuple[str, bool]]],
+) -> None:
+    for source, sha in imported.items():
+        for destination, force in destinations.get(source, []):
+            _update_destination(repo, destination, sha, force=force)
+
+
+def _auto_follow_tags(
+    repo: Repository,
+    client: SmartHttpClient,
+    advertisement: Advertisement,
+    native_map: Dict[str, str],
+    known_by_native: Dict[str, str],
+    already_selected: Sequence[str],
+) -> Tuple[Dict[str, str], int]:
+    selected = set(already_selected)
+    immediate: Dict[str, str] = {}
+    needs_object: Dict[str, str] = {}
+
+    for refname, tag_oid in _advertised_sources(advertisement).items():
+        if not refname.startswith("refs/tags/") or refname in selected:
+            continue
+        tag_name = refname[len("refs/tags/") :]
+        # Automatic tag following never clobbers an existing local tag.
+        if repo.refs.get_tag(tag_name) is not None:
+            continue
+        peeled = advertisement.refs.get(f"{refname}^{{}}", tag_oid)
+        # A tag is auto-followed only when its target is already among objects
+        # known from this remote, including objects imported by this fetch.
+        if peeled not in known_by_native:
+            continue
+        if tag_oid in known_by_native:
+            immediate[refname] = known_by_native[tag_oid]
+        else:
+            needs_object[refname] = tag_oid
+
+    fetched: Dict[str, str] = {}
+    object_count = 0
+    if needs_object:
+        tag_advertisement = Advertisement(
+            refs=dict(needs_object),
+            capabilities=set(advertisement.capabilities),
+            symrefs={},
+        )
         result = client.fetch(
             haves=native_map.values(),
-            advertisement=advertisement,
+            advertisement=tag_advertisement,
         )
         importer = NativeImporter(repo.store, result.objects, known=known_by_native)
-        imported = {
-            ref_name: importer.import_oid(native_oid)
-            for ref_name, native_oid in native_refs.items()
+        fetched = {
+            refname: importer.import_oid(native_oid)
+            for refname, native_oid in needs_object.items()
         }
+        known_by_native.update(importer.converted)
         native_map.update(
             {
                 pygit_sha: native_oid
                 for native_oid, pygit_sha in importer.converted.items()
             }
         )
-        repo._write_native_map(native_map, remote)
         object_count = len(result.objects)
 
-    for ref_name, sha in imported.items():
-        if ref_name.startswith("refs/heads/"):
-            repo.refs.set_remote(remote, ref_name[len("refs/heads/") :], sha)
-        elif ref_name.startswith("refs/tags/"):
-            repo.refs.set_tag(ref_name[len("refs/tags/") :], sha)
+    followed = {**immediate, **fetched}
+    for refname, sha in followed.items():
+        repo.refs.set_tag(refname[len("refs/tags/") :], sha)
+    return followed, object_count
+
+
+def _controlled_source(
+    destination: str,
+    specs: Sequence[FetchRefspec],
+) -> List[str]:
+    sources: List[str] = []
+    spec_list = list(specs)
+    for spec in spec_list:
+        if spec.negative:
+            continue
+        source = spec.source_for_destination(destination)
+        if source is None or source_is_excluded(source, spec_list):
+            continue
+        sources.append(source)
+    return sources
+
+
+def _prune_refs(
+    repo: Repository,
+    remote: str,
+    advertisement: Advertisement,
+    specs: Sequence[FetchRefspec],
+) -> List[str]:
+    advertised = set(_advertised_sources(advertisement))
+    pruned: List[str] = []
+
+    for branch in list(repo.refs.list_remotes(remote)):
+        destination = f"refs/remotes/{remote}/{branch}"
+        sources = _controlled_source(destination, specs)
+        if sources and not any(source in advertised for source in sources):
+            repo.refs.delete_remote(remote, branch)
+            pruned.append(destination)
+
+    for tag in list(repo.refs.list_tags()):
+        destination = f"refs/tags/{tag}"
+        sources = _controlled_source(destination, specs)
+        if sources and not any(source in advertised for source in sources):
+            repo.refs.delete_tag(tag)
+            pruned.append(destination)
+
+    return pruned
+
+
+def fetch_configured(
+    repo: Repository,
+    remote: str = "origin",
+    *,
+    prune: Optional[bool] = None,
+    prune_tags: Optional[bool] = None,
+    tags: Optional[bool] = None,
+) -> Dict[str, object]:
+    """Fetch one named remote using configured mapping/prune/tag policy."""
+    url = fetch_url(repo, remote)
+    client = SmartHttpClient(url)
+    advertisement = client.discover()
+    policy = resolve_fetch_policy(
+        repo,
+        remote,
+        prune=prune,
+        prune_tags=prune_tags,
+        tags=tags,
+    )
+    configured = _parsed_fetch_refspecs(repo, remote)
+    selection_specs, prune_specs = _selection_specs(configured, policy)
+
+    # Git prunes before applying fetched updates. A later transfer failure does
+    # not resurrect refs already identified as stale.
+    pruned = _prune_refs(repo, remote, advertisement, prune_specs) if policy.prune else []
+
+    native_map = repo._read_native_map(remote)
+    known_by_native = {native: sha for sha, native in native_map.items()}
+    explicit_sources, destinations = _select_explicit_sources(advertisement, selection_specs)
+
+    imported, object_count = _fetch_import_sources(
+        repo,
+        client,
+        advertisement,
+        explicit_sources,
+        native_map,
+        known_by_native,
+    )
+    repo._write_native_map(native_map, remote)
+    _apply_destinations(repo, imported, destinations)
+
+    if policy.tag_mode == "auto" and not policy.prune_tags:
+        followed, tag_objects = _auto_follow_tags(
+            repo,
+            client,
+            advertisement,
+            native_map,
+            known_by_native,
+            imported.keys(),
+        )
+        if followed:
+            imported.update(followed)
+            repo._write_native_map(native_map, remote)
+        object_count += tag_objects
 
     default_ref = advertisement.symrefs.get("HEAD")
     default_branch = (
@@ -138,9 +371,8 @@ def fetch_configured(repo: Repository, remote: str = "origin") -> Dict[str, obje
         else repo._infer_default_branch(advertisement.refs)
     )
 
-    # Keep the historical JSON metadata coherent because older Repository APIs
-    # still consult it.  Deliberately do not update refs/remotes/<remote>/HEAD:
-    # native `git fetch` leaves that symbolic ref unchanged until set-head -a.
+    # Keep historical JSON metadata coherent, but never retarget the symbolic
+    # remote HEAD during ordinary fetch. `remote set-head -a` owns that action.
     config = repo._read_config()
     settings = config.get("remotes", {}).get(remote)
     if settings is not None:
@@ -152,4 +384,6 @@ def fetch_configured(repo: Repository, remote: str = "origin") -> Dict[str, obje
         "default_branch": default_branch,
         "refs": imported,
         "objects": object_count,
+        "pruned": pruned,
+        "tag_mode": policy.tag_mode,
     }
