@@ -10,6 +10,7 @@ from __future__ import annotations
 import fnmatch
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from .fetch_importer import TagPreservingNativeImporter as NativeImporter
 from .fetch_policy import (
     FetchPolicy,
     FetchRefspec,
@@ -18,7 +19,7 @@ from .fetch_policy import (
     resolve_fetch_policy,
     source_is_excluded,
 )
-from .remote import Advertisement, NativeImporter, SmartHttpClient
+from .remote import Advertisement, SmartHttpClient
 from .remote_urls import fetch_url
 from .repo import Repository
 
