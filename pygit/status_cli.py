@@ -4,7 +4,8 @@ Phase 150 makes the persistent multi-stage index authoritative for conflict
 classification. The legacy Repository.status() API remains untouched; this
 module normalizes its ordinary staged/unstaged/untracked data and overlays the
 seven Git porcelain conflict states derived from stages 1/2/3. Phase 151 adds
-porcelain-v2 rendering without changing that normalized status model.
+porcelain-v2 rendering without changing that normalized status model. Phase 152
+adds reflog-backed stash-count reporting for long and porcelain-v2 status.
 """
 
 from __future__ import annotations
@@ -24,8 +25,8 @@ _CONFLICT_CODES: Dict[Tuple[bool, bool, bool], str] = {
     (True, True, False): "UD",    # deleted by them
     (False, False, True): "UA",   # added by them
     (True, False, True): "DU",    # deleted by us
-    (False, True, True): "AA",    # both added
-    (True, True, True): "UU",     # both modified
+    (False, True, True): "AA",   # both added
+    (True, True, True): "UU",    # both modified
 }
 
 _CONFLICT_LABELS = {
@@ -161,7 +162,17 @@ def _print_short(repo: Repository, *, branch: bool, ignored: bool, nul: bool = F
     sys.stdout.write(separator.join(lines) + separator)
 
 
-def _print_full(repo: Repository, *, ignored: bool) -> None:
+def _stash_summary(repo: Repository) -> str | None:
+    from .status_porcelain_v2 import stash_count
+
+    count = stash_count(repo)
+    if not count:
+        return None
+    noun = "entry" if count == 1 else "entries"
+    return f"Your stash currently has {count} {noun}"
+
+
+def _print_full(repo: Repository, *, ignored: bool, show_stash: bool = False) -> None:
     result, unmerged = _normalized_status(repo, ignored=ignored)
 
     branch = result["branch"] or "HEAD (detached)"
@@ -175,39 +186,46 @@ def _print_full(repo: Repository, *, ignored: bool) -> None:
         "unstaged",
         "untracked",
     )
-    if not unmerged and not any(result.get(key) for key in keys):
+    clean = not unmerged and not any(result.get(key) for key in keys)
+    if clean:
         print("nothing to commit, working tree clean")
-        return
+    else:
+        if unmerged:
+            print("Unmerged paths:")
+            for record in unmerged:
+                print(f"\t{_CONFLICT_LABELS[record.code]}:\t{record.path}")
+            print()
 
-    if unmerged:
-        print("Unmerged paths:")
-        for record in unmerged:
-            print(f"\t{_CONFLICT_LABELS[record.code]}:\t{record.path}")
-        print()
+        if result["staged"]:
+            print("Changes to be committed:")
+            for kind, path in result["staged"]:
+                print(f"\t{kind}:\t{path}")
+            print()
 
-    if result["staged"]:
-        print("Changes to be committed:")
-        for kind, path in result["staged"]:
-            print(f"\t{kind}:\t{path}")
-        print()
+        if result["unstaged"]:
+            print("Changes not staged for commit:")
+            for kind, path in result["unstaged"]:
+                print(f"\t{kind}:\t{path}")
+            print()
 
-    if result["unstaged"]:
-        print("Changes not staged for commit:")
-        for kind, path in result["unstaged"]:
-            print(f"\t{kind}:\t{path}")
-        print()
+        if result["untracked"]:
+            print("Untracked files:")
+            for path in result["untracked"]:
+                print(f"\t{path}")
+            print()
 
-    if result["untracked"]:
-        print("Untracked files:")
-        for path in result["untracked"]:
-            print(f"\t{path}")
-        print()
+        if ignored and result.get("ignored"):
+            print("Ignored files:")
+            for path in result["ignored"]:
+                print(f"\t{path}")
+            print()
 
-    if ignored and result.get("ignored"):
-        print("Ignored files:")
-        for path in result["ignored"]:
-            print(f"\t{path}")
-        print()
+    if show_stash:
+        summary = _stash_summary(repo)
+        if summary:
+            if clean:
+                print()
+            print(summary)
 
 
 def run_status(argv: Sequence[str]) -> int:
@@ -228,6 +246,19 @@ def run_status(argv: Sequence[str]) -> int:
     parser.add_argument("-b", "--branch", action="store_true", help="show branch/upstream information")
     parser.add_argument("--ignored", action="store_true", help="show ignored files")
     parser.add_argument("-z", action="store_true", help="terminate porcelain records with NUL bytes")
+    parser.set_defaults(show_stash=False)
+    parser.add_argument(
+        "--show-stash",
+        dest="show_stash",
+        action="store_true",
+        help="show the number of entries currently stashed away",
+    )
+    parser.add_argument(
+        "--no-show-stash",
+        dest="show_stash",
+        action="store_false",
+        help="suppress stash-count status information",
+    )
     args = parser.parse_args(list(argv))
 
     if args.z and args.porcelain is None:
@@ -243,10 +274,13 @@ def run_status(argv: Sequence[str]) -> int:
                 branch=args.branch,
                 ignored=args.ignored,
                 nul=args.z,
+                show_stash=args.show_stash,
             )
         )
     elif args.short or args.porcelain is not None:
+        # Native short / porcelain-v1 status does not add stash summary lines;
+        # --show-stash affects the long renderer and porcelain-v2 header layer.
         _print_short(repo, branch=args.branch, ignored=args.ignored, nul=args.z)
     else:
-        _print_full(repo, ignored=args.ignored)
+        _print_full(repo, ignored=args.ignored, show_stash=args.show_stash)
     return 0
