@@ -133,7 +133,7 @@ def run_fsck(argv: Sequence[str]) -> int:
         if args.tags:
             for entry in annotated_tags(repo, report):
                 text = format_tag_diagnostic(entry)
-                suffix = f" ({names[entry.oid]})" if entry.oid in names else ""
+                suffix = f" ({names[entry.tag_oid]})" if entry.tag_oid in names else ""
                 print(text + suffix)
 
     if args.unreachable:
