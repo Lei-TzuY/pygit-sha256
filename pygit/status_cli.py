@@ -14,7 +14,7 @@ import argparse
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .repo import Repository
 
@@ -162,7 +162,7 @@ def _print_short(repo: Repository, *, branch: bool, ignored: bool, nul: bool = F
     sys.stdout.write(separator.join(lines) + separator)
 
 
-def _stash_summary(repo: Repository) -> str | None:
+def _stash_summary(repo: Repository) -> Optional[str]:
     from .status_porcelain_v2 import stash_count
 
     count = stash_count(repo)
