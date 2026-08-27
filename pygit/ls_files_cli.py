@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import posixpath
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -23,6 +24,54 @@ def _find_repo() -> Repository:
     )
 
 
+def _cwd_prefix(repo: Repository) -> str:
+    """Return the current worktree directory relative to the repository root."""
+    root = Path(repo.worktree).resolve()
+    current = Path.cwd().resolve()
+    relative = current.relative_to(root).as_posix()
+    return "" if relative == "." else relative
+
+
+def _root_patterns(prefix: str, patterns: Sequence[str]) -> list[str]:
+    """Translate cwd-relative CLI pathspecs into repository-root-relative paths."""
+    if not patterns:
+        return [prefix] if prefix else []
+
+    translated: list[str] = []
+    for pattern in patterns:
+        normalized = posixpath.normpath(posixpath.join(prefix, pattern.replace("\\", "/")))
+        if normalized == ".":
+            normalized = ""
+        if normalized == ".." or normalized.startswith("../"):
+            raise ValueError(f"pathspec is outside the repository: {pattern!r}")
+        translated.append(normalized)
+    return translated
+
+
+def _display_line(line: str, prefix: str, *, full_name: bool) -> str:
+    """Render a root-relative ls-files record from the caller's directory."""
+    if full_name or not prefix:
+        return line
+
+    metadata, separator, path = line.rpartition("\t")
+    if not separator:
+        metadata = ""
+        path = line
+
+    directory = path.endswith("/")
+    bare_path = path[:-1] if directory else path
+    if bare_path == prefix:
+        relative = "."
+    elif bare_path.startswith(prefix + "/"):
+        relative = bare_path[len(prefix) + 1 :]
+    else:
+        return line
+
+    if directory:
+        relative += "/"
+    return f"{metadata}\t{relative}" if separator else relative
+
+
 def run_ls_files(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pygit ls-files",
@@ -39,6 +88,7 @@ def run_ls_files(argv: Sequence[str]) -> int:
     parser.add_argument("--exclude-standard", action="store_true", help="apply .gitignore, .pygitignore, and .pygit/info/exclude rules")
     parser.add_argument("--directory", action="store_true", help="show wholly-untracked directories with a trailing slash")
     parser.add_argument("--no-empty-directory", action="store_true", help="with --directory, suppress trees containing no files")
+    parser.add_argument("--full-name", action="store_true", help="show paths relative to the repository root")
     parser.add_argument("--error-unmatch", action="store_true", help="fail if any supplied path pattern matches no index entry")
     parser.add_argument("-z", action="store_true", help="terminate records with NUL")
     parser.add_argument("path", nargs="*", metavar="PATH")
@@ -60,6 +110,12 @@ def run_ls_files(argv: Sequence[str]) -> int:
         parser.error("--error-unmatch currently applies to index selectors")
 
     repo = _find_repo()
+    prefix = _cwd_prefix(repo)
+    try:
+        patterns = _root_patterns(prefix, args.path)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     lines = []
     index_selector_requested = any((args.cached, args.stage, args.unmerged, args.deleted, args.modified))
     worktree_selector_requested = args.others or args.killed
@@ -72,7 +128,7 @@ def run_ls_files(argv: Sequence[str]) -> int:
                 unmerged=args.unmerged,
                 deleted=args.deleted,
                 modified=args.modified,
-                patterns=args.path,
+                patterns=patterns,
                 error_unmatch=args.error_unmatch,
             )
         )
@@ -82,15 +138,16 @@ def run_ls_files(argv: Sequence[str]) -> int:
                 repo,
                 ignored=args.ignored,
                 exclude_standard=args.exclude_standard,
-                patterns=args.path,
+                patterns=patterns,
                 directory=args.directory,
                 no_empty_directory=args.no_empty_directory,
             )
         )
     if args.killed:
-        lines.extend(killed_files(repo, patterns=args.path))
+        lines.extend(killed_files(repo, patterns=patterns))
 
     lines = list(dict.fromkeys(lines))
+    lines = [_display_line(line, prefix, full_name=args.full_name) for line in lines]
     if lines:
         separator = "\x00" if args.z else "\n"
         sys.stdout.write(separator.join(lines) + separator)
