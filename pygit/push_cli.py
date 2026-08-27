@@ -6,7 +6,7 @@ import argparse
 from typing import Sequence
 
 from .push_defaults import PushPlan, all_branch_specs, all_tag_specs, delete_specs, resolve_push_plan
-from .push_transport import delete_remote_ref, push_branch, push_ref
+from .push_transport import delete_remote_ref, push_atomic_specs, push_branch, push_ref
 from .remote_ops import resolve_push_remote
 from .tracking import TrackingSource, find_repo, set_branch_upstream
 
@@ -22,6 +22,20 @@ def run_push(argv: Sequence[str]) -> int:
     parser.add_argument("--all", "--branches", dest="all_branches", action="store_true", help="push all local branches")
     parser.add_argument("--tags", action="store_true", help="push all local tags")
     parser.add_argument("-d", "--delete", action="store_true", help="delete the listed remote refs")
+    atomic = parser.add_mutually_exclusive_group()
+    atomic.add_argument(
+        "--atomic",
+        dest="atomic",
+        action="store_true",
+        help="request an all-or-nothing remote ref transaction",
+    )
+    atomic.add_argument(
+        "--no-atomic",
+        dest="atomic",
+        action="store_false",
+        help="do not request an atomic remote ref transaction",
+    )
+    parser.set_defaults(atomic=False)
     parser.add_argument(
         "-u",
         "--set-upstream",
@@ -63,26 +77,29 @@ def run_push(argv: Sequence[str]) -> int:
         print("Everything up-to-date")
         return 0
 
-    results = []
-    legacy_single = (
-        branch is not None
-        and len(plan.specs) == 1
-        and plan.specs[0].namespace == "heads"
-        and not plan.specs[0].delete
-        and plan.specs[0].source == branch
-        and plan.specs[0].target == branch
-    )
-    for spec in plan.specs:
-        effective_force = bool(args.force or spec.force)
-        if spec.delete:
-            result = delete_remote_ref(repo, remote, spec.target_ref)
-        elif legacy_single:
-            result = repo.push(remote, force=effective_force)
-        elif spec.namespace == "heads":
-            result = push_branch(repo, remote, spec.source, spec.target, force=effective_force)
-        else:
-            result = push_ref(repo, remote, spec.source_ref, spec.target_ref, force=effective_force)
-        results.append((spec, result))
+    if args.atomic:
+        results = push_atomic_specs(repo, remote, plan.specs, force=args.force)
+    else:
+        results = []
+        legacy_single = (
+            branch is not None
+            and len(plan.specs) == 1
+            and plan.specs[0].namespace == "heads"
+            and not plan.specs[0].delete
+            and plan.specs[0].source == branch
+            and plan.specs[0].target == branch
+        )
+        for spec in plan.specs:
+            effective_force = bool(args.force or spec.force)
+            if spec.delete:
+                result = delete_remote_ref(repo, remote, spec.target_ref)
+            elif legacy_single:
+                result = repo.push(remote, force=effective_force)
+            elif spec.namespace == "heads":
+                result = push_branch(repo, remote, spec.source, spec.target, force=effective_force)
+            else:
+                result = push_ref(repo, remote, spec.source_ref, spec.target_ref, force=effective_force)
+            results.append((spec, result))
 
     if args.set_upstream or plan.auto_setup_upstream:
         if not branch:
