@@ -4,7 +4,8 @@ This layer reuses Phase 150's normalized status/conflict model and enriches it
 with the index/HEAD metadata required by porcelain v2.  The repository remains
 SHA-256-native, so object-name fields are 64 hexadecimal characters rather
 than Git's SHA-1-width examples. Phase 152 adds the optional stash-count header
-using the repository's strict reflog reader.
+using the repository's strict reflog reader. Phase 154 threads Git's untracked
+path modes through the same normalized presentation layer.
 """
 
 from __future__ import annotations
@@ -26,8 +27,6 @@ def _quote_path(path: str) -> str:
     """Return a stable C-style quoted pathname when quoting is required."""
     if path and all(0x20 <= ord(ch) < 0x7f and ch not in {'"', '\\'} for ch in path):
         return path
-    # JSON string escaping is the same C-style surface needed here for control
-    # characters, quotes and backslashes.  Keep non-ASCII readable.
     return json.dumps(path, ensure_ascii=False)
 
 
@@ -71,14 +70,7 @@ def _branch_headers(repo: Repository, result: dict) -> List[str]:
 
 
 def stash_count(repo: Repository) -> int:
-    """Return the number of stash entries from ``refs/stash``'s reflog.
-
-    A missing stash reflog is an empty stash. Existing malformed or unsafe
-    reflogs remain hard errors through Phase 72/128's strict reflog parser;
-    status must not silently manufacture a machine-readable count from damaged
-    metadata.
-    """
-
+    """Return the number of stash entries from ``refs/stash``'s reflog."""
     return len(show_reflog(repo, "stash"))
 
 
@@ -89,13 +81,16 @@ def porcelain_v2_lines(
     ignored: bool = False,
     nul: bool = False,
     show_stash: bool = False,
+    untracked_mode: str = "normal",
 ) -> List[str]:
     """Return porcelain-v2 headers and records without terminators."""
-    # Import lazily to avoid making status_cli's command adapter a dependency
-    # during module import.
     from .status_cli import _normalized_status, status_records
 
-    result, unmerged = _normalized_status(repo, ignored=ignored)
+    result, unmerged = _normalized_status(
+        repo,
+        ignored=ignored,
+        untracked_mode=untracked_mode,
+    )
     lines: List[str] = []
     if branch:
         lines.extend(_branch_headers(repo, result))
@@ -107,7 +102,11 @@ def porcelain_v2_lines(
     head_entries = _head_entries(repo)
     unmerged_by_path = {entry.path: entry for entry in unmerged}
 
-    for record in status_records(repo, ignored=ignored):
+    for record in status_records(
+        repo,
+        ignored=ignored,
+        untracked_mode=untracked_mode,
+    ):
         path = record.path
         if record.code in {"??", "!!"}:
             prefix = "?" if record.code == "??" else "!"
@@ -150,6 +149,7 @@ def render_porcelain_v2(
     ignored: bool = False,
     nul: bool = False,
     show_stash: bool = False,
+    untracked_mode: str = "normal",
 ) -> str:
     """Render a complete porcelain-v2 stream."""
     lines = porcelain_v2_lines(
@@ -158,6 +158,7 @@ def render_porcelain_v2(
         ignored=ignored,
         nul=nul,
         show_stash=show_stash,
+        untracked_mode=untracked_mode,
     )
     if not lines:
         return ""
