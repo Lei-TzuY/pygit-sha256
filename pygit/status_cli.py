@@ -1,17 +1,19 @@
 """Modern status rendering with Git-style unmerged XY codes.
 
 Phase 150 makes the persistent multi-stage index authoritative for conflict
-classification.  The legacy Repository.status() API remains untouched; this
+classification. The legacy Repository.status() API remains untouched; this
 module normalizes its ordinary staged/unstaged/untracked data and overlays the
-seven Git porcelain-v1 unmerged states derived from stages 1/2/3.
+seven Git porcelain conflict states derived from stages 1/2/3. Phase 151 adds
+porcelain-v2 rendering without changing that normalized status model.
 """
 
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from .repo import Repository
 
@@ -72,8 +74,6 @@ def unmerged_status(repo: Repository) -> List[UnmergedStatus]:
         present = tuple(repo.index.get(path, stage) is not None for stage in (1, 2, 3))
         code = _CONFLICT_CODES.get(present)
         if code is None:
-            # A path in the unmerged table must have at least one stage.  Keep
-            # malformed index states fail-closed instead of inventing a code.
             raise RuntimeError(f"invalid unmerged index stage combination for {path!r}: {present}")
         stages = tuple(stage for stage, exists in zip((1, 2, 3), present) if exists)
         records.append(UnmergedStatus(path=path, code=code, stages=stages))
@@ -95,9 +95,6 @@ def _normalized_status(repo: Repository, *, ignored: bool) -> Tuple[dict, List[U
     unmerged = unmerged_status(repo)
     conflict_paths = {record.path for record in unmerged}
 
-    # Phase 124+ conflict paths live outside stage zero.  Repository.status()
-    # predates that model and can otherwise report the same path as staged,
-    # unstaged, or untracked as well as conflicted.  Remove those duplicates.
     result = dict(result)
     result["staged"] = [item for item in result["staged"] if item[1] not in conflict_paths]
     result["unstaged"] = [item for item in result["unstaged"] if item[1] not in conflict_paths]
@@ -128,10 +125,7 @@ def status_records(repo: Repository, *, ignored: bool = False) -> List[StatusRec
         for path in result.get("ignored", []):
             codes[path] = ["!", "!"]
 
-    return [
-        StatusRecord(path=path, code="".join(codes[path]))
-        for path in sorted(codes)
-    ]
+    return [StatusRecord(path=path, code="".join(codes[path])) for path in sorted(codes)]
 
 
 def _branch_header(result: dict) -> str:
@@ -155,12 +149,16 @@ def _branch_header(result: dict) -> str:
     return f"## {branch}...{upstream_name}{suffix}"
 
 
-def _print_short(repo: Repository, *, branch: bool, ignored: bool) -> None:
+def _print_short(repo: Repository, *, branch: bool, ignored: bool, nul: bool = False) -> None:
     result, _unmerged = _normalized_status(repo, ignored=ignored)
+    lines: List[str] = []
     if branch:
-        print(_branch_header(result))
-    for record in status_records(repo, ignored=ignored):
-        print(f"{record.code} {record.path}")
+        lines.append(_branch_header(result))
+    lines.extend(f"{record.code} {record.path}" for record in status_records(repo, ignored=ignored))
+    if not lines:
+        return
+    separator = "\0" if nul else "\n"
+    sys.stdout.write(separator.join(lines) + separator)
 
 
 def _print_full(repo: Repository, *, ignored: bool) -> None:
@@ -223,17 +221,32 @@ def run_status(argv: Sequence[str]) -> int:
         "--porcelain",
         nargs="?",
         const="v1",
-        choices=("v1",),
+        choices=("v1", "v2"),
         metavar="VERSION",
-        help="machine-readable porcelain v1 output",
+        help="machine-readable porcelain v1 or v2 output",
     )
-    parser.add_argument("-b", "--branch", action="store_true", help="show branch/upstream in short output")
+    parser.add_argument("-b", "--branch", action="store_true", help="show branch/upstream information")
     parser.add_argument("--ignored", action="store_true", help="show ignored files")
+    parser.add_argument("-z", action="store_true", help="terminate porcelain records with NUL bytes")
     args = parser.parse_args(list(argv))
 
+    if args.z and args.porcelain is None:
+        parser.error("-z requires --porcelain")
+
     repo = _find_repo()
-    if args.short or args.porcelain is not None:
-        _print_short(repo, branch=args.branch, ignored=args.ignored)
+    if args.porcelain == "v2":
+        from .status_porcelain_v2 import render_porcelain_v2
+
+        sys.stdout.write(
+            render_porcelain_v2(
+                repo,
+                branch=args.branch,
+                ignored=args.ignored,
+                nul=args.z,
+            )
+        )
+    elif args.short or args.porcelain is not None:
+        _print_short(repo, branch=args.branch, ignored=args.ignored, nul=args.z)
     else:
         _print_full(repo, ignored=args.ignored)
     return 0
