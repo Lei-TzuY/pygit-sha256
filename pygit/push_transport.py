@@ -4,7 +4,7 @@ Phase166 introduced branch-to-branch destination overrides. Phase167 extends the
 same SHA-256-native exporter path to tags and deletion refspecs while keeping
 ``Repository.push(remote, force=...)`` untouched for compatibility. Phase168
 adds an opt-in atomic batch path without changing the historical single-ref
-helpers.
+helpers. Phase169 adds optional force-with-lease checks to both paths.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .hooks import HookRunner
 from .push_atomic import AtomicSmartHttpPushClient
 from .push_defaults import PushSpec
+from .push_lease import LeasePolicy, require_lease
 from .remote import NativeExporter, SmartHttpPushClient
 from .repo import Repository
 
@@ -46,6 +47,7 @@ def push_ref(
     target_ref: str,
     *,
     force: bool = False,
+    lease: Optional[LeasePolicy] = None,
 ) -> Dict[str, object]:
     """Push one fully-qualified local ref to one fully-qualified remote ref."""
     if not source_ref.startswith("refs/") or not target_ref.startswith("refs/"):
@@ -63,12 +65,24 @@ def push_ref(
     native_map = repo._read_native_map(remote)
     old_internal = _internal_for_native(native_map, old_native) if old_native != _ZERO_NATIVE_OID else None
 
-    if target_ref.startswith("refs/heads/") and old_native != _ZERO_NATIVE_OID and not force:
+    lease_force = False
+    if not force:
+        lease_force = require_lease(
+            lease,
+            repo,
+            remote,
+            target_ref,
+            old_native,
+            native_map,
+        )
+    effective_force = bool(force or lease_force)
+
+    if target_ref.startswith("refs/heads/") and old_native != _ZERO_NATIVE_OID and not effective_force:
         if not old_internal or old_internal not in repo._ancestor_distances(source_sha):
             raise RuntimeError(
                 "Push rejected: remote tip is not an ancestor of source branch; fetch first or use --force."
             )
-    if target_ref.startswith("refs/tags/") and old_native != _ZERO_NATIVE_OID and not force:
+    if target_ref.startswith("refs/tags/") and old_native != _ZERO_NATIVE_OID and not effective_force:
         raise RuntimeError("Push rejected: remote tag already exists; use --force to replace it.")
 
     have_shas = set(repo._ancestor_distances(old_internal)) if old_internal and target_ref.startswith("refs/heads/") else set()
@@ -101,7 +115,14 @@ def push_ref(
     }
 
 
-def delete_remote_ref(repo: Repository, remote: str, target_ref: str) -> Dict[str, object]:
+def delete_remote_ref(
+    repo: Repository,
+    remote: str,
+    target_ref: str,
+    *,
+    force: bool = False,
+    lease: Optional[LeasePolicy] = None,
+) -> Dict[str, object]:
     """Delete one fully-qualified remote ref using a zero object ID update."""
     if not target_ref.startswith("refs/"):
         raise RuntimeError("delete_remote_ref requires a fully-qualified ref")
@@ -111,6 +132,9 @@ def delete_remote_ref(repo: Repository, remote: str, target_ref: str) -> Dict[st
     client = SmartHttpPushClient(url)
     advertisement = client.discover()
     old_native = advertisement.refs.get(target_ref, _ZERO_NATIVE_OID)
+    native_map = repo._read_native_map(remote)
+    if not force:
+        require_lease(lease, repo, remote, target_ref, old_native, native_map)
     if old_native == _ZERO_NATIVE_OID:
         return {"status": "up-to-date", "remote": remote, "ref": target_ref, "objects": 0}
 
@@ -134,6 +158,7 @@ def push_branch(
     target_branch: str,
     *,
     force: bool = False,
+    lease: Optional[LeasePolicy] = None,
 ) -> Dict[str, object]:
     """Compatibility wrapper for the Phase166 branch-aware transport."""
     result = push_ref(
@@ -142,6 +167,7 @@ def push_branch(
         f"refs/heads/{source_branch}",
         f"refs/heads/{target_branch}",
         force=force,
+        lease=lease,
     )
     result["source_branch"] = source_branch
     result["branch"] = target_branch
@@ -154,12 +180,13 @@ def push_atomic_specs(
     specs: Sequence[PushSpec],
     *,
     force: bool = False,
+    lease: Optional[LeasePolicy] = None,
 ) -> List[Tuple[PushSpec, Dict[str, object]]]:
     """Push *specs* as one receive-pack atomic transaction.
 
-    All local/source and fast-forward checks are completed before the request is
-    sent. Local native mappings and remote-tracking refs are updated only after
-    the atomic receive-pack request succeeds.
+    All local/source, lease, and fast-forward checks are completed before the
+    request is sent. Local native mappings and remote-tracking refs are updated
+    only after the atomic receive-pack request succeeds.
     """
     if not specs:
         return []
@@ -179,6 +206,19 @@ def push_atomic_specs(
     for index, spec in enumerate(specs):
         target_ref = spec.target_ref
         old_native = advertisement.refs.get(target_ref, _ZERO_NATIVE_OID)
+        effective_force = bool(force or spec.force)
+        lease_force = False
+        if not effective_force:
+            lease_force = require_lease(
+                lease,
+                repo,
+                remote,
+                target_ref,
+                old_native,
+                native_map,
+            )
+        authorized_force = bool(effective_force or lease_force)
+
         if spec.delete:
             prepared.append(
                 {
@@ -201,16 +241,15 @@ def push_atomic_specs(
             if old_native != _ZERO_NATIVE_OID
             else None
         )
-        effective_force = bool(force or spec.force)
         if target_ref.startswith("refs/heads/") and old_native != _ZERO_NATIVE_OID:
-            if not effective_force:
+            if not authorized_force:
                 if not old_internal or old_internal not in repo._ancestor_distances(source_sha):
                     raise RuntimeError(
                         "Push rejected: remote tip is not an ancestor of source branch; fetch first or use --force."
                     )
             if old_internal:
                 have_shas.update(repo._ancestor_distances(old_internal))
-        if target_ref.startswith("refs/tags/") and old_native != _ZERO_NATIVE_OID and not effective_force:
+        if target_ref.startswith("refs/tags/") and old_native != _ZERO_NATIVE_OID and not authorized_force:
             raise RuntimeError("Push rejected: remote tag already exists; use --force to replace it.")
 
         prepared.append(
@@ -277,7 +316,6 @@ def push_atomic_specs(
         repo._write_native_map(native_map, remote)
 
     for item in prepared:
-        spec = item["spec"]
         target_ref = str(item["target_ref"])
         if target_ref.startswith("refs/heads/"):
             branch = target_ref[len("refs/heads/") :]
