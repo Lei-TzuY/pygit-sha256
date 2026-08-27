@@ -1,6 +1,6 @@
 """Configured fetch transport with Git-style pruning and tag policy.
 
-Phase181 made clone-generated branch mappings operational.  Phase182 layers
+Phase181 made clone-generated branch mappings operational. Phase182 layers
 fetch pruning and tag policy on top while keeping the legacy Repository.fetch
 API unchanged for callers that still depend on its historical behavior.
 """
@@ -45,9 +45,9 @@ def select_fetch_import_refs(
 ) -> Dict[str, str]:
     """Phase181-compatible source selector.
 
-    Existing callers of this helper retain the old behavior where all tags are
-    admitted.  The Phase182 transport path below applies the more precise tag
-    policy instead of using this compatibility function directly.
+    Existing callers retain the old behavior where all tags are admitted. The
+    Phase182 transport path below applies the precise tag policy instead of
+    using this compatibility function directly.
     """
     positives: List[str] = []
     negatives: List[str] = []
@@ -90,13 +90,13 @@ def _selection_specs(
     prune_domain = list(configured)
 
     if policy.prune_tags:
-        # Git's --prune-tags acts like an explicit tag refspec and permits tags
-        # to follow the remote value while pruning is enabled.
+        # --prune-tags is an explicit tag mapping even without --prune. The
+        # pruning itself only happens when prune policy is also enabled.
         tag_spec = _tag_refspec(force=True)
         selected.append(tag_spec)
         prune_domain.append(tag_spec)
     elif policy.tag_mode == "all":
-        # --tags fetches every tag, but --prune --tags alone does not make tags
+        # --tags fetches every tag but --prune --tags alone does not make tags
         # part of the pruning domain.
         selected.append(_tag_refspec(force=False))
 
@@ -144,6 +144,8 @@ def _fetch_import_sources(
     if all(oid in known_by_native for oid in source_oids.values()):
         return {name: known_by_native[oid] for name, oid in source_oids.items()}, 0
 
+    # Reuse the mature SmartHttpClient without widening its API: a narrowed
+    # advertisement naturally produces only the selected wants.
     selected_advertisement = Advertisement(
         refs=dict(source_oids),
         capabilities=set(advertisement.capabilities),
@@ -165,16 +167,7 @@ def _fetch_import_sources(
             for native_oid, pygit_sha in importer.converted.items()
         }
     )
-    repo._write_native_map(native_map, "__PHASE182_REMOTE_PLACEHOLDER__")
     return imported, len(result.objects)
-
-
-def _write_native_map(repo: Repository, remote: str, native_map: Dict[str, str]) -> None:
-    """Write a remote native map without leaking the helper's placeholder."""
-    repo._write_native_map(native_map, remote)
-    placeholder = repo.pygit_dir / "native-map-__PHASE182_REMOTE_PLACEHOLDER__.json"
-    if placeholder.exists():
-        placeholder.unlink()
 
 
 def _update_destination(
@@ -233,6 +226,8 @@ def _auto_follow_tags(
         if repo.refs.get_tag(tag_name) is not None:
             continue
         peeled = advertisement.refs.get(f"{refname}^{{}}", tag_oid)
+        # A tag is auto-followed only when its target is already among objects
+        # known from this remote (including objects imported by this fetch).
         if peeled not in known_by_native:
             continue
         if tag_oid in known_by_native:
@@ -336,6 +331,8 @@ def fetch_configured(
     configured = _parsed_fetch_refspecs(repo, remote)
     selection_specs, prune_specs = _selection_specs(configured, policy)
 
+    # Git prunes before applying fetched updates. A later transfer failure does
+    # not resurrect refs already identified as stale.
     pruned = _prune_refs(repo, remote, advertisement, prune_specs) if policy.prune else []
 
     native_map = repo._read_native_map(remote)
@@ -350,9 +347,7 @@ def fetch_configured(
         native_map,
         known_by_native,
     )
-    # _fetch_import_sources writes through an internal compatibility shim; make
-    # the authoritative per-remote map explicit here.
-    _write_native_map(repo, remote, native_map)
+    repo._write_native_map(native_map, remote)
     _apply_destinations(repo, imported, destinations)
 
     if policy.tag_mode == "auto" and not policy.prune_tags:
@@ -366,7 +361,7 @@ def fetch_configured(
         )
         if followed:
             imported.update(followed)
-            _write_native_map(repo, remote, native_map)
+            repo._write_native_map(native_map, remote)
         object_count += tag_objects
 
     default_ref = advertisement.symrefs.get("HEAD")
