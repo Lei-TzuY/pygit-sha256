@@ -8,6 +8,7 @@ from typing import Sequence
 from .push_defaults import PushPlan, all_branch_specs, all_tag_specs, delete_specs, resolve_push_plan
 from .push_includes import extract_force_if_includes, resolve_force_if_includes
 from .push_lease import extract_force_with_lease
+from .push_options import resolve_push_options
 from .push_transport import delete_remote_ref, push_atomic_specs, push_branch, push_ref
 from .remote_ops import resolve_push_remote
 from .tracking import TrackingSource, find_repo, set_branch_upstream
@@ -49,6 +50,15 @@ def run_push(argv: Sequence[str]) -> int:
         action="store_true",
         help="disable force-if-includes even when configured",
     )
+    parser.add_argument(
+        "-o",
+        "--push-option",
+        dest="push_options",
+        action="append",
+        default=None,
+        metavar="OPTION",
+        help="transmit an option string to receive-pack hooks (repeatable)",
+    )
     parser.add_argument("--all", "--branches", dest="all_branches", action="store_true", help="push all local branches")
     parser.add_argument("--tags", action="store_true", help="push all local tags")
     parser.add_argument("-d", "--delete", action="store_true", help="delete the listed remote refs")
@@ -84,6 +94,7 @@ def run_push(argv: Sequence[str]) -> int:
         parser.error("--delete requires at least one ref name")
 
     repo = find_repo()
+    push_options = resolve_push_options(repo, args.push_options)
     remote = resolve_push_remote(repo, args.repository)
     branch = repo.refs.current_branch()
     lease = lease.with_force_if_includes(
@@ -113,16 +124,12 @@ def run_push(argv: Sequence[str]) -> int:
     effective_lease = lease if lease.active and not args.force else None
 
     if args.atomic:
-        if effective_lease is None:
-            results = push_atomic_specs(repo, remote, plan.specs, force=args.force)
-        else:
-            results = push_atomic_specs(
-                repo,
-                remote,
-                plan.specs,
-                force=args.force,
-                lease=effective_lease,
-            )
+        atomic_kwargs = {"force": args.force}
+        if effective_lease is not None:
+            atomic_kwargs["lease"] = effective_lease
+        if push_options:
+            atomic_kwargs["push_options"] = push_options
+        results = push_atomic_specs(repo, remote, plan.specs, **atomic_kwargs)
     else:
         results = []
         single_spec_forces = bool(len(plan.specs) == 1 and plan.specs[0].force)
@@ -134,64 +141,42 @@ def run_push(argv: Sequence[str]) -> int:
             and plan.specs[0].source == branch
             and plan.specs[0].target == branch
             and (effective_lease is None or single_spec_forces)
+            and not push_options
         )
         for spec in plan.specs:
             effective_force = bool(args.force or spec.force)
             spec_lease = None if effective_force else effective_lease
+            transport_kwargs = {"force": effective_force}
+            if spec_lease is not None:
+                transport_kwargs["lease"] = spec_lease
+            if push_options:
+                transport_kwargs["push_options"] = push_options
+
             if spec.delete:
-                if spec_lease is None:
-                    result = delete_remote_ref(
-                        repo,
-                        remote,
-                        spec.target_ref,
-                        force=effective_force,
-                    )
-                else:
-                    result = delete_remote_ref(
-                        repo,
-                        remote,
-                        spec.target_ref,
-                        force=effective_force,
-                        lease=spec_lease,
-                    )
+                result = delete_remote_ref(
+                    repo,
+                    remote,
+                    spec.target_ref,
+                    **transport_kwargs,
+                )
             elif legacy_single:
                 result = repo.push(remote, force=effective_force)
             elif spec.namespace == "heads":
-                if spec_lease is None:
-                    result = push_branch(
-                        repo,
-                        remote,
-                        spec.source,
-                        spec.target,
-                        force=effective_force,
-                    )
-                else:
-                    result = push_branch(
-                        repo,
-                        remote,
-                        spec.source,
-                        spec.target,
-                        force=effective_force,
-                        lease=spec_lease,
-                    )
+                result = push_branch(
+                    repo,
+                    remote,
+                    spec.source,
+                    spec.target,
+                    **transport_kwargs,
+                )
             else:
-                if spec_lease is None:
-                    result = push_ref(
-                        repo,
-                        remote,
-                        spec.source_ref,
-                        spec.target_ref,
-                        force=effective_force,
-                    )
-                else:
-                    result = push_ref(
-                        repo,
-                        remote,
-                        spec.source_ref,
-                        spec.target_ref,
-                        force=effective_force,
-                        lease=spec_lease,
-                    )
+                result = push_ref(
+                    repo,
+                    remote,
+                    spec.source_ref,
+                    spec.target_ref,
+                    **transport_kwargs,
+                )
             results.append((spec, result))
 
     if args.set_upstream or plan.auto_setup_upstream:
