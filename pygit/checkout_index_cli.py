@@ -6,7 +6,8 @@ import argparse
 import sys
 from typing import List, Sequence, Union
 
-from .checkout_index import checkout_index, checkout_index_temp
+from .checkout_index import checkout_index_temp
+from .checkout_index_controls import checkout_index_controlled
 from .entrypoint import _find_repo
 
 
@@ -73,6 +74,19 @@ def _format_temp_records(records, stage: StageArgument, *, zero: bool) -> None:
         sys.stdout.write(separator.join(lines) + separator)
 
 
+def _quietable_checkout_error(exc: BaseException) -> bool:
+    if isinstance(exc, FileExistsError):
+        return True
+    if not isinstance(exc, KeyError):
+        return False
+    message = str(exc)
+    return (
+        "pathspec" in message
+        or "path is not in the index" in message
+        or "path has no stage" in message
+    )
+
+
 def run_checkout_index(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pygit checkout-index",
@@ -89,6 +103,45 @@ def run_checkout_index(argv: Sequence[str]) -> int:
         "--force",
         action="store_true",
         help="overwrite existing files (irrelevant in --temp mode)",
+    )
+    parser.add_argument(
+        "-n",
+        "--no-create",
+        dest="no_create",
+        action="store_true",
+        help="do not create checkout targets that are currently absent",
+    )
+    parser.add_argument(
+        "--create",
+        dest="no_create",
+        action="store_false",
+        help="create missing checkout targets (default)",
+    )
+    parser.add_argument(
+        "-u",
+        "--index",
+        dest="update_index",
+        action="store_true",
+        help="refresh size/mtime stat information for written index entries",
+    )
+    parser.add_argument(
+        "--no-index",
+        dest="update_index",
+        action="store_false",
+        help="do not refresh index stat information (default)",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        dest="quiet",
+        action="store_true",
+        help="suppress warnings for existing files and paths not in the index",
+    )
+    parser.add_argument(
+        "--no-quiet",
+        dest="quiet",
+        action="store_false",
+        help="show normal checkout warnings (default)",
     )
     parser.add_argument(
         "--prefix",
@@ -120,6 +173,7 @@ def run_checkout_index(argv: Sequence[str]) -> int:
         help="use NUL for --stdin path input and temporary mapping record output",
     )
     parser.add_argument("path", nargs="*", metavar="PATH")
+    parser.set_defaults(no_create=False, update_index=False, quiet=False)
     args = parser.parse_args(list(argv))
 
     if args.all and args.path:
@@ -158,12 +212,19 @@ def run_checkout_index(argv: Sequence[str]) -> int:
         _format_temp_records(records, args.stage, zero=args.null)
         return 0
 
-    checkout_index(
-        repo,
-        selected_paths,
-        all_entries=args.all,
-        force=args.force,
-        prefix=args.prefix,
-        stage=int(args.stage),
-    )
+    try:
+        checkout_index_controlled(
+            repo,
+            selected_paths,
+            all_entries=args.all,
+            force=args.force,
+            prefix=args.prefix,
+            stage=int(args.stage),
+            no_create=args.no_create,
+            update_index=args.update_index,
+        )
+    except (FileExistsError, KeyError) as exc:
+        if args.quiet and _quietable_checkout_error(exc):
+            return 1
+        raise
     return 0
