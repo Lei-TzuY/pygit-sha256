@@ -110,7 +110,7 @@ def main() -> None:
         return
 
     if argv and argv[0] == "remote" and len(argv) >= 2 and argv[1] in {
-        "add", "remove", "rm", "rename", "set-head", "get-url", "set-url"
+        "add", "remove", "rm", "rename", "set-head", "set-branches", "get-url", "set-url"
     }:
         _run_safe(run_remote, argv[1:])
         return
