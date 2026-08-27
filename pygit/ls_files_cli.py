@@ -49,6 +49,22 @@ def _root_patterns(prefix: str, patterns: Sequence[str]) -> list[str]:
     return translated
 
 
+def _read_exclude_patterns(paths: Sequence[str]) -> list[str]:
+    """Read non-empty, non-comment patterns from ``--exclude-from`` files."""
+    patterns: list[str] = []
+    for path_text in paths:
+        path = Path(path_text)
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as exc:
+            raise ValueError(f"cannot read exclude file {path_text!r}: {exc}") from exc
+        for line in lines:
+            pattern = line.strip()
+            if pattern and not pattern.startswith("#"):
+                patterns.append(pattern)
+    return patterns
+
+
 def _record_path(line: str) -> str:
     """Extract the repository-relative path from a formatted ls-files record."""
     _metadata, separator, path = line.rpartition("\t")
@@ -101,7 +117,9 @@ def run_ls_files(argv: Sequence[str]) -> int:
     parser.add_argument("-m", "--modified", action="store_true", help="show tracked paths modified in the worktree")
     parser.add_argument("-o", "--others", action="store_true", help="show untracked worktree paths")
     parser.add_argument("-k", "--killed", action="store_true", help="show untracked paths obstructing tracked paths")
-    parser.add_argument("-i", "--ignored", action="store_true", help="show only ignored untracked paths (requires --others --exclude-standard)")
+    parser.add_argument("-i", "--ignored", action="store_true", help="show only ignored untracked paths (requires --others and an exclude source)")
+    parser.add_argument("-x", "--exclude", action="append", default=[], metavar="PATTERN", help="skip untracked paths matching PATTERN")
+    parser.add_argument("-X", "--exclude-from", action="append", default=[], metavar="FILE", help="read additional exclude patterns from FILE")
     parser.add_argument("--exclude-standard", action="store_true", help="apply .gitignore, .pygitignore, and .pygit/info/exclude rules")
     parser.add_argument("--directory", action="store_true", help="show wholly-untracked directories with a trailing slash")
     parser.add_argument("--no-empty-directory", action="store_true", help="with --directory, suppress trees containing no files")
@@ -112,11 +130,11 @@ def run_ls_files(argv: Sequence[str]) -> int:
     args = parser.parse_args(list(argv))
 
     if args.ignored and not args.others:
-        parser.error("--ignored currently requires --others")
-    if args.ignored and not args.exclude_standard:
-        parser.error("--ignored requires --exclude-standard")
-    if args.exclude_standard and not args.others:
-        parser.error("--exclude-standard currently applies to --others")
+        parser.error("--ignored requires --others")
+    if args.ignored and not (args.exclude_standard or args.exclude or args.exclude_from):
+        parser.error("--ignored requires an exclude source")
+    if (args.exclude_standard or args.exclude or args.exclude_from) and not args.others:
+        parser.error("exclude options currently apply to --others")
     if args.directory and not args.others:
         parser.error("--directory requires --others")
     if args.no_empty_directory and not args.directory:
@@ -126,6 +144,7 @@ def run_ls_files(argv: Sequence[str]) -> int:
     prefix = _cwd_prefix(repo)
     try:
         patterns = _root_patterns(prefix, args.path)
+        exclude_patterns = [*args.exclude, *_read_exclude_patterns(args.exclude_from)]
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -153,6 +172,7 @@ def run_ls_files(argv: Sequence[str]) -> int:
                 repo,
                 ignored=args.ignored,
                 exclude_standard=args.exclude_standard,
+                exclude_patterns=exclude_patterns,
                 patterns=patterns,
                 directory=args.directory,
                 no_empty_directory=args.no_empty_directory,
