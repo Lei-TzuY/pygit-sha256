@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
+from .remote_branches import set_remote_branches
 from .remote_head import set_remote_head
 from .remote_lifecycle import add_remote, remove_remote, rename_remote
 from .remote_urls import get_remote_urls, set_remote_url
@@ -126,6 +127,20 @@ def _set_head(argv: Sequence[str]) -> int:
     return 0
 
 
+def _set_branches(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit remote set-branches",
+        description="Replace or append the branches tracked for a named remote.",
+    )
+    parser.add_argument("--add", action="store_true", help="append instead of replacing tracked branches")
+    parser.add_argument("name", metavar="NAME")
+    parser.add_argument("branches", nargs="*", metavar="BRANCH")
+    args = parser.parse_args(list(argv))
+
+    set_remote_branches(find_repo(), args.name, args.branches, add=args.add)
+    return 0
+
+
 def run_remote(argv: Sequence[str]) -> int:
     if not argv:
         raise ValueError("remote porcelain requires a subcommand")
@@ -142,4 +157,6 @@ def run_remote(argv: Sequence[str]) -> int:
         return _rename(rest)
     if command == "set-head":
         return _set_head(rest)
+    if command == "set-branches":
+        return _set_branches(rest)
     raise ValueError(f"unsupported remote subcommand: {command}")
