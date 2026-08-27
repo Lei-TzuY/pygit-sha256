@@ -73,23 +73,24 @@ def _update_destination(repo: Repository, destination: str, sha: str, *, force: 
     raise ValueError(f"unsupported fetch destination: {destination!r}")
 
 
-def _configured_destinations(
+def _mapped_destinations(
     source: str,
-    configured: Sequence[FetchRefspec],
+    mappings: Sequence[FetchRefspec],
     command_matches: Sequence[FetchRefspec],
 ) -> List[Tuple[str, bool]]:
+    """Resolve explicit destinations, otherwise apply refmap/config mappings."""
     result: List[Tuple[str, bool]] = []
     for command in command_matches:
         destination = command.destination_for(source)
         if destination is not None:
             result.append((destination, command.force))
             continue
-        for configured_spec in configured:
-            if configured_spec.negative or not configured_spec.matches_source(source):
+        for mapping in mappings:
+            if mapping.negative or not mapping.matches_source(source):
                 continue
-            mapped = configured_spec.destination_for(source)
+            mapped = mapping.destination_for(source)
             if mapped is not None:
-                result.append((mapped, command.force or configured_spec.force))
+                result.append((mapped, command.force or mapping.force))
     # Preserve order while avoiding duplicate writes.
     unique: List[Tuple[str, bool]] = []
     for item in result:
@@ -103,6 +104,7 @@ def _explicit_fetch(
     remote: str,
     refspecs: Sequence[str],
     *,
+    refmap: Optional[Sequence[str]],
     prune: Optional[bool],
     prune_tags: Optional[bool],
     tags: Optional[bool],
@@ -112,7 +114,14 @@ def _explicit_fetch(
     client = SmartHttpClient(url)
     advertisement = client.discover()
     policy = resolve_fetch_policy(repo, remote, prune=prune, prune_tags=prune_tags, tags=tags)
-    configured = configured_fetch_refspecs(repo, remote)
+    if refmap is None:
+        mappings = configured_fetch_refspecs(repo, remote)
+    else:
+        # Git's --refmap='' suppresses remote.<name>.fetch mapping entirely.
+        # Empty entries therefore contribute no mapping, while non-empty
+        # repeated --refmap values are applied in source order.
+        mappings = [parse_fetch_refspec(value) for value in refmap if value.strip()]
+
     command = [parse_fetch_refspec(value) for value in refspecs]
     if command and not any(not spec.negative for spec in command):
         raise ValueError("explicit fetch refspecs require at least one positive refspec")
@@ -129,7 +138,7 @@ def _explicit_fetch(
         if not matches:
             continue
         selected[refname] = oid
-        destinations[refname] = _configured_destinations(refname, configured, matches)
+        destinations[refname] = _mapped_destinations(refname, mappings, matches)
 
     native_map = repo._read_native_map(remote)
     known_by_native = {native: sha for sha, native in native_map.items()}
@@ -172,17 +181,21 @@ def fetch_porcelain(
     remote: str = "origin",
     *,
     refspecs: Optional[Sequence[str]] = None,
+    refmap: Optional[Sequence[str]] = None,
     prune: Optional[bool] = None,
     prune_tags: Optional[bool] = None,
     tags: Optional[bool] = None,
     append_fetch_head: bool = False,
 ) -> Dict[str, object]:
-    """Fetch like Git porcelain, including explicit refspec and FETCH_HEAD rules."""
+    """Fetch like Git porcelain, including explicit refspec/refmap and FETCH_HEAD rules."""
+    if refmap is not None and not refspecs:
+        raise RuntimeError("--refmap option is only meaningful with command-line refspec(s)")
     if refspecs:
         return _explicit_fetch(
             repo,
             remote,
             refspecs,
+            refmap=refmap,
             prune=prune,
             prune_tags=prune_tags,
             tags=tags,
