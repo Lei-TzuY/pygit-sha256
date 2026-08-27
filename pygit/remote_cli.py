@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
+from .remote_head import set_remote_head
 from .remote_lifecycle import add_remote, remove_remote, rename_remote
 from .remote_urls import get_remote_urls, set_remote_url
 from .tracking import find_repo
@@ -96,6 +97,35 @@ def _rename(argv: Sequence[str]) -> int:
     return 0
 
 
+def _set_head(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit remote set-head",
+        description="Set or delete the default branch for a named remote.",
+    )
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("-a", "--auto", action="store_true", help="query the remote and set its advertised HEAD")
+    modes.add_argument("-d", "--delete", action="store_true", help="delete refs/remotes/NAME/HEAD")
+    parser.add_argument("name", metavar="NAME")
+    parser.add_argument("branch", nargs="?", metavar="BRANCH")
+    args = parser.parse_args(list(argv))
+
+    if args.branch is None and not args.auto and not args.delete:
+        parser.error("one of --auto, --delete, or BRANCH is required")
+    if args.branch is not None and (args.auto or args.delete):
+        parser.error("BRANCH cannot be combined with --auto or --delete")
+
+    selected = set_remote_head(
+        find_repo(),
+        args.name,
+        args.branch,
+        auto=args.auto,
+        delete=args.delete,
+    )
+    if args.auto and selected is not None:
+        print(f"{args.name}/HEAD set to {selected}")
+    return 0
+
+
 def run_remote(argv: Sequence[str]) -> int:
     if not argv:
         raise ValueError("remote porcelain requires a subcommand")
@@ -110,4 +140,6 @@ def run_remote(argv: Sequence[str]) -> int:
         return _remove(rest)
     if command == "rename":
         return _rename(rest)
+    if command == "set-head":
+        return _set_head(rest)
     raise ValueError(f"unsupported remote subcommand: {command}")
