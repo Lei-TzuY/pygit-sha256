@@ -9,6 +9,7 @@ from .push_defaults import PushPlan, all_branch_specs, all_tag_specs, delete_spe
 from .push_includes import extract_force_if_includes, resolve_force_if_includes
 from .push_lease import extract_force_with_lease
 from .push_options import resolve_push_options
+from .push_prune import prune_specs
 from .push_transport import delete_remote_ref, push_atomic_specs, push_branch, push_ref
 from .remote_ops import resolve_push_remote
 from .tracking import TrackingSource, find_repo, set_branch_upstream
@@ -24,9 +25,6 @@ def run_push(argv: Sequence[str]) -> int:
     parser.add_argument("repository", nargs="?", metavar="REPOSITORY")
     parser.add_argument("refspecs", nargs="*", metavar="REFSPEC")
     parser.add_argument("-f", "--force", action="store_true", help="force non-fast-forward updates")
-    # These declarations are retained for --help.  The actual lease options are
-    # pre-parsed so a bare --force-with-lease never consumes the following
-    # repository name as an optional argument.
     parser.add_argument(
         "--force-with-lease",
         nargs="?",
@@ -38,8 +36,6 @@ def run_push(argv: Sequence[str]) -> int:
         action="store_true",
         help="cancel preceding force-with-lease requests",
     )
-    # force-if-includes is also pre-parsed so repeated positive/negative forms
-    # use Git's last-option-wins behavior while remaining visible in --help.
     parser.add_argument(
         "--force-if-includes",
         action="store_true",
@@ -61,6 +57,7 @@ def run_push(argv: Sequence[str]) -> int:
     )
     parser.add_argument("--all", "--branches", dest="all_branches", action="store_true", help="push all local branches")
     parser.add_argument("--tags", action="store_true", help="push all local tags")
+    parser.add_argument("--prune", action="store_true", help="remove remote refs missing a local counterpart under selected patterns")
     parser.add_argument("-d", "--delete", action="store_true", help="delete the listed remote refs")
     atomic = parser.add_mutually_exclusive_group()
     atomic.add_argument(
@@ -90,6 +87,8 @@ def run_push(argv: Sequence[str]) -> int:
         parser.error("--all cannot be combined with --delete")
     if args.delete and args.tags:
         parser.error("--delete cannot be combined with --tags")
+    if args.delete and args.prune:
+        parser.error("--delete cannot be combined with --prune")
     if args.delete and not args.refspecs:
         parser.error("--delete requires at least one ref name")
 
@@ -116,6 +115,23 @@ def run_push(argv: Sequence[str]) -> int:
         plan = PushPlan(remote, tuple(specs), "tags")
     else:
         plan = resolve_push_plan(repo, remote, args.refspecs)
+
+    if args.prune:
+        deletions = prune_specs(
+            repo,
+            remote,
+            plan,
+            args.refspecs,
+            all_branches=args.all_branches,
+            tags=args.tags,
+        )
+        if deletions:
+            plan = PushPlan(
+                plan.remote,
+                tuple(plan.specs) + deletions,
+                plan.mode,
+                auto_setup_upstream=plan.auto_setup_upstream,
+            )
 
     if not plan.specs:
         print("Everything up-to-date")
