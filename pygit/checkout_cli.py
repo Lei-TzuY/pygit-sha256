@@ -44,8 +44,6 @@ def run_checkout(argv: Sequence[str]) -> int:
     track_group.add_argument(
         "--track",
         dest="track",
-        nargs="?",
-        const="direct",
         choices=("direct", "inherit"),
         metavar="{direct,inherit}",
         help="set upstream tracking for a newly created branch",
@@ -61,7 +59,8 @@ def run_checkout(argv: Sequence[str]) -> int:
     parser.add_argument("target", nargs="?", metavar="BRANCH|SHA")
     parser.add_argument("start_point", nargs="?", metavar="START_POINT")
     parser.add_argument("paths", nargs="*", metavar="PATH")
-    args = parser.parse_args(list(argv))
+    normalized = ["--track=direct" if token == "--track" else token for token in argv]
+    args = parser.parse_args(normalized)
 
     repo = find_repo()
 
