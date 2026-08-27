@@ -41,7 +41,7 @@ from .cat_file import (
     run_batch_commands,
     split_batch_input,
 )
-from .checkout_index import checkout_index
+from .checkout_index import CheckoutTempRecord, checkout_index, checkout_index_temp
 from .hash_object import hash_object_data, hash_path, object_envelope, write_object_data
 from .diff_plumbing import DiffEntry, diff_files, diff_index, diff_tree, format_diff_entries
 from .fsck import FsckIssue, FsckReport, fsck
@@ -133,7 +133,9 @@ __all__ = [
     "split_batch_input",
     "parse_batch_command",
     "run_batch_commands",
+    "CheckoutTempRecord",
     "checkout_index",
+    "checkout_index_temp",
     "hash_object_data",
     "write_object_data",
     "hash_path",
