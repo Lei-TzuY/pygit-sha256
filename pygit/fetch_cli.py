@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
-from .fetch_configured import fetch_configured
+from .fetch_porcelain import fetch_porcelain
 from .remote_ops import configured_upstream
 from .tracking import find_repo
 
@@ -86,7 +86,7 @@ def run_fetch(argv: Sequence[str]) -> int:
 
     repo = find_repo()
     remote = args.remote or _default_fetch_remote(repo)
-    result = fetch_configured(
+    result = fetch_porcelain(
         repo,
         remote,
         prune=args.prune,
