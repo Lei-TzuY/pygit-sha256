@@ -26,6 +26,7 @@ from .reflog_expire_cli import run_reflog_expire
 from .reflog_show_cli import run_reflog_show
 from .rev_list_disk_usage_cli import run_rev_list_disk_usage
 from .show_ref_cli import run_show_ref
+from .status_cli import run_status
 from .update_ref_cli import run_update_ref
 from .verify_pack_cli import run_verify_pack
 
@@ -71,6 +72,10 @@ def main() -> None:
 
     if argv and argv[0] == "fsck":
         _run_safe(run_fsck, argv[1:])
+        return
+
+    if argv and argv[0] == "status":
+        _run_safe(run_status, argv[1:])
         return
 
     if argv and argv[0] == "ls-tree":
