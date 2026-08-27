@@ -125,6 +125,10 @@ def run_checkout_index(argv: Sequence[str]) -> int:
     if args.null and not (args.stdin or temp_mode):
         parser.error("-z/--null requires --stdin, --temp, or --stage=all")
 
+    # Even a no-op checkout-index invocation is repository-scoped. Resolve the
+    # repository before consuming stdin or returning from an empty selection.
+    repo = _find_repo()
+
     if args.stdin:
         try:
             selected_paths = _read_stdin_paths(zero=args.null)
@@ -142,7 +146,6 @@ def run_checkout_index(argv: Sequence[str]) -> int:
     if not args.all and not selected_paths:
         return 0
 
-    repo = _find_repo()
     if temp_mode:
         records = checkout_index_temp(
             repo,
