@@ -1,6 +1,6 @@
 """Stable top-level application entrypoint.
 
-Most commands continue through :mod:`pygit.launcher`.  Commands that need a
+Most commands continue through :mod:`pygit.launcher`. Commands that need a
 modern nested/custom grammar are handled here before the legacy argparse stack.
 """
 
@@ -29,6 +29,7 @@ from .push_cli import run_push
 from .read_tree_cli import run_read_tree
 from .reflog_expire_cli import run_reflog_expire
 from .reflog_show_cli import run_reflog_show
+from .remote_cli import run_remote
 from .rev_list_disk_usage_cli import run_rev_list_disk_usage
 from .show_ref_cli import run_show_ref
 from .status_cli import run_status
@@ -101,6 +102,10 @@ def main() -> None:
 
     if argv and argv[0] == "push":
         _run_safe(run_push, argv[1:])
+        return
+
+    if argv and argv[0] == "remote" and len(argv) >= 2 and argv[1] in {"get-url", "set-url"}:
+        _run_safe(run_remote, argv[1:])
         return
 
     if argv and argv[0] == "ls-tree":
