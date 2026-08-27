@@ -18,9 +18,21 @@ from .repo import Repository
 
 
 def configured_fetch_refspecs(repo: Repository, remote: str) -> List[str]:
-    """Return ordered configured fetch refspecs, or Git's normal branch mapping."""
-    values = GitConfig(repo.pygit_dir).get_all("remote", f"{remote}.fetch")
-    return values or [f"+refs/heads/*:refs/remotes/{remote}/*"]
+    """Return the configured fetch refspec list for one remote.
+
+    Older pygit repositories may have only the historical JSON remote metadata;
+    those retain the traditional all-heads mapping as a compatibility fallback.
+    Once a Git-style ``remote.<name>.url`` exists, however, an absent fetch key
+    is meaningful: native ``remote set-branches <name>`` with no branches clears
+    the tracked-branch list, so future fetches must not recreate the wildcard.
+    """
+    config = GitConfig(repo.pygit_dir)
+    values = config.get_all("remote", f"{remote}.fetch")
+    if values:
+        return values
+    if config.get("remote", f"{remote}.url") is not None:
+        return []
+    return [f"+refs/heads/*:refs/remotes/{remote}/*"]
 
 
 def _source_pattern(raw: str) -> tuple[bool, str]:
