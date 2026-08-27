@@ -9,7 +9,7 @@ preserving pygit's existing automatic tag import behavior.
 from __future__ import annotations
 
 import fnmatch
-from typing import Dict, Iterable, List
+from typing import Dict, List
 
 from .config import GitConfig
 from .remote import NativeImporter, SmartHttpClient
@@ -49,12 +49,12 @@ def select_fetch_import_refs(
     remote: str,
     native_refs: Dict[str, str],
 ) -> Dict[str, str]:
-    """Filter advertised branch refs through ``remote.<name>.fetch``.
+    """Filter advertised refs through ``remote.<name>.fetch`` branch sources.
 
-    ``HEAD`` and tags keep the historical importer behavior.  Positive branch
-    patterns establish the fetched branch domain; negative refspecs subtract
-    from it.  This is enough to make clone's exact single-branch mapping persist
-    across later fetch/pull operations without changing tag semantics here.
+    The advertisement's pseudo-ref ``HEAD`` is metadata, not a tracking ref, so
+    it is never a transfer target here.  Tags retain pygit's historical import
+    behavior.  Positive branch patterns establish the fetched branch domain;
+    negative refspecs subtract from it.
     """
     positives: List[str] = []
     negatives: List[str] = []
@@ -64,6 +64,8 @@ def select_fetch_import_refs(
 
     result: Dict[str, str] = {}
     for refname, oid in native_refs.items():
+        if refname == "HEAD":
+            continue
         if not refname.startswith("refs/heads/"):
             result[refname] = oid
             continue
@@ -88,6 +90,9 @@ def fetch_configured(repo: Repository, remote: str = "origin") -> Dict[str, obje
             ref_name: known_by_native[native_oid]
             for ref_name, native_oid in native_refs.items()
         }
+        object_count = 0
+    elif not native_refs:
+        imported = {}
         object_count = 0
     else:
         result = client.fetch(
