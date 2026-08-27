@@ -3,8 +3,9 @@ Minimal ``.pygitignore`` support.
 
 The matcher intentionally implements the useful subset of gitignore syntax:
 blank lines, comments, negation, directory patterns, rooted patterns, and
-shell-style wildcards.  Patterns are evaluated in order so later entries can
-override earlier ones.
+shell-style wildcards. Patterns are evaluated in order so later entries can
+override earlier ones. Phase 155 additionally exposes whether the path itself,
+rather than one of its ignored ancestors, is the final matching ignore target.
 """
 
 from __future__ import annotations
@@ -34,6 +35,22 @@ class IgnorePattern:
 
         return self._matches_one(candidate)
 
+    def matches_explicitly(self, path: str, is_dir: bool = False) -> bool:
+        """Return whether this pattern directly matches ``path`` itself.
+
+        Ordinary ignore evaluation lets a directory-only pattern match all of
+        that directory's descendants. ``status --ignored=matching`` needs to
+        distinguish that inherited ignored state from the directory path that
+        actually matched the pattern, so directory-only patterns are direct
+        matches only for directories themselves.
+        """
+        candidate = path.strip("/")
+        if not candidate:
+            return False
+        if self.directory_only and not is_dir:
+            return False
+        return self._matches_one(candidate)
+
     def _matches_one(self, candidate: str) -> bool:
         pattern = self.pattern.strip("/")
         if not pattern:
@@ -55,7 +72,7 @@ class IgnorePattern:
 
 
 class IgnoreMatcher:
-    """Load and evaluate patterns from a worktree's ``.pygitignore`` file."""
+    """Load and evaluate patterns from a worktree's ignore files."""
 
     def __init__(self, worktree: Path) -> None:
         self.worktree = worktree
@@ -99,3 +116,19 @@ class IgnoreMatcher:
             if pattern.matches(path, is_dir=is_dir):
                 ignored = not pattern.negated
         return ignored
+
+    def is_explicitly_ignored(self, path: str, is_dir: bool = False) -> bool:
+        """Return final ignored state from patterns directly matching ``path``.
+
+        Inherited directory matches are deliberately excluded. Later negated
+        patterns retain their normal precedence, which is important when
+        deciding whether a directory should be the single matching-mode record
+        or whether its ignored descendants should be emitted individually.
+        """
+        matched = False
+        ignored = False
+        for pattern in self.patterns:
+            if pattern.matches_explicitly(path, is_dir=is_dir):
+                matched = True
+                ignored = not pattern.negated
+        return matched and ignored
