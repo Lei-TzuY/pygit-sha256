@@ -6,6 +6,7 @@ import argparse
 from typing import Sequence
 
 from .push_defaults import PushPlan, all_branch_specs, all_tag_specs, delete_specs, resolve_push_plan
+from .push_follow_tags import follow_tag_specs, resolve_follow_tags
 from .push_includes import extract_force_if_includes, resolve_force_if_includes
 from .push_lease import extract_force_with_lease
 from .push_options import resolve_push_options
@@ -57,6 +58,19 @@ def run_push(argv: Sequence[str]) -> int:
     )
     parser.add_argument("--all", "--branches", dest="all_branches", action="store_true", help="push all local branches")
     parser.add_argument("--tags", action="store_true", help="push all local tags")
+    follow_tags = parser.add_mutually_exclusive_group()
+    follow_tags.add_argument(
+        "--follow-tags",
+        dest="follow_tags",
+        action="store_true",
+        help="push missing annotated tags reachable from refs being pushed",
+    )
+    follow_tags.add_argument(
+        "--no-follow-tags",
+        dest="follow_tags",
+        action="store_false",
+        help="do not automatically push reachable annotated tags",
+    )
     parser.add_argument("--prune", action="store_true", help="remove remote refs missing a local counterpart under selected patterns")
     parser.add_argument("-d", "--delete", action="store_true", help="delete the listed remote refs")
     atomic = parser.add_mutually_exclusive_group()
@@ -72,7 +86,7 @@ def run_push(argv: Sequence[str]) -> int:
         action="store_false",
         help="do not request an atomic remote ref transaction",
     )
-    parser.set_defaults(atomic=False)
+    parser.set_defaults(atomic=False, follow_tags=None)
     parser.add_argument(
         "-u",
         "--set-upstream",
@@ -99,6 +113,7 @@ def run_push(argv: Sequence[str]) -> int:
     lease = lease.with_force_if_includes(
         resolve_force_if_includes(repo, includes_override)
     )
+    follow_tags_enabled = resolve_follow_tags(repo, args.follow_tags)
 
     if args.delete:
         plan = PushPlan(remote, delete_specs(repo, args.refspecs), "delete")
@@ -129,6 +144,16 @@ def run_push(argv: Sequence[str]) -> int:
             plan = PushPlan(
                 plan.remote,
                 tuple(plan.specs) + deletions,
+                plan.mode,
+                auto_setup_upstream=plan.auto_setup_upstream,
+            )
+
+    if follow_tags_enabled:
+        additions = follow_tag_specs(repo, remote, plan, args.refspecs)
+        if additions:
+            plan = PushPlan(
+                plan.remote,
+                tuple(plan.specs) + additions,
                 plan.mode,
                 auto_setup_upstream=plan.auto_setup_upstream,
             )
