@@ -1,10 +1,11 @@
-"""Modern ``pygit remote get-url`` / ``set-url`` porcelain."""
+"""Modern ``pygit remote`` lifecycle and URL porcelain."""
 
 from __future__ import annotations
 
 import argparse
 from typing import Sequence
 
+from .remote_lifecycle import add_remote, remove_remote, rename_remote
 from .remote_urls import get_remote_urls, set_remote_url
 from .tracking import find_repo
 
@@ -57,12 +58,56 @@ def _set_url(argv: Sequence[str]) -> int:
     return 0
 
 
+def _add(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit remote add",
+        description="Add a named remote and its default fetch mapping.",
+    )
+    parser.add_argument("name", metavar="NAME")
+    parser.add_argument("url", metavar="URL")
+    args = parser.parse_args(list(argv))
+
+    add_remote(find_repo(), args.name, args.url)
+    return 0
+
+
+def _remove(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit remote remove",
+        description="Remove a remote, its tracking refs, and related configuration.",
+    )
+    parser.add_argument("name", metavar="NAME")
+    args = parser.parse_args(list(argv))
+
+    remove_remote(find_repo(), args.name)
+    return 0
+
+
+def _rename(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pygit remote rename",
+        description="Rename a remote, its tracking refs, and related configuration.",
+    )
+    parser.add_argument("old", metavar="OLD")
+    parser.add_argument("new", metavar="NEW")
+    args = parser.parse_args(list(argv))
+
+    rename_remote(find_repo(), args.old, args.new)
+    return 0
+
+
 def run_remote(argv: Sequence[str]) -> int:
     if not argv:
-        raise ValueError("remote URL porcelain requires get-url or set-url")
+        raise ValueError("remote porcelain requires a subcommand")
     command, rest = argv[0], argv[1:]
     if command == "get-url":
         return _get_url(rest)
     if command == "set-url":
         return _set_url(rest)
-    raise ValueError(f"unsupported remote URL subcommand: {command}")
+    if command == "add":
+        return _add(rest)
+    if command in {"remove", "rm"}:
+        return _remove(rest)
+    if command == "rename":
+        return _rename(rest)
+    raise ValueError(f"unsupported remote subcommand: {command}")
