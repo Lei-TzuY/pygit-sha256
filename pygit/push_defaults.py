@@ -1,4 +1,4 @@
-"""Resolve Git-style default push refspecs and safety rules."""
+"""Resolve Git-style default and explicit push refspecs."""
 
 from __future__ import annotations
 
@@ -12,17 +12,32 @@ from .repo import Repository
 
 @dataclass(frozen=True)
 class PushSpec:
-    """One local branch -> remote branch update."""
+    """One local ref -> remote ref update.
+
+    ``source``/``target`` retain the Phase166 short branch representation for
+    branch pushes. Tag specs use short tag names with ``namespace='tags'``;
+    deletion specs carry an empty source.
+    """
 
     source: str
     target: str
     force: bool = False
+    namespace: str = "heads"
+    delete: bool = False
+
+    @property
+    def source_ref(self) -> str:
+        if self.delete:
+            return ""
+        return f"refs/{self.namespace}/{self.source}"
+
+    @property
+    def target_ref(self) -> str:
+        return f"refs/{self.namespace}/{self.target}"
 
 
 @dataclass(frozen=True)
 class PushPlan:
-    """Resolved no-refspec/explicit-refspec push operation."""
-
     remote: str
     specs: Tuple[PushSpec, ...]
     mode: str
@@ -30,46 +45,74 @@ class PushPlan:
 
 
 def _true(value: Optional[str]) -> bool:
-    if value is None:
-        return False
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _current_branch(repo: Repository) -> str:
     branch = repo.refs.current_branch()
     if not branch:
-        raise RuntimeError("cannot choose a push refspec from detached HEAD")
+        raise RuntimeError("cannot choose a branch push refspec from detached HEAD")
     return branch
 
 
-def _strip_heads(value: str, *, field: str) -> str:
+def _ref_parts(value: str, *, field: str) -> Tuple[str, str]:
     if value.startswith("refs/heads/"):
-        value = value[len("refs/heads/") :]
+        name = value[len("refs/heads/") :]
+        namespace = "heads"
+    elif value.startswith("refs/tags/"):
+        name = value[len("refs/tags/") :]
+        namespace = "tags"
     elif value.startswith("refs/"):
-        raise RuntimeError(f"Phase166 push refspecs only support branch {field}s: '{value}'")
-    if not value:
-        raise RuntimeError(f"empty push {field} branch is not supported")
-    return value
+        raise RuntimeError(f"unsupported push {field} namespace: '{value}'")
+    else:
+        name = value
+        namespace = "heads"
+    if not name:
+        raise RuntimeError(f"empty push {field} ref is not supported")
+    return namespace, name
 
 
-def _source_branch(repo: Repository, value: str) -> str:
+def _source(repo: Repository, value: str) -> Tuple[str, str]:
     if value == "HEAD":
-        return _current_branch(repo)
-    branch = _strip_heads(value, field="source")
-    if not repo.refs.get_branch(branch):
-        raise KeyError(f"Unknown local branch: '{branch}'")
-    return branch
+        return "heads", _current_branch(repo)
+    namespace, name = _ref_parts(value, field="source")
+    oid = repo.refs.get_branch(name) if namespace == "heads" else repo.refs.get_tag(name)
+    if not oid:
+        kind = "branch" if namespace == "heads" else "tag"
+        raise KeyError(f"Unknown local {kind}: '{name}'")
+    return namespace, name
+
+
+def _matching_specs(repo: Repository, remote: str, *, force: bool = False) -> Tuple[PushSpec, ...]:
+    local = set(repo.refs.list_branches())
+    remote_names = set(repo.refs.list_remotes(remote))
+    return tuple(PushSpec(branch, branch, force=force) for branch in sorted(local & remote_names))
+
+
+def _pattern_specs(repo: Repository, text: str, *, force: bool) -> Tuple[PushSpec, ...]:
+    src, dst = text.split(":", 1)
+    if src.count("*") != 1 or dst.count("*") != 1:
+        raise RuntimeError(f"push wildcard refspec requires one '*' on each side: '{text}'")
+    src_ns, src_pat = _ref_parts(src, field="source")
+    dst_ns, dst_pat = _ref_parts(dst, field="destination")
+    if src_ns != dst_ns:
+        raise RuntimeError("wildcard push refspecs must stay within one ref namespace")
+
+    prefix, suffix = src_pat.split("*", 1)
+    dpre, dsuf = dst_pat.split("*", 1)
+    names = repo.refs.list_branches() if src_ns == "heads" else repo.refs.list_tags()
+    specs = []
+    for name in names:
+        if not name.startswith(prefix) or not name.endswith(suffix):
+            continue
+        middle_end = len(name) - len(suffix) if suffix else len(name)
+        middle = name[len(prefix) : middle_end]
+        specs.append(PushSpec(name, f"{dpre}{middle}{dsuf}", force=force, namespace=src_ns))
+    return tuple(specs)
 
 
 def parse_push_refspec(repo: Repository, text: str) -> Tuple[PushSpec, ...]:
-    """Parse the branch-only subset of Git push refspec syntax.
-
-    Supports ``branch``, ``HEAD``, ``src:dst``, a leading ``+`` force marker,
-    and the special ``:`` / ``+:`` matching forms. Deletion refspecs, tags,
-    arbitrary revision expressions, and wildcard refspecs are intentionally
-    left for later phases.
-    """
-
+    """Parse branch/tag, deletion, matching, and one-star pattern refspecs."""
     raw = text.strip()
     if not raw:
         raise RuntimeError("empty push refspec")
@@ -77,35 +120,39 @@ def parse_push_refspec(repo: Repository, text: str) -> Tuple[PushSpec, ...]:
     body = raw[1:] if force else raw
     if body == ":":
         return (PushSpec(":", ":", force=force),)
-    if "*" in body or body.startswith(":") or body.endswith(":"):
-        raise RuntimeError(f"unsupported push refspec in Phase166: '{text}'")
+    if body.startswith("^"):
+        raise RuntimeError("negative push refspecs are not supported yet")
+    if body.count(":") > 1:
+        raise RuntimeError(f"invalid push refspec: '{text}'")
+    if "*" in body:
+        if ":" not in body:
+            raise RuntimeError("wildcard push refspec requires an explicit destination")
+        return _pattern_specs(repo, body, force=force)
+
+    if body.startswith(":"):
+        target_text = body[1:]
+        namespace, target = _ref_parts(target_text, field="destination")
+        return (PushSpec("", target, force=force, namespace=namespace, delete=True),)
+    if body.endswith(":"):
+        raise RuntimeError(f"empty push destination is not supported: '{text}'")
 
     if ":" in body:
         source_text, target_text = body.split(":", 1)
-        if ":" in target_text:
-            raise RuntimeError(f"invalid push refspec: '{text}'")
-        source = _source_branch(repo, source_text)
-        target = _strip_heads(target_text, field="destination")
+        src_ns, source = _source(repo, source_text)
+        dst_ns, target = _ref_parts(target_text, field="destination")
+        # Git infers an unqualified destination namespace from the source.
+        if not target_text.startswith("refs/"):
+            dst_ns = src_ns
+        if src_ns != dst_ns:
+            raise RuntimeError("cross-namespace push refspecs are not supported")
     else:
-        source = _source_branch(repo, body)
+        src_ns, source = _source(repo, body)
         target = source
-    return (PushSpec(source, target, force=force),)
+        dst_ns = src_ns
+    return (PushSpec(source, target, force=force, namespace=dst_ns),)
 
 
-def _matching_specs(repo: Repository, remote: str, *, force: bool = False) -> Tuple[PushSpec, ...]:
-    local = set(repo.refs.list_branches())
-    remote_names = set(repo.refs.list_remotes(remote))
-    return tuple(
-        PushSpec(branch, branch, force=force)
-        for branch in sorted(local & remote_names)
-    )
-
-
-def _expand_refspecs(
-    repo: Repository,
-    remote: str,
-    values: Iterable[str],
-) -> Tuple[PushSpec, ...]:
+def _expand_refspecs(repo: Repository, remote: str, values: Iterable[str]) -> Tuple[PushSpec, ...]:
     specs = []
     for value in values:
         parsed = parse_push_refspec(repo, value)
@@ -116,14 +163,28 @@ def _expand_refspecs(
     return tuple(specs)
 
 
+def all_branch_specs(repo: Repository, *, force: bool = False) -> Tuple[PushSpec, ...]:
+    return tuple(PushSpec(name, name, force=force) for name in repo.refs.list_branches())
+
+
+def all_tag_specs(repo: Repository, *, force: bool = False) -> Tuple[PushSpec, ...]:
+    return tuple(PushSpec(name, name, force=force, namespace="tags") for name in repo.refs.list_tags())
+
+
+def delete_specs(repo: Repository, values: Sequence[str]) -> Tuple[PushSpec, ...]:
+    specs = []
+    for value in values:
+        raw = value[1:] if value.startswith("+") else value
+        if ":" in raw or "*" in raw:
+            raise RuntimeError("--delete accepts ref names, not refspec mappings")
+        namespace, target = _ref_parts(raw, field="destination")
+        specs.append(PushSpec("", target, namespace=namespace, delete=True))
+    return tuple(specs)
+
+
 def _configured_push_refspecs(repo: Repository, remote: str) -> Tuple[str, ...]:
     value = repo.config_get("remote", f"{remote}.push")
-    if not value:
-        return ()
-    # The repository's educational config layer stores one scalar value per
-    # key. Accept shell-style whitespace to make that scalar useful for one or
-    # more branch refspecs while keeping deterministic parsing.
-    return tuple(shlex.split(value))
+    return tuple(shlex.split(value)) if value else ()
 
 
 def _default_fetch_remote(repo: Repository) -> Optional[str]:
@@ -144,19 +205,7 @@ def push_default(repo: Repository) -> str:
     return value
 
 
-def resolve_push_plan(
-    repo: Repository,
-    remote: str,
-    refspecs: Sequence[str] = (),
-) -> PushPlan:
-    """Resolve destination branch(es) for one push invocation.
-
-    Precedence follows Git: command-line refspecs, then ``remote.<name>.push``,
-    then ``push.default``. ``push.autoSetupRemote`` is carried in the plan so
-    the CLI can persist tracking after a successful default push.
-    """
-
-    current = _current_branch(repo)
+def resolve_push_plan(repo: Repository, remote: str, refspecs: Sequence[str] = ()) -> PushPlan:
     explicit = tuple(refspecs)
     if explicit:
         return PushPlan(remote, _expand_refspecs(repo, remote, explicit), "explicit")
@@ -165,68 +214,32 @@ def resolve_push_plan(
     if configured:
         return PushPlan(remote, _expand_refspecs(repo, remote, configured), "remote.push")
 
+    current = _current_branch(repo)
     mode = push_default(repo)
     if mode == "nothing":
-        raise RuntimeError(
-            'no refspec was specified and push.default is "nothing"'
-        )
+        raise RuntimeError('no refspec was specified and push.default is "nothing"')
     if mode == "matching":
         return PushPlan(remote, _matching_specs(repo, remote), mode)
 
     upstream = configured_upstream(repo, current)
     auto_setup = _true(repo.config_get("push", "autoSetupRemote"))
-
     if mode == "current":
-        return PushPlan(
-            remote,
-            (PushSpec(current, current),),
-            mode,
-            auto_setup_upstream=auto_setup and upstream is None,
-        )
-
+        return PushPlan(remote, (PushSpec(current, current),), mode, auto_setup_upstream=auto_setup and upstream is None)
     if mode == "upstream":
         if upstream is None:
             if auto_setup:
-                return PushPlan(
-                    remote,
-                    (PushSpec(current, current),),
-                    mode,
-                    auto_setup_upstream=True,
-                )
+                return PushPlan(remote, (PushSpec(current, current),), mode, auto_setup_upstream=True)
             raise RuntimeError(f"current branch '{current}' has no upstream branch")
         if upstream.remote == "." or upstream.remote != remote:
-            raise RuntimeError(
-                f"push.default=upstream requires pushing to upstream remote "
-                f"'{upstream.remote}', not '{remote}'"
-            )
+            raise RuntimeError(f"push.default=upstream requires pushing to upstream remote '{upstream.remote}', not '{remote}'")
         return PushPlan(remote, (PushSpec(current, upstream.branch),), mode)
 
-    # simple: on the branch's pull remote, require an upstream with the same
-    # branch name. When pushing to a different repository, simple behaves like
-    # current. With no tracking config, origin/the sole remote is the central
-    # pull-side fallback and therefore requires an upstream unless
-    # push.autoSetupRemote is enabled.
     if upstream is not None and upstream.remote == remote:
         if upstream.branch != current:
-            raise RuntimeError(
-                f"upstream branch '{upstream.branch}' does not match current "
-                f"branch '{current}' for push.default=simple"
-            )
+            raise RuntimeError(f"upstream branch '{upstream.branch}' does not match current branch '{current}' for push.default=simple")
         return PushPlan(remote, (PushSpec(current, current),), mode)
-
     if upstream is None and _default_fetch_remote(repo) == remote:
         if not auto_setup:
             raise RuntimeError(f"current branch '{current}' has no upstream branch")
-        return PushPlan(
-            remote,
-            (PushSpec(current, current),),
-            mode,
-            auto_setup_upstream=True,
-        )
-
-    return PushPlan(
-        remote,
-        (PushSpec(current, current),),
-        mode,
-        auto_setup_upstream=auto_setup and upstream is None,
-    )
+        return PushPlan(remote, (PushSpec(current, current),), mode, auto_setup_upstream=True)
+    return PushPlan(remote, (PushSpec(current, current),), mode, auto_setup_upstream=auto_setup and upstream is None)
