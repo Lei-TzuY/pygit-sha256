@@ -12,7 +12,9 @@ imply porcelain v1, matching Git's command-line protocol. Phase 154 adds Git's
 individual-path API unchanged. Phase 155 extends ``--ignored`` with Git's
 traditional, matching, and no modes. Phase 159 adds HEAD-to-index staged rename
 detection. Phase 160 extends that similarity layer with Git-style staged copy
-detection controlled by ``status.renames=copies``.
+detection controlled by ``status.renames=copies``. Phase 162 wires the existing
+presentation controls to ``status.showStash``, ``status.showUntrackedFiles``,
+and ``status.aheadBehind`` with command-line precedence.
 """
 
 from __future__ import annotations
@@ -25,6 +27,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .repo import Repository
+from .status_config import (
+    resolve_ahead_behind,
+    resolve_show_stash,
+    resolve_untracked_mode,
+)
 from .status_renames import (
     CopyMatch,
     RenameMatch,
@@ -336,7 +343,7 @@ def status_records(
     return records
 
 
-def _branch_header(result: dict) -> str:
+def _branch_header(result: dict, *, ahead_behind: bool = True) -> str:
     branch = result.get("branch") or "HEAD"
     upstream = result.get("upstream")
     if not isinstance(upstream, dict):
@@ -346,9 +353,13 @@ def _branch_header(result: dict) -> str:
     if not upstream_name:
         return f"## {branch}"
 
-    details: List[str] = []
     ahead = int(upstream.get("ahead") or 0)
     behind = int(upstream.get("behind") or 0)
+    if not ahead_behind:
+        suffix = " [different]" if ahead or behind else ""
+        return f"## {branch}...{upstream_name}{suffix}"
+
+    details: List[str] = []
     if ahead:
         details.append(f"ahead {ahead}")
     if behind:
@@ -390,6 +401,7 @@ def _print_short(
     renames: bool = True,
     copies: bool = False,
     rename_threshold: int = 50,
+    ahead_behind: bool = True,
 ) -> None:
     result, _unmerged = _normalized_status(
         repo,
@@ -398,7 +410,7 @@ def _print_short(
     )
     lines: List[str] = []
     if branch:
-        lines.append(_branch_header(result))
+        lines.append(_branch_header(result, ahead_behind=ahead_behind))
     lines.extend(
         _short_record(record, nul=nul)
         for record in status_records(
@@ -426,6 +438,44 @@ def _stash_summary(repo: Repository) -> Optional[str]:
     return f"Your stash currently has {count} {noun}"
 
 
+def _print_upstream_summary(result: dict, *, ahead_behind: bool) -> None:
+    upstream = result.get("upstream")
+    if not isinstance(upstream, dict):
+        return
+    upstream_name = upstream.get("upstream")
+    if not upstream_name:
+        return
+
+    ahead = int(upstream.get("ahead") or 0)
+    behind = int(upstream.get("behind") or 0)
+    if not ahead and not behind:
+        print(f"Your branch is up to date with '{upstream_name}'.")
+        return
+    if not ahead_behind:
+        print(f"Your branch and '{upstream_name}' refer to different commits.")
+        print('  (use "pygit status --ahead-behind" for details)')
+        return
+    if ahead and behind:
+        print(f"Your branch and '{upstream_name}' have diverged,")
+        print(
+            f"and have {ahead} and {behind} different commits each, respectively."
+        )
+        print('  (use "pygit pull" if you want to integrate the remote branch with yours)')
+        return
+    if ahead:
+        noun = "commit" if ahead == 1 else "commits"
+        print(f"Your branch is ahead of '{upstream_name}' by {ahead} {noun}.")
+        print('  (use "pygit push" to publish your local commits)')
+        return
+
+    noun = "commit" if behind == 1 else "commits"
+    print(
+        f"Your branch is behind '{upstream_name}' by {behind} {noun}, "
+        "and can be fast-forwarded."
+    )
+    print('  (use "pygit pull" to update your local branch)')
+
+
 def _print_full(
     repo: Repository,
     *,
@@ -435,6 +485,7 @@ def _print_full(
     renames: bool = True,
     copies: bool = False,
     rename_threshold: int = 50,
+    ahead_behind: bool = True,
 ) -> None:
     result, unmerged = _normalized_status(
         repo,
@@ -446,6 +497,7 @@ def _print_full(
     print(f"On branch {branch}")
     if result.get("operation"):
         print(f"You are currently in a {result['operation']} operation.")
+    _print_upstream_summary(result, ahead_behind=ahead_behind)
     print()
 
     keys = ("staged", "unstaged", "untracked", "ignored") if ignored else (
@@ -552,17 +604,17 @@ def run_status(argv: Sequence[str]) -> int:
         "--untracked-files",
         nargs="?",
         const="all",
-        default="normal",
+        default=None,
         choices=("no", "normal", "all"),
         metavar="{no,normal,all}",
-        help="show untracked files: no, normal (default), or all",
+        help="show untracked files; defaults to status.showUntrackedFiles or normal",
     )
     parser.add_argument(
         "-z",
         action="store_true",
         help="terminate porcelain records with NUL bytes; implies --porcelain=v1",
     )
-    parser.set_defaults(show_stash=False, renames=None)
+    parser.set_defaults(show_stash=None, renames=None, ahead_behind=None)
     parser.add_argument(
         "--show-stash",
         dest="show_stash",
@@ -574,6 +626,18 @@ def run_status(argv: Sequence[str]) -> int:
         dest="show_stash",
         action="store_false",
         help="suppress stash-count status information",
+    )
+    parser.add_argument(
+        "--ahead-behind",
+        dest="ahead_behind",
+        action="store_true",
+        help="compute and display detailed ahead/behind counts",
+    )
+    parser.add_argument(
+        "--no-ahead-behind",
+        dest="ahead_behind",
+        action="store_false",
+        help="show only whether the upstream differs",
     )
     parser.add_argument(
         "--renames",
@@ -612,6 +676,13 @@ def run_status(argv: Sequence[str]) -> int:
     )
     renames = rename_mode != "none"
     copies = rename_mode == "copies"
+    show_stash = resolve_show_stash(repo, args.show_stash)
+    untracked_mode = resolve_untracked_mode(repo, args.untracked_files)
+    ahead_behind = resolve_ahead_behind(
+        repo,
+        args.ahead_behind,
+        porcelain=args.porcelain is not None,
+    )
 
     if args.porcelain == "v2":
         from .status_porcelain_v2 import render_porcelain_v2
@@ -622,11 +693,12 @@ def run_status(argv: Sequence[str]) -> int:
                 branch=args.branch,
                 ignored=args.ignored,
                 nul=args.z,
-                show_stash=args.show_stash,
-                untracked_mode=args.untracked_files,
+                show_stash=show_stash,
+                untracked_mode=untracked_mode,
                 renames=renames,
                 copies=copies,
                 rename_threshold=rename_threshold,
+                ahead_behind=ahead_behind,
             )
         )
     elif args.short or args.porcelain is not None:
@@ -635,19 +707,21 @@ def run_status(argv: Sequence[str]) -> int:
             branch=args.branch,
             ignored=args.ignored,
             nul=args.z,
-            untracked_mode=args.untracked_files,
+            untracked_mode=untracked_mode,
             renames=renames,
             copies=copies,
             rename_threshold=rename_threshold,
+            ahead_behind=ahead_behind,
         )
     else:
         _print_full(
             repo,
             ignored=args.ignored,
-            show_stash=args.show_stash,
-            untracked_mode=args.untracked_files,
+            show_stash=show_stash,
+            untracked_mode=untracked_mode,
             renames=renames,
             copies=copies,
             rename_threshold=rename_threshold,
+            ahead_behind=ahead_behind,
         )
     return 0
