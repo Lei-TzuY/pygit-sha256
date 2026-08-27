@@ -31,10 +31,15 @@ class LeaseRequest:
 @dataclass(frozen=True)
 class LeasePolicy:
     requests: Tuple[LeaseRequest, ...] = ()
+    force_if_includes: bool = False
 
     @property
     def active(self) -> bool:
         return bool(self.requests)
+
+    def with_force_if_includes(self, enabled: bool) -> "LeasePolicy":
+        """Return the same lease requests with the ancillary includes guard."""
+        return LeasePolicy(self.requests, force_if_includes=bool(enabled))
 
     def request_for(self, target_ref: str) -> Optional[LeaseRequest]:
         """Return the last applicable request for *target_ref*.
@@ -155,7 +160,8 @@ def require_lease(
 
     A matching lease authorizes the selected ref to bypass the ordinary
     fast-forward/tag-replacement restriction.  A stale lease rejects before any
-    local tracking state is changed.
+    local tracking state is changed.  Phase170 optionally adds the reflog-based
+    ``--force-if-includes`` proof after an implicit lease value matches.
     """
     if policy is None or not policy.active:
         return False
@@ -164,4 +170,14 @@ def require_lease(
         return False
     if actual_native != expected:
         raise RuntimeError(f"Push rejected: stale info for '{target_ref}'.")
+    if policy.force_if_includes:
+        from .push_includes import require_force_if_includes
+
+        require_force_if_includes(
+            True,
+            policy,
+            repo,
+            remote,
+            target_ref,
+        )
     return True
