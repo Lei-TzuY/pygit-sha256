@@ -143,7 +143,7 @@ def other_files(
     result.
     """
     if ignored and not (exclude_standard or exclude_patterns):
-        raise ValueError("--ignored requires an exclude source")
+        raise ValueError("--ignored requires --exclude-standard, --exclude, or --exclude-from")
     if no_empty_directory and not directory:
         raise ValueError("--no-empty-directory requires --directory")
 
