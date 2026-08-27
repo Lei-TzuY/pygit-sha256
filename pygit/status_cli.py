@@ -222,7 +222,7 @@ def run_status(argv: Sequence[str]) -> int:
         nargs="?",
         const="v1",
         choices=("v1", "v2"),
-        metavar="VERSION",
+        metavar="{v1,v2}",
         help="machine-readable porcelain v1 or v2 output",
     )
     parser.add_argument("-b", "--branch", action="store_true", help="show branch/upstream information")
