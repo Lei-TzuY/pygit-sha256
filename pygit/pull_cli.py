@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
+from .fetch_configured import fetch_configured
 from .remote_ops import resolve_pull_source
 from .tracking import find_repo
 
@@ -28,7 +29,7 @@ def run_pull(argv: Sequence[str]) -> int:
     else:
         if source.remote not in repo.list_remotes():
             raise KeyError(f"Unknown remote: '{source.remote}'")
-        repo.fetch(source.remote)
+        fetch_configured(repo, source.remote)
         if not repo.refs.get_remote(source.remote, source.branch):
             raise KeyError(f"Remote branch not found: '{source.display}'")
         target = source.display
