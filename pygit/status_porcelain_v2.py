@@ -7,7 +7,8 @@ than Git's SHA-1-width examples. Phase 152 adds the optional stash-count header
 using the repository's strict reflog reader. Phase 154 threads Git's untracked
 path modes through the same normalized presentation layer. Phase 159 adds
 porcelain-v2 type-2 records for staged renames; Phase 160 extends the same
-record form to staged copies using ``C<score>`` metadata.
+record form to staged copies using ``C<score>`` metadata. Phase 162 adds native
+``--no-ahead-behind`` unknown-count framing for branch headers.
 """
 
 from __future__ import annotations
@@ -53,7 +54,12 @@ def _head_entries(repo: Repository) -> dict:
     return repo._commit_tree_entries(head)
 
 
-def _branch_headers(repo: Repository, result: dict) -> List[str]:
+def _branch_headers(
+    repo: Repository,
+    result: dict,
+    *,
+    ahead_behind: bool = True,
+) -> List[str]:
     head_oid = repo.refs.resolve_head()
     branch = repo.refs.current_branch()
     lines = [
@@ -64,10 +70,13 @@ def _branch_headers(repo: Repository, result: dict) -> List[str]:
     if isinstance(upstream, dict) and upstream.get("upstream"):
         lines.append(f"# branch.upstream {upstream['upstream']}")
         if head_oid:
-            lines.append(
-                f"# branch.ab +{int(upstream.get('ahead') or 0)} "
-                f"-{int(upstream.get('behind') or 0)}"
-            )
+            if ahead_behind:
+                lines.append(
+                    f"# branch.ab +{int(upstream.get('ahead') or 0)} "
+                    f"-{int(upstream.get('behind') or 0)}"
+                )
+            else:
+                lines.append("# branch.ab +? -?")
     return lines
 
 
@@ -87,6 +96,7 @@ def porcelain_v2_lines(
     renames: bool = True,
     copies: bool = False,
     rename_threshold: int = 50,
+    ahead_behind: bool = True,
 ) -> List[str]:
     """Return porcelain-v2 headers and records without final terminators."""
     from .status_cli import _normalized_status, status_records
@@ -98,7 +108,7 @@ def porcelain_v2_lines(
     )
     lines: List[str] = []
     if branch:
-        lines.extend(_branch_headers(repo, result))
+        lines.extend(_branch_headers(repo, result, ahead_behind=ahead_behind))
     if show_stash:
         count = stash_count(repo)
         if count:
@@ -194,6 +204,7 @@ def render_porcelain_v2(
     renames: bool = True,
     copies: bool = False,
     rename_threshold: int = 50,
+    ahead_behind: bool = True,
 ) -> str:
     """Render a complete porcelain-v2 stream."""
     lines = porcelain_v2_lines(
@@ -206,6 +217,7 @@ def render_porcelain_v2(
         renames=renames,
         copies=copies,
         rename_threshold=rename_threshold,
+        ahead_behind=ahead_behind,
     )
     if not lines:
         return ""
