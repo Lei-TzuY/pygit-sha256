@@ -16,6 +16,7 @@ from .checkout_index_cli import run_checkout_index
 from .clone_cli import run_clone
 from .commit_graph_cli import run_commit_graph
 from .count_objects_cli import run_count_objects
+from .fetch_cli import run_fetch
 from .for_each_ref_cli import run_for_each_ref
 from .fsck_cli import run_fsck
 from .gc_cli import run_gc
@@ -94,6 +95,10 @@ def main() -> None:
 
     if argv and argv[0] == "checkout":
         _run_safe(run_checkout, argv[1:])
+        return
+
+    if argv and argv[0] == "fetch":
+        _run_safe(run_fetch, argv[1:])
         return
 
     if argv and argv[0] == "pull":
