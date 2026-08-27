@@ -93,14 +93,19 @@ def run_push(argv: Sequence[str]) -> int:
         print("Everything up-to-date")
         return 0
 
+    effective_lease = lease if lease.active and not args.force else None
+
     if args.atomic:
-        results = push_atomic_specs(
-            repo,
-            remote,
-            plan.specs,
-            force=args.force,
-            lease=lease,
-        )
+        if effective_lease is None:
+            results = push_atomic_specs(repo, remote, plan.specs, force=args.force)
+        else:
+            results = push_atomic_specs(
+                repo,
+                remote,
+                plan.specs,
+                force=args.force,
+                lease=effective_lease,
+            )
     else:
         results = []
         single_spec_forces = bool(len(plan.specs) == 1 and plan.specs[0].force)
@@ -111,38 +116,65 @@ def run_push(argv: Sequence[str]) -> int:
             and not plan.specs[0].delete
             and plan.specs[0].source == branch
             and plan.specs[0].target == branch
-            and (not lease.active or args.force or single_spec_forces)
+            and (effective_lease is None or single_spec_forces)
         )
         for spec in plan.specs:
             effective_force = bool(args.force or spec.force)
+            spec_lease = None if effective_force else effective_lease
             if spec.delete:
-                result = delete_remote_ref(
-                    repo,
-                    remote,
-                    spec.target_ref,
-                    force=effective_force,
-                    lease=lease,
-                )
+                if spec_lease is None:
+                    result = delete_remote_ref(
+                        repo,
+                        remote,
+                        spec.target_ref,
+                        force=effective_force,
+                    )
+                else:
+                    result = delete_remote_ref(
+                        repo,
+                        remote,
+                        spec.target_ref,
+                        force=effective_force,
+                        lease=spec_lease,
+                    )
             elif legacy_single:
                 result = repo.push(remote, force=effective_force)
             elif spec.namespace == "heads":
-                result = push_branch(
-                    repo,
-                    remote,
-                    spec.source,
-                    spec.target,
-                    force=effective_force,
-                    lease=lease,
-                )
+                if spec_lease is None:
+                    result = push_branch(
+                        repo,
+                        remote,
+                        spec.source,
+                        spec.target,
+                        force=effective_force,
+                    )
+                else:
+                    result = push_branch(
+                        repo,
+                        remote,
+                        spec.source,
+                        spec.target,
+                        force=effective_force,
+                        lease=spec_lease,
+                    )
             else:
-                result = push_ref(
-                    repo,
-                    remote,
-                    spec.source_ref,
-                    spec.target_ref,
-                    force=effective_force,
-                    lease=lease,
-                )
+                if spec_lease is None:
+                    result = push_ref(
+                        repo,
+                        remote,
+                        spec.source_ref,
+                        spec.target_ref,
+                        force=effective_force,
+                    )
+                else:
+                    result = push_ref(
+                        repo,
+                        remote,
+                        spec.source_ref,
+                        spec.target_ref,
+                        force=effective_force,
+                        lease=spec_lease,
+                    )
             results.append((spec, result))
 
     if args.set_upstream or plan.auto_setup_upstream:
