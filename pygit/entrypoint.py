@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .cli import main as legacy_main
-from .index_plumbing import ls_files, refresh_index, update_index
+from .index_plumbing import refresh_index, update_index
+from .ls_files_cli import run_ls_files
 from .plumbing import is_ancestor, list_refs, merge_bases, peel_oid, verify_ref
 from .ref_query import check_ref_format, format_ref, query_refs
 from .repo import Repository
@@ -395,37 +396,7 @@ def _run_update_index(argv: Sequence[str]) -> int:
 
 
 def _run_ls_files(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(
-        prog="pygit ls-files",
-        description="Show information about files in the index and working tree.",
-    )
-    parser.add_argument("-c", "--cached", action="store_true", help="show cached paths")
-    parser.add_argument("-s", "--stage", action="store_true", help="show mode, object, stage, and path")
-    parser.add_argument("-d", "--deleted", action="store_true", help="show tracked paths deleted from the worktree")
-    parser.add_argument("-m", "--modified", action="store_true", help="show tracked paths modified in the worktree")
-    parser.add_argument(
-        "--error-unmatch",
-        action="store_true",
-        help="fail if any supplied path pattern matches no index entry",
-    )
-    parser.add_argument("-z", action="store_true", help="terminate records with NUL")
-    parser.add_argument("path", nargs="*", metavar="PATH")
-    args = parser.parse_args(list(argv))
-
-    repo = _find_repo()
-    lines = ls_files(
-        repo,
-        cached=args.cached,
-        stage=args.stage,
-        deleted=args.deleted,
-        modified=args.modified,
-        patterns=args.path,
-        error_unmatch=args.error_unmatch,
-    )
-    if lines:
-        separator = "\x00" if args.z else "\n"
-        sys.stdout.write(separator.join(lines) + separator)
-    return 0
+    return run_ls_files(argv)
 
 
 def dispatch(argv: Sequence[str]) -> Optional[int]:
