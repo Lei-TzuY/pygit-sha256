@@ -37,6 +37,8 @@ def run_ls_files(argv: Sequence[str]) -> int:
     parser.add_argument("-k", "--killed", action="store_true", help="show untracked paths obstructing tracked paths")
     parser.add_argument("-i", "--ignored", action="store_true", help="show only ignored untracked paths (requires --others --exclude-standard)")
     parser.add_argument("--exclude-standard", action="store_true", help="apply .gitignore, .pygitignore, and .pygit/info/exclude rules")
+    parser.add_argument("--directory", action="store_true", help="show wholly-untracked directories with a trailing slash")
+    parser.add_argument("--no-empty-directory", action="store_true", help="with --directory, suppress trees containing no files")
     parser.add_argument("--error-unmatch", action="store_true", help="fail if any supplied path pattern matches no index entry")
     parser.add_argument("-z", action="store_true", help="terminate records with NUL")
     parser.add_argument("path", nargs="*", metavar="PATH")
@@ -48,6 +50,10 @@ def run_ls_files(argv: Sequence[str]) -> int:
         parser.error("--ignored requires --exclude-standard")
     if args.exclude_standard and not args.others:
         parser.error("--exclude-standard currently applies to --others")
+    if args.directory and not args.others:
+        parser.error("--directory requires --others")
+    if args.no_empty_directory and not args.directory:
+        parser.error("--no-empty-directory requires --directory")
     if args.error_unmatch and (args.others or args.killed) and not any(
         (args.cached, args.stage, args.unmerged, args.deleted, args.modified)
     ):
@@ -71,7 +77,16 @@ def run_ls_files(argv: Sequence[str]) -> int:
             )
         )
     if args.others:
-        lines.extend(other_files(repo, ignored=args.ignored, exclude_standard=args.exclude_standard, patterns=args.path))
+        lines.extend(
+            other_files(
+                repo,
+                ignored=args.ignored,
+                exclude_standard=args.exclude_standard,
+                patterns=args.path,
+                directory=args.directory,
+                no_empty_directory=args.no_empty_directory,
+            )
+        )
     if args.killed:
         lines.extend(killed_files(repo, patterns=args.path))
 
