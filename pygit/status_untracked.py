@@ -8,7 +8,7 @@ can expose Git's ``no``, ``normal`` and ``all`` untracked modes plus Phase 155's
 
 from __future__ import annotations
 
-from typing import Iterable, List, Set
+from typing import Iterable, List, Set, Union
 
 from .ignore import IgnoreMatcher
 from .repo import Repository
@@ -44,13 +44,7 @@ def _collapse_paths(paths: Iterable[str], tracked: Set[str]) -> List[str]:
 
 
 def _matching_ignored_paths(repo: Repository, paths: Iterable[str]) -> List[str]:
-    """Render ignored paths using Git's ``--ignored=matching`` semantics.
-
-    A directory that directly matches an ignore pattern is emitted once and its
-    descendants are suppressed. If a directory is only ignored because all of
-    its contents happen to match patterns, the directory itself is not emitted;
-    the matching contents remain visible instead.
-    """
+    """Render ignored paths using Git's ``--ignored=matching`` semantics."""
     raw = sorted(set(paths))
     matcher = IgnoreMatcher(repo.worktree)
 
@@ -66,8 +60,7 @@ def _matching_ignored_paths(repo: Repository, paths: Iterable[str]) -> List[str]
     )
     selected_dirs: List[str] = []
     for directory in explicit_dirs:
-        marker = directory + "/"
-        if any(directory == parent or marker.startswith(parent + "/") for parent in selected_dirs):
+        if any(directory == parent or directory.startswith(parent + "/") for parent in selected_dirs):
             continue
         selected_dirs.append(directory)
 
@@ -86,12 +79,24 @@ def apply_status_path_modes(
     result: dict,
     *,
     untracked_mode: str = "normal",
-    ignored: bool = False,
+    ignored: Union[bool, str] = False,
     ignored_mode: str = "traditional",
 ) -> dict:
-    """Return a copy of normalized status with display-level path grouping."""
+    """Return a copy of normalized status with display-level path grouping.
+
+    ``ignored`` accepts the historical boolean contract and, for the status CLI
+    pipeline, a mode string. This keeps existing Python callers compatible while
+    allowing the parser to thread ``--ignored=matching`` without widening every
+    intermediate presentation signature.
+    """
     if untracked_mode not in _VALID_UNTRACKED_MODES:
         raise ValueError(f"invalid untracked-files mode: {untracked_mode!r}")
+
+    if isinstance(ignored, str):
+        ignored_mode = ignored
+        show_ignored = ignored_mode != "no"
+    else:
+        show_ignored = bool(ignored)
     if ignored_mode not in _VALID_IGNORED_MODES:
         raise ValueError(f"invalid ignored mode: {ignored_mode!r}")
 
@@ -108,7 +113,7 @@ def apply_status_path_modes(
 
     if "ignored" in result:
         raw_ignored = list(result.get("ignored", []))
-        if not ignored or ignored_mode == "no":
+        if not show_ignored:
             updated["ignored"] = []
         elif ignored_mode == "matching":
             updated["ignored"] = _matching_ignored_paths(repo, raw_ignored)
