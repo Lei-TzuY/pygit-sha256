@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Sequence
 
 from .push_defaults import PushPlan, all_branch_specs, all_tag_specs, delete_specs, resolve_push_plan
 from .push_follow_tags import follow_tag_specs, resolve_follow_tags
+from .push_groups import remote_group_members
 from .push_includes import extract_force_if_includes, resolve_force_if_includes
 from .push_lease import extract_force_with_lease
 from .push_mirror import configured_remote_mirror, mirror_specs
@@ -17,105 +19,17 @@ from .remote_ops import resolve_push_remote
 from .tracking import TrackingSource, find_repo, set_branch_upstream
 
 
-def run_push(argv: Sequence[str]) -> int:
-    lease_argv, lease = extract_force_with_lease(argv)
-    cleaned_argv, includes_override = extract_force_if_includes(lease_argv)
-    parser = argparse.ArgumentParser(
-        prog="pygit push",
-        description="Update remote refs using Git-style push defaults and refspecs.",
-    )
-    parser.add_argument("repository", nargs="?", metavar="REPOSITORY")
-    parser.add_argument("refspecs", nargs="*", metavar="REFSPEC")
-    parser.add_argument("-f", "--force", action="store_true", help="force non-fast-forward updates")
-    parser.add_argument(
-        "--force-with-lease",
-        nargs="?",
-        metavar="REF[:EXPECT]",
-        help="force only when the remote ref still has the expected value",
-    )
-    parser.add_argument(
-        "--no-force-with-lease",
-        action="store_true",
-        help="cancel preceding force-with-lease requests",
-    )
-    parser.add_argument(
-        "--force-if-includes",
-        action="store_true",
-        help="require the leased remote-tracking tip to appear in local reflog history",
-    )
-    parser.add_argument(
-        "--no-force-if-includes",
-        action="store_true",
-        help="disable force-if-includes even when configured",
-    )
-    parser.add_argument(
-        "-o",
-        "--push-option",
-        dest="push_options",
-        action="append",
-        default=None,
-        metavar="OPTION",
-        help="transmit an option string to receive-pack hooks (repeatable)",
-    )
-    parser.add_argument("--all", "--branches", dest="all_branches", action="store_true", help="push all local branches")
-    parser.add_argument("--mirror", action="store_true", help="mirror every ref under refs/ to the remote")
-    parser.add_argument("--tags", action="store_true", help="push all local tags")
-    follow_tags = parser.add_mutually_exclusive_group()
-    follow_tags.add_argument(
-        "--follow-tags",
-        dest="follow_tags",
-        action="store_true",
-        help="push missing annotated tags reachable from refs being pushed",
-    )
-    follow_tags.add_argument(
-        "--no-follow-tags",
-        dest="follow_tags",
-        action="store_false",
-        help="do not automatically push reachable annotated tags",
-    )
-    parser.add_argument("--prune", action="store_true", help="remove remote refs missing a local counterpart under selected patterns")
-    parser.add_argument("-d", "--delete", action="store_true", help="delete the listed remote refs")
-    atomic = parser.add_mutually_exclusive_group()
-    atomic.add_argument(
-        "--atomic",
-        dest="atomic",
-        action="store_true",
-        help="request an all-or-nothing remote ref transaction",
-    )
-    atomic.add_argument(
-        "--no-atomic",
-        dest="atomic",
-        action="store_false",
-        help="do not request an atomic remote ref transaction",
-    )
-    parser.set_defaults(atomic=False, follow_tags=None)
-    parser.add_argument(
-        "-u",
-        "--set-upstream",
-        action="store_true",
-        help="set the current branch's upstream after a successful push",
-    )
-    args = parser.parse_args(list(cleaned_argv))
-
-    if args.all_branches and args.refspecs:
-        parser.error("--all cannot be combined with explicit refspecs")
-    if args.all_branches and args.delete:
-        parser.error("--all cannot be combined with --delete")
-    if args.delete and args.tags:
-        parser.error("--delete cannot be combined with --tags")
-    if args.delete and args.prune:
-        parser.error("--delete cannot be combined with --prune")
-    if args.delete and not args.refspecs:
-        parser.error("--delete requires at least one ref name")
-
-    repo = find_repo()
-    push_options = resolve_push_options(repo, args.push_options)
-    remote = resolve_push_remote(repo, args.repository)
+def _run_one_remote(
+    repo,
+    args,
+    parser: argparse.ArgumentParser,
+    remote: str,
+    lease,
+    push_options,
+    follow_tags_enabled: bool,
+) -> int:
+    """Execute one ordinary push against one named remote."""
     branch = repo.refs.current_branch()
-    lease = lease.with_force_if_includes(
-        resolve_force_if_includes(repo, includes_override)
-    )
-    follow_tags_enabled = resolve_follow_tags(repo, args.follow_tags)
     mirror_enabled = bool(args.mirror or configured_remote_mirror(repo, remote))
 
     if mirror_enabled and args.refspecs:
@@ -263,3 +177,139 @@ def run_push(argv: Sequence[str]) -> int:
             display_target = f"{remote}/{spec.target_ref}"
         print(f"Push result: {result['status']} {source_note}{display_target} ({result['objects']} objects)")
     return 0
+
+
+def run_push(argv: Sequence[str]) -> int:
+    lease_argv, lease = extract_force_with_lease(argv)
+    cleaned_argv, includes_override = extract_force_if_includes(lease_argv)
+    parser = argparse.ArgumentParser(
+        prog="pygit push",
+        description="Update remote refs using Git-style push defaults and refspecs.",
+    )
+    parser.add_argument("repository", nargs="?", metavar="REPOSITORY")
+    parser.add_argument("refspecs", nargs="*", metavar="REFSPEC")
+    parser.add_argument("-f", "--force", action="store_true", help="force non-fast-forward updates")
+    parser.add_argument(
+        "--force-with-lease",
+        nargs="?",
+        metavar="REF[:EXPECT]",
+        help="force only when the remote ref still has the expected value",
+    )
+    parser.add_argument(
+        "--no-force-with-lease",
+        action="store_true",
+        help="cancel preceding force-with-lease requests",
+    )
+    parser.add_argument(
+        "--force-if-includes",
+        action="store_true",
+        help="require the leased remote-tracking tip to appear in local reflog history",
+    )
+    parser.add_argument(
+        "--no-force-if-includes",
+        action="store_true",
+        help="disable force-if-includes even when configured",
+    )
+    parser.add_argument(
+        "-o",
+        "--push-option",
+        dest="push_options",
+        action="append",
+        default=None,
+        metavar="OPTION",
+        help="transmit an option string to receive-pack hooks (repeatable)",
+    )
+    parser.add_argument("--all", "--branches", dest="all_branches", action="store_true", help="push all local branches")
+    parser.add_argument("--mirror", action="store_true", help="mirror every ref under refs/ to the remote")
+    parser.add_argument("--tags", action="store_true", help="push all local tags")
+    follow_tags = parser.add_mutually_exclusive_group()
+    follow_tags.add_argument(
+        "--follow-tags",
+        dest="follow_tags",
+        action="store_true",
+        help="push missing annotated tags reachable from refs being pushed",
+    )
+    follow_tags.add_argument(
+        "--no-follow-tags",
+        dest="follow_tags",
+        action="store_false",
+        help="do not automatically push reachable annotated tags",
+    )
+    parser.add_argument("--prune", action="store_true", help="remove remote refs missing a local counterpart under selected patterns")
+    parser.add_argument("-d", "--delete", action="store_true", help="delete the listed remote refs")
+    atomic = parser.add_mutually_exclusive_group()
+    atomic.add_argument(
+        "--atomic",
+        dest="atomic",
+        action="store_true",
+        help="request an all-or-nothing remote ref transaction",
+    )
+    atomic.add_argument(
+        "--no-atomic",
+        dest="atomic",
+        action="store_false",
+        help="do not request an atomic remote ref transaction",
+    )
+    parser.set_defaults(atomic=False, follow_tags=None)
+    parser.add_argument(
+        "-u",
+        "--set-upstream",
+        action="store_true",
+        help="set the current branch's upstream after a successful push",
+    )
+    args = parser.parse_args(list(cleaned_argv))
+
+    if args.all_branches and args.refspecs:
+        parser.error("--all cannot be combined with explicit refspecs")
+    if args.all_branches and args.delete:
+        parser.error("--all cannot be combined with --delete")
+    if args.delete and args.tags:
+        parser.error("--delete cannot be combined with --tags")
+    if args.delete and args.prune:
+        parser.error("--delete cannot be combined with --prune")
+    if args.delete and not args.refspecs:
+        parser.error("--delete requires at least one ref name")
+
+    repo = find_repo()
+    push_options = resolve_push_options(repo, args.push_options)
+    lease = lease.with_force_if_includes(
+        resolve_force_if_includes(repo, includes_override)
+    )
+    follow_tags_enabled = resolve_follow_tags(repo, args.follow_tags)
+
+    group = remote_group_members(repo, args.repository)
+    if group is not None:
+        if args.atomic:
+            parser.error("--atomic cannot be combined with a remote group")
+
+        failed = False
+        for remote in group:
+            print(f"Pushing to {remote}")
+            try:
+                status = _run_one_remote(
+                    repo,
+                    args,
+                    parser,
+                    remote,
+                    lease,
+                    push_options,
+                    follow_tags_enabled,
+                )
+                failed = failed or status != 0
+            except SystemExit:
+                failed = True
+            except Exception as exc:
+                failed = True
+                print(f"Push to {remote} failed: {exc}", file=sys.stderr)
+        return 1 if failed else 0
+
+    remote = resolve_push_remote(repo, args.repository)
+    return _run_one_remote(
+        repo,
+        args,
+        parser,
+        remote,
+        lease,
+        push_options,
+        follow_tags_enabled,
+    )
