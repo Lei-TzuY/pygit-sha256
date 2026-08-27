@@ -14,7 +14,8 @@ traditional, matching, and no modes. Phase 159 adds HEAD-to-index staged rename
 detection. Phase 160 extends that similarity layer with Git-style staged copy
 detection controlled by ``status.renames=copies``. Phase 162 wires the existing
 presentation controls to ``status.showStash``, ``status.showUntrackedFiles``,
-and ``status.aheadBehind`` with command-line precedence.
+and ``status.aheadBehind`` with command-line precedence. Phase 163 makes the
+modern status layer prefer configured branch upstream tracking.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from .status_renames import (
     parse_similarity_threshold,
 )
 from .status_untracked import apply_status_path_modes
+from .status_upstream import resolve_status_upstream
 
 
 _CONFLICT_CODES: Dict[Tuple[bool, bool, bool], str] = {
@@ -133,6 +135,7 @@ def _normalized_status(
     conflict_paths = {record.path for record in unmerged}
 
     result = dict(result)
+    result["upstream"] = resolve_status_upstream(repo, result.get("upstream"))
     result["staged"] = [item for item in result["staged"] if item[1] not in conflict_paths]
     result["unstaged"] = [item for item in result["unstaged"] if item[1] not in conflict_paths]
     result["untracked"] = [path for path in result["untracked"] if path not in conflict_paths]
@@ -352,6 +355,8 @@ def _branch_header(result: dict, *, ahead_behind: bool = True) -> str:
     upstream_name = upstream.get("upstream")
     if not upstream_name:
         return f"## {branch}"
+    if upstream.get("gone"):
+        return f"## {branch}...{upstream_name} [gone]"
 
     ahead = int(upstream.get("ahead") or 0)
     behind = int(upstream.get("behind") or 0)
@@ -444,6 +449,9 @@ def _print_upstream_summary(result: dict, *, ahead_behind: bool) -> None:
         return
     upstream_name = upstream.get("upstream")
     if not upstream_name:
+        return
+    if upstream.get("gone"):
+        print(f"Your branch is based on '{upstream_name}', but the upstream is gone.")
         return
 
     ahead = int(upstream.get("ahead") or 0)
