@@ -7,7 +7,9 @@ seven Git porcelain conflict states derived from stages 1/2/3. Phase 151 adds
 porcelain-v2 rendering without changing that normalized status model. Phase 152
 adds reflog-backed stash-count reporting for long and porcelain-v2 status.
 Phase 153 makes short/porcelain-v1 pathname framing machine-safe and lets ``-z``
-imply porcelain v1, matching Git's command-line protocol.
+imply porcelain v1, matching Git's command-line protocol. Phase 154 adds Git's
+``-u/--untracked-files`` display modes while keeping Repository.status()'s
+individual-path API unchanged.
 """
 
 from __future__ import annotations
@@ -20,16 +22,17 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .repo import Repository
+from .status_untracked import apply_status_path_modes
 
 
 _CONFLICT_CODES: Dict[Tuple[bool, bool, bool], str] = {
-    (True, False, False): "DD",   # both deleted
-    (False, True, False): "AU",   # added by us
-    (True, True, False): "UD",    # deleted by them
-    (False, False, True): "UA",   # added by them
-    (True, False, True): "DU",    # deleted by us
-    (False, True, True): "AA",   # both added
-    (True, True, True): "UU",    # both modified
+    (True, False, False): "DD",
+    (False, True, False): "AU",
+    (True, True, False): "UD",
+    (False, False, True): "UA",
+    (True, False, True): "DU",
+    (False, True, True): "AA",
+    (True, True, True): "UU",
 }
 
 _CONFLICT_LABELS = {
@@ -94,7 +97,12 @@ def _kind_code(kind: str, *, index_side: bool) -> str:
     raise RuntimeError(f"unsupported status kind: {kind!r}")
 
 
-def _normalized_status(repo: Repository, *, ignored: bool) -> Tuple[dict, List[UnmergedStatus]]:
+def _normalized_status(
+    repo: Repository,
+    *,
+    ignored: bool,
+    untracked_mode: str = "normal",
+) -> Tuple[dict, List[UnmergedStatus]]:
     result = repo.status(ignored=ignored)
     unmerged = unmerged_status(repo)
     conflict_paths = {record.path for record in unmerged}
@@ -107,12 +115,27 @@ def _normalized_status(repo: Repository, *, ignored: bool) -> Tuple[dict, List[U
         result["ignored"] = [path for path in result["ignored"] if path not in conflict_paths]
     result["conflicts"] = sorted(conflict_paths)
     result["unmerged"] = unmerged
+    result = apply_status_path_modes(
+        repo,
+        result,
+        untracked_mode=untracked_mode,
+        ignored=ignored,
+    )
     return result, unmerged
 
 
-def status_records(repo: Repository, *, ignored: bool = False) -> List[StatusRecord]:
+def status_records(
+    repo: Repository,
+    *,
+    ignored: bool = False,
+    untracked_mode: str = "normal",
+) -> List[StatusRecord]:
     """Return sorted porcelain-v1 records, with unmerged stages taking priority."""
-    result, unmerged = _normalized_status(repo, ignored=ignored)
+    result, unmerged = _normalized_status(
+        repo,
+        ignored=ignored,
+        untracked_mode=untracked_mode,
+    )
     codes: Dict[str, List[str]] = {}
 
     for kind, path in result["staged"]:
@@ -161,19 +184,32 @@ def _quote_path(path: str) -> str:
 
 
 def _short_path(path: str, *, nul: bool) -> str:
-    # Porcelain ``-z`` is explicitly raw: the NUL framing makes quoting
-    # unnecessary and preserves otherwise ambiguous newlines/backslashes.
     return path if nul else _quote_path(path)
 
 
-def _print_short(repo: Repository, *, branch: bool, ignored: bool, nul: bool = False) -> None:
-    result, _unmerged = _normalized_status(repo, ignored=ignored)
+def _print_short(
+    repo: Repository,
+    *,
+    branch: bool,
+    ignored: bool,
+    nul: bool = False,
+    untracked_mode: str = "normal",
+) -> None:
+    result, _unmerged = _normalized_status(
+        repo,
+        ignored=ignored,
+        untracked_mode=untracked_mode,
+    )
     lines: List[str] = []
     if branch:
         lines.append(_branch_header(result))
     lines.extend(
         f"{record.code} {_short_path(record.path, nul=nul)}"
-        for record in status_records(repo, ignored=ignored)
+        for record in status_records(
+            repo,
+            ignored=ignored,
+            untracked_mode=untracked_mode,
+        )
     )
     if not lines:
         return
@@ -191,8 +227,18 @@ def _stash_summary(repo: Repository) -> Optional[str]:
     return f"Your stash currently has {count} {noun}"
 
 
-def _print_full(repo: Repository, *, ignored: bool, show_stash: bool = False) -> None:
-    result, unmerged = _normalized_status(repo, ignored=ignored)
+def _print_full(
+    repo: Repository,
+    *,
+    ignored: bool,
+    show_stash: bool = False,
+    untracked_mode: str = "normal",
+) -> None:
+    result, unmerged = _normalized_status(
+        repo,
+        ignored=ignored,
+        untracked_mode=untracked_mode,
+    )
 
     branch = result["branch"] or "HEAD (detached)"
     print(f"On branch {branch}")
@@ -265,6 +311,16 @@ def run_status(argv: Sequence[str]) -> int:
     parser.add_argument("-b", "--branch", action="store_true", help="show branch/upstream information")
     parser.add_argument("--ignored", action="store_true", help="show ignored files")
     parser.add_argument(
+        "-u",
+        "--untracked-files",
+        nargs="?",
+        const="all",
+        default="normal",
+        choices=("no", "normal", "all"),
+        metavar="{no,normal,all}",
+        help="show untracked files: no, normal (default), or all",
+    )
+    parser.add_argument(
         "-z",
         action="store_true",
         help="terminate porcelain records with NUL bytes; implies --porcelain=v1",
@@ -298,12 +354,22 @@ def run_status(argv: Sequence[str]) -> int:
                 ignored=args.ignored,
                 nul=args.z,
                 show_stash=args.show_stash,
+                untracked_mode=args.untracked_files,
             )
         )
     elif args.short or args.porcelain is not None:
-        # Native short / porcelain-v1 status does not add stash summary lines;
-        # --show-stash affects the long renderer and porcelain-v2 header layer.
-        _print_short(repo, branch=args.branch, ignored=args.ignored, nul=args.z)
+        _print_short(
+            repo,
+            branch=args.branch,
+            ignored=args.ignored,
+            nul=args.z,
+            untracked_mode=args.untracked_files,
+        )
     else:
-        _print_full(repo, ignored=args.ignored, show_stash=args.show_stash)
+        _print_full(
+            repo,
+            ignored=args.ignored,
+            show_stash=args.show_stash,
+            untracked_mode=args.untracked_files,
+        )
     return 0
