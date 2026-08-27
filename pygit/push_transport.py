@@ -2,16 +2,23 @@
 
 Phase166 introduced branch-to-branch destination overrides. Phase167 extends the
 same SHA-256-native exporter path to tags and deletion refspecs while keeping
-``Repository.push(remote, force=...)`` untouched for compatibility.
+``Repository.push(remote, force=...)`` untouched for compatibility. Phase168
+adds an opt-in atomic batch path without changing the historical single-ref
+helpers.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .hooks import HookRunner
+from .push_atomic import AtomicSmartHttpPushClient
+from .push_defaults import PushSpec
 from .remote import NativeExporter, SmartHttpPushClient
 from .repo import Repository
+
+
+_ZERO_NATIVE_OID = "0" * 40
 
 
 def _settings(repo: Repository, remote: str):
@@ -52,16 +59,16 @@ def push_ref(
     _run_pre_push(repo, remote, url)
     client = SmartHttpPushClient(url)
     advertisement = client.discover()
-    old_native = advertisement.refs.get(target_ref, "0" * 40)
+    old_native = advertisement.refs.get(target_ref, _ZERO_NATIVE_OID)
     native_map = repo._read_native_map(remote)
-    old_internal = _internal_for_native(native_map, old_native) if old_native != "0" * 40 else None
+    old_internal = _internal_for_native(native_map, old_native) if old_native != _ZERO_NATIVE_OID else None
 
-    if target_ref.startswith("refs/heads/") and old_native != "0" * 40 and not force:
+    if target_ref.startswith("refs/heads/") and old_native != _ZERO_NATIVE_OID and not force:
         if not old_internal or old_internal not in repo._ancestor_distances(source_sha):
             raise RuntimeError(
                 "Push rejected: remote tip is not an ancestor of source branch; fetch first or use --force."
             )
-    if target_ref.startswith("refs/tags/") and old_native != "0" * 40 and not force:
+    if target_ref.startswith("refs/tags/") and old_native != _ZERO_NATIVE_OID and not force:
         raise RuntimeError("Push rejected: remote tag already exists; use --force to replace it.")
 
     have_shas = set(repo._ancestor_distances(old_internal)) if old_internal and target_ref.startswith("refs/heads/") else set()
@@ -103,11 +110,11 @@ def delete_remote_ref(repo: Repository, remote: str, target_ref: str) -> Dict[st
     _run_pre_push(repo, remote, url)
     client = SmartHttpPushClient(url)
     advertisement = client.discover()
-    old_native = advertisement.refs.get(target_ref, "0" * 40)
-    if old_native == "0" * 40:
+    old_native = advertisement.refs.get(target_ref, _ZERO_NATIVE_OID)
+    if old_native == _ZERO_NATIVE_OID:
         return {"status": "up-to-date", "remote": remote, "ref": target_ref, "objects": 0}
 
-    result = client.push(target_ref, "0" * 40, [], advertisement=advertisement)
+    result = client.push(target_ref, _ZERO_NATIVE_OID, [], advertisement=advertisement)
     if target_ref.startswith("refs/heads/"):
         repo.refs.delete_remote(remote, target_ref[len("refs/heads/") :])
     return {
@@ -139,3 +146,174 @@ def push_branch(
     result["source_branch"] = source_branch
     result["branch"] = target_branch
     return result
+
+
+def push_atomic_specs(
+    repo: Repository,
+    remote: str,
+    specs: Sequence[PushSpec],
+    *,
+    force: bool = False,
+) -> List[Tuple[PushSpec, Dict[str, object]]]:
+    """Push *specs* as one receive-pack atomic transaction.
+
+    All local/source and fast-forward checks are completed before the request is
+    sent. Local native mappings and remote-tracking refs are updated only after
+    the atomic receive-pack request succeeds.
+    """
+    if not specs:
+        return []
+
+    settings = _settings(repo, remote)
+    url = str(settings["url"])
+    _run_pre_push(repo, remote, url)
+    client = AtomicSmartHttpPushClient(url)
+    advertisement = client.discover()
+    if "atomic" not in advertisement.capabilities:
+        raise RuntimeError("Remote does not support atomic pushes.")
+
+    native_map = repo._read_native_map(remote)
+    prepared = []
+    have_shas = set()
+
+    for index, spec in enumerate(specs):
+        target_ref = spec.target_ref
+        old_native = advertisement.refs.get(target_ref, _ZERO_NATIVE_OID)
+        if spec.delete:
+            prepared.append(
+                {
+                    "index": index,
+                    "spec": spec,
+                    "target_ref": target_ref,
+                    "old_native": old_native,
+                    "source_sha": None,
+                    "delete": True,
+                }
+            )
+            continue
+
+        source_ref = spec.source_ref
+        source_sha = repo.refs.resolve(source_ref)
+        if not source_sha:
+            raise KeyError(f"Unknown local ref: '{source_ref}'")
+        old_internal = (
+            _internal_for_native(native_map, old_native)
+            if old_native != _ZERO_NATIVE_OID
+            else None
+        )
+        effective_force = bool(force or spec.force)
+        if target_ref.startswith("refs/heads/") and old_native != _ZERO_NATIVE_OID:
+            if not effective_force:
+                if not old_internal or old_internal not in repo._ancestor_distances(source_sha):
+                    raise RuntimeError(
+                        "Push rejected: remote tip is not an ancestor of source branch; fetch first or use --force."
+                    )
+            if old_internal:
+                have_shas.update(repo._ancestor_distances(old_internal))
+        if target_ref.startswith("refs/tags/") and old_native != _ZERO_NATIVE_OID and not effective_force:
+            raise RuntimeError("Push rejected: remote tag already exists; use --force to replace it.")
+
+        prepared.append(
+            {
+                "index": index,
+                "spec": spec,
+                "target_ref": target_ref,
+                "old_native": old_native,
+                "source_sha": source_sha,
+                "delete": False,
+            }
+        )
+
+    exporter = NativeExporter(repo.store, native_map, have_shas=have_shas)
+    commands = []
+    result_by_index: Dict[int, Tuple[PushSpec, Dict[str, object]]] = {}
+    command_items = []
+
+    for item in prepared:
+        spec = item["spec"]
+        old_native = str(item["old_native"])
+        target_ref = str(item["target_ref"])
+        if item["delete"]:
+            new_native = _ZERO_NATIVE_OID
+            if old_native == _ZERO_NATIVE_OID:
+                result_by_index[int(item["index"])] = (
+                    spec,
+                    {
+                        "status": "up-to-date",
+                        "remote": remote,
+                        "ref": target_ref,
+                        "objects": 0,
+                    },
+                )
+                continue
+        else:
+            source_sha = str(item["source_sha"])
+            new_native = exporter.export_oid(source_sha)
+            if old_native == new_native:
+                result_by_index[int(item["index"])] = (
+                    spec,
+                    {
+                        "status": "up-to-date",
+                        "remote": remote,
+                        "source_ref": spec.source_ref,
+                        "ref": target_ref,
+                        "sha": source_sha,
+                        "objects": 0,
+                    },
+                )
+                continue
+        item["new_native"] = new_native
+        commands.append((target_ref, new_native))
+        command_items.append(item)
+
+    batch_objects = 0
+    if commands:
+        batch = client.push_many(commands, exporter.objects, advertisement=advertisement)
+        batch_objects = batch.objects_sent
+
+    # Do not mutate local state until the atomic server operation has succeeded.
+    native_map.update(exporter.converted)
+    if exporter.converted:
+        repo._write_native_map(native_map, remote)
+
+    for item in prepared:
+        spec = item["spec"]
+        target_ref = str(item["target_ref"])
+        if target_ref.startswith("refs/heads/"):
+            branch = target_ref[len("refs/heads/") :]
+            if item["delete"]:
+                repo.refs.delete_remote(remote, branch)
+            else:
+                repo.refs.set_remote(remote, branch, str(item["source_sha"]))
+
+    first_command_index = int(command_items[0]["index"]) if command_items else -1
+    for item in command_items:
+        index = int(item["index"])
+        spec = item["spec"]
+        target_ref = str(item["target_ref"])
+        old_native = str(item["old_native"])
+        new_native = str(item["new_native"])
+        objects = batch_objects if index == first_command_index else 0
+        if item["delete"]:
+            result = {
+                "status": "deleted",
+                "remote": remote,
+                "ref": target_ref,
+                "old_oid": old_native,
+                "new_oid": new_native,
+                "objects": objects,
+            }
+        else:
+            result = {
+                "status": "pushed",
+                "remote": remote,
+                "source_ref": spec.source_ref,
+                "ref": target_ref,
+                "sha": str(item["source_sha"]),
+                "old_oid": old_native,
+                "new_oid": new_native,
+                "objects": objects,
+            }
+        result_by_index[index] = (spec, result)
+
+    return [result_by_index[index] for index in range(len(specs))]
