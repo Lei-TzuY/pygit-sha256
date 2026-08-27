@@ -1,10 +1,12 @@
-"""Modern ``pygit push`` with Git-style default remote precedence."""
+"""Modern ``pygit push`` with Git-style remote and refspec defaults."""
 
 from __future__ import annotations
 
 import argparse
 from typing import Sequence
 
+from .push_defaults import resolve_push_plan
+from .push_transport import push_branch
 from .remote_ops import resolve_push_remote
 from .tracking import TrackingSource, find_repo, set_branch_upstream
 
@@ -12,10 +14,11 @@ from .tracking import TrackingSource, find_repo, set_branch_upstream
 def run_push(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pygit push",
-        description="Update a remote branch from the current local branch.",
+        description="Update remote branches using Git-style push defaults.",
     )
     parser.add_argument("repository", nargs="?", metavar="REPOSITORY")
-    parser.add_argument("-f", "--force", action="store_true", help="force a non-fast-forward update")
+    parser.add_argument("refspecs", nargs="*", metavar="REFSPEC")
+    parser.add_argument("-f", "--force", action="store_true", help="force non-fast-forward updates")
     parser.add_argument(
         "-u",
         "--set-upstream",
@@ -30,16 +33,51 @@ def run_push(argv: Sequence[str]) -> int:
         raise RuntimeError("cannot push from detached HEAD")
 
     remote = resolve_push_remote(repo, args.repository)
-    result = repo.push(remote, force=args.force)
+    plan = resolve_push_plan(repo, remote, args.refspecs)
 
-    if args.set_upstream:
-        oid = str(result.get("sha") or repo.refs.resolve_head() or "")
+    if not plan.specs:
+        print("Everything up-to-date")
+        return 0
+
+    results = []
+    legacy_single = (
+        len(plan.specs) == 1
+        and plan.specs[0].source == branch
+        and plan.specs[0].target == branch
+    )
+    for spec in plan.specs:
+        effective_force = bool(args.force or spec.force)
+        if legacy_single:
+            # Keep the historical transport/API path for the common same-name
+            # current-branch push. Phase165 callers and monkeypatches therefore
+            # remain source-compatible.
+            result = repo.push(remote, force=effective_force)
+        else:
+            result = push_branch(
+                repo,
+                remote,
+                spec.source,
+                spec.target,
+                force=effective_force,
+            )
+        results.append((spec, result))
+
+    if args.set_upstream or plan.auto_setup_upstream:
+        current_specs = [item for item in results if item[0].source == branch]
+        if len(current_specs) != 1:
+            raise RuntimeError(
+                "cannot set one current-branch upstream from a multi-branch push"
+            )
+        spec, result = current_specs[0]
+        oid = str(result.get("sha") or repo.refs.get_branch(branch) or "")
         if not oid:
             raise RuntimeError("cannot set upstream without a branch tip")
-        set_branch_upstream(repo, branch, TrackingSource(remote, branch, oid))
+        set_branch_upstream(repo, branch, TrackingSource(remote, spec.target, oid))
 
-    print(
-        f"Push result: {result['status']} "
-        f"{result['remote']}/{result['branch']} ({result['objects']} objects)"
-    )
+    for spec, result in results:
+        source_note = "" if spec.source == spec.target else f"{spec.source} -> "
+        print(
+            f"Push result: {result['status']} {source_note}"
+            f"{result['remote']}/{result['branch']} ({result['objects']} objects)"
+        )
     return 0
