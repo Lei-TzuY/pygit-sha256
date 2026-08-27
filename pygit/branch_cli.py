@@ -26,7 +26,14 @@ def run_branch(argv: Sequence[str]) -> int:
     track_group = parser.add_mutually_exclusive_group()
     track_group.add_argument(
         "-t",
+        dest="track",
+        action="store_const",
+        const="direct",
+        help="set direct upstream tracking when creating a branch",
+    )
+    track_group.add_argument(
         "--track",
+        dest="track",
         nargs="?",
         const="direct",
         choices=("direct", "inherit"),
