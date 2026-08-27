@@ -9,7 +9,8 @@ adds reflog-backed stash-count reporting for long and porcelain-v2 status.
 Phase 153 makes short/porcelain-v1 pathname framing machine-safe and lets ``-z``
 imply porcelain v1, matching Git's command-line protocol. Phase 154 adds Git's
 ``-u/--untracked-files`` display modes while keeping Repository.status()'s
-individual-path API unchanged.
+individual-path API unchanged. Phase 155 extends ``--ignored`` with Git's
+traditional, matching, and no modes.
 """
 
 from __future__ import annotations
@@ -309,7 +310,15 @@ def run_status(argv: Sequence[str]) -> int:
         help="machine-readable porcelain v1 or v2 output",
     )
     parser.add_argument("-b", "--branch", action="store_true", help="show branch/upstream information")
-    parser.add_argument("--ignored", action="store_true", help="show ignored files")
+    parser.add_argument(
+        "--ignored",
+        nargs="?",
+        const="traditional",
+        default=False,
+        choices=("traditional", "matching", "no"),
+        metavar="{traditional,matching,no}",
+        help="show ignored paths using traditional (default), matching, or no mode",
+    )
     parser.add_argument(
         "-u",
         "--untracked-files",
