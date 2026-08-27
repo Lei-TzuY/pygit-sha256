@@ -6,6 +6,7 @@ import argparse
 from typing import Sequence
 
 from .push_defaults import PushPlan, all_branch_specs, all_tag_specs, delete_specs, resolve_push_plan
+from .push_includes import extract_force_if_includes, resolve_force_if_includes
 from .push_lease import extract_force_with_lease
 from .push_transport import delete_remote_ref, push_atomic_specs, push_branch, push_ref
 from .remote_ops import resolve_push_remote
@@ -13,7 +14,8 @@ from .tracking import TrackingSource, find_repo, set_branch_upstream
 
 
 def run_push(argv: Sequence[str]) -> int:
-    cleaned_argv, lease = extract_force_with_lease(argv)
+    lease_argv, lease = extract_force_with_lease(argv)
+    cleaned_argv, includes_override = extract_force_if_includes(lease_argv)
     parser = argparse.ArgumentParser(
         prog="pygit push",
         description="Update remote refs using Git-style push defaults and refspecs.",
@@ -34,6 +36,18 @@ def run_push(argv: Sequence[str]) -> int:
         "--no-force-with-lease",
         action="store_true",
         help="cancel preceding force-with-lease requests",
+    )
+    # force-if-includes is also pre-parsed so repeated positive/negative forms
+    # use Git's last-option-wins behavior while remaining visible in --help.
+    parser.add_argument(
+        "--force-if-includes",
+        action="store_true",
+        help="require the leased remote-tracking tip to appear in local reflog history",
+    )
+    parser.add_argument(
+        "--no-force-if-includes",
+        action="store_true",
+        help="disable force-if-includes even when configured",
     )
     parser.add_argument("--all", "--branches", dest="all_branches", action="store_true", help="push all local branches")
     parser.add_argument("--tags", action="store_true", help="push all local tags")
@@ -72,6 +86,9 @@ def run_push(argv: Sequence[str]) -> int:
     repo = find_repo()
     remote = resolve_push_remote(repo, args.repository)
     branch = repo.refs.current_branch()
+    lease = lease.with_force_if_includes(
+        resolve_force_if_includes(repo, includes_override)
+    )
 
     if args.delete:
         plan = PushPlan(remote, delete_specs(repo, args.refspecs), "delete")
