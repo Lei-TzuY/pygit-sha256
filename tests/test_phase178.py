@@ -148,6 +148,7 @@ def test_deleting_all_pushurls_is_allowed_and_restores_fetch_fallback(tmp_path):
 
 def test_cli_get_and_set_url(tmp_path, monkeypatch, capsys):
     repo = _repo(tmp_path)
+    capsys.readouterr()  # discard Repository.init() informational output
     monkeypatch.setattr("pygit.remote_cli.find_repo", lambda: repo)
 
     assert run_remote(["get-url", "origin"]) == 0
