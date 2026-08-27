@@ -8,10 +8,12 @@ remote state into the local branch's reflog history.
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Optional, Sequence, Tuple
 
-from .push_lease import LeasePolicy
 from .repo import Repository
+
+if TYPE_CHECKING:
+    from .push_lease import LeasePolicy
 
 
 _TRUE = {"1", "true", "yes", "on"}
@@ -57,7 +59,7 @@ def resolve_force_if_includes(repo: Repository, cli_override: Optional[bool]) ->
     return configured_force_if_includes(repo)
 
 
-def _implicit_lease_applies(lease: Optional[LeasePolicy], target_ref: str) -> bool:
+def _implicit_lease_applies(lease: Optional["LeasePolicy"], target_ref: str) -> bool:
     """Return whether force-if-includes is meaningful for *target_ref*.
 
     Git documents this guard as a no-op when no force-with-lease is active or
@@ -71,7 +73,7 @@ def _implicit_lease_applies(lease: Optional[LeasePolicy], target_ref: str) -> bo
 
 def require_force_if_includes(
     enabled: bool,
-    lease: Optional[LeasePolicy],
+    lease: Optional["LeasePolicy"],
     repo: Repository,
     remote: str,
     target_ref: str,
@@ -99,9 +101,9 @@ def require_force_if_includes(
     if not tracking_tip:
         return False
 
-    # Git's check is tied to the local branch based on the remote-tracking ref.
-    # A differently named source branch does not substitute for a missing local
-    # destination branch.
+    # Native Git associates this safety proof with the local destination-name
+    # branch.  A differently named source branch does not substitute for a
+    # missing local branch based on the remote-tracking ref.
     if not repo.refs.get_branch(branch):
         raise RuntimeError(
             f"Push rejected: remote ref updated since checkout for '{target_ref}'."
