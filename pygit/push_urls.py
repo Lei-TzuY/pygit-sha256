@@ -63,6 +63,8 @@ def use_push_url(repo: Repository, remote: str, url: str) -> Iterator[None]:
     mature push planners and transports operate on one destination at a time
     without introducing URL parameters throughout their public APIs.
     """
+    had_instance_override = "_read_config" in repo.__dict__
+    previous_instance_value = repo.__dict__.get("_read_config")
     original = repo._read_config
 
     def read_with_override():
@@ -77,6 +79,7 @@ def use_push_url(repo: Repository, remote: str, url: str) -> Iterator[None]:
     try:
         yield
     finally:
-        # ``original`` is the bound method that existed before this scope.  It
-        # may itself be an outer override when contexts are nested.
-        repo._read_config = original  # type: ignore[method-assign]
+        if had_instance_override:
+            repo.__dict__["_read_config"] = previous_instance_value
+        else:
+            repo.__dict__.pop("_read_config", None)
