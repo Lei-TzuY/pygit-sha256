@@ -8,7 +8,9 @@ using the repository's strict reflog reader. Phase 154 threads Git's untracked
 path modes through the same normalized presentation layer. Phase 159 adds
 porcelain-v2 type-2 records for staged renames; Phase 160 extends the same
 record form to staged copies using ``C<score>`` metadata. Phase 162 adds native
-``--no-ahead-behind`` unknown-count framing for branch headers.
+``--no-ahead-behind`` unknown-count framing for branch headers. Phase 163 keeps
+configured upstream names even when their tracking ref is gone, while omitting
+``branch.ab`` for the missing commit just like Git.
 """
 
 from __future__ import annotations
@@ -69,7 +71,7 @@ def _branch_headers(
     upstream = result.get("upstream")
     if isinstance(upstream, dict) and upstream.get("upstream"):
         lines.append(f"# branch.upstream {upstream['upstream']}")
-        if head_oid:
+        if head_oid and not upstream.get("gone"):
             if ahead_behind:
                 lines.append(
                     f"# branch.ab +{int(upstream.get('ahead') or 0)} "
