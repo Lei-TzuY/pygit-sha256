@@ -8,10 +8,11 @@ from urllib.parse import urlsplit
 
 from .fetch_negotiation import (
     plan_included_haves,
-    plan_negotiation_have_map,
+    reachable_commits,
+    resolve_negotiation_tips,
 )
 from .protocol_v2 import ProtocolV2Unavailable, SmartHttpV2FetchClient
-from .remote import SmartHttpClient
+from .remote import NativeExporter, SmartHttpClient
 from .remote_urls import fetch_url
 from .repo import Repository
 
@@ -80,6 +81,17 @@ def _source_url(repo: Repository, source: str) -> str:
     return fetch_url(repo, source)
 
 
+def _negotiation_have_map(repo: Repository, expressions: Sequence[str]) -> Dict[str, str]:
+    """Map native SHA-1 have identities back to local SHA-256 commits."""
+    tips = resolve_negotiation_tips(repo, expressions)
+    commits = reachable_commits(repo, tips)
+    known: Dict[str, str] = {}
+    for remote in repo.list_remotes():
+        known.update(repo._read_native_map(remote))
+    exporter = NativeExporter(repo.store, known_oids=known, have_shas=set(known))
+    return {exporter.export_oid(oid): oid for oid in commits}
+
+
 def negotiate_only(
     repo: Repository,
     *,
@@ -101,7 +113,7 @@ def negotiate_only(
             "--negotiate-only requires at least one --negotiation-restrict"
         )
 
-    have_map = plan_negotiation_have_map(repo, restrict)
+    have_map = _negotiation_have_map(repo, restrict)
     haves = set(have_map)
     if include:
         haves.update(plan_included_haves(repo, include))
