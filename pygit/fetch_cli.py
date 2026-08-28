@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import Sequence
 
 from .fetch_configured import fetch_configured
 from .fetch_direct import fetch_direct_url, is_direct_fetch_url
 from .fetch_head import write_fetch_head
+from .fetch_multiple import (
+    all_fetch_remotes,
+    expand_fetch_sources,
+    fetch_all_by_config,
+    remote_group_members,
+    run_multi_fetch,
+)
 from .fetch_porcelain import fetch_porcelain
 from .remote_ops import configured_upstream
 from .remote_urls import fetch_url
@@ -35,6 +43,60 @@ def _write_configured_fetch_head(repo, remote: str, result: dict) -> None:
     )
 
 
+def _fetch_named(
+    repo,
+    remote: str,
+    *,
+    append: bool,
+    prune,
+    prune_tags,
+    tags,
+) -> dict:
+    """Fetch one named remote and write/append its FETCH_HEAD entries."""
+    if remote not in repo.list_remotes():
+        raise KeyError(f"Unknown remote: '{remote}'")
+    if not append:
+        result = fetch_configured(
+            repo,
+            remote,
+            prune=prune,
+            prune_tags=prune_tags,
+            tags=tags,
+        )
+        _write_configured_fetch_head(repo, remote, result)
+        return result
+    return fetch_porcelain(
+        repo,
+        remote,
+        prune=prune,
+        prune_tags=prune_tags,
+        tags=tags,
+        append_fetch_head=True,
+    )
+
+
+def _run_many(repo, remotes, args) -> int:
+    if not remotes:
+        return 0
+
+    def fetch_one(remote: str, aggregate_append: bool) -> None:
+        print(f"Fetching {remote}")
+        _fetch_named(
+            repo,
+            remote,
+            append=args.append or aggregate_append,
+            prune=args.prune,
+            prune_tags=args.prune_tags,
+            tags=args.tags,
+        )
+
+    results = run_multi_fetch(repo, remotes, fetch_one)
+    failures = [result for result in results if not result.ok]
+    for result in failures:
+        print(f"error: could not fetch {result.remote}: {result.error}", file=sys.stderr)
+    return 1 if failures else 0
+
+
 def run_fetch(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pygit fetch",
@@ -47,6 +109,25 @@ def run_fetch(argv: Sequence[str]) -> int:
         "--append",
         action="store_true",
         help="append to FETCH_HEAD instead of overwriting it",
+    )
+    parser.add_argument(
+        "--multiple",
+        action="store_true",
+        help="fetch several named remotes or remote groups",
+    )
+    all_group = parser.add_mutually_exclusive_group()
+    all_group.add_argument(
+        "--all",
+        dest="all_remotes",
+        action="store_true",
+        default=None,
+        help="fetch every configured remote except skipFetchAll remotes",
+    )
+    all_group.add_argument(
+        "--no-all",
+        dest="all_remotes",
+        action="store_false",
+        help="disable fetch.all for this invocation",
     )
     parser.add_argument(
         "--refmap",
@@ -91,6 +172,46 @@ def run_fetch(argv: Sequence[str]) -> int:
 
     args = parser.parse_args(list(argv))
     repo = find_repo()
+
+    if args.multiple:
+        if args.refmap is not None:
+            raise RuntimeError("--refmap is incompatible with --multiple")
+        # Under --multiple every positional token is a repository/group, never
+        # a refspec. argparse places the first in `remote` and the rest in
+        # `refspecs`, so reinterpret the complete ordered positional list.
+        names = ([args.remote] if args.remote else []) + list(args.refspecs)
+        if args.all_remotes is True:
+            raise RuntimeError("--all and --multiple cannot be combined")
+        if not names:
+            raise RuntimeError("--multiple requires at least one remote or group")
+        return _run_many(repo, expand_fetch_sources(repo, names), args)
+
+    if args.all_remotes is True:
+        if args.remote is not None or args.refspecs:
+            raise RuntimeError("--all does not accept a repository or refspec")
+        if args.refmap is not None:
+            raise RuntimeError("--refmap is incompatible with --all")
+        return _run_many(repo, all_fetch_remotes(repo), args)
+
+    # fetch.all applies only to argument-less fetch. Explicit repository/group
+    # selection overrides it, while --no-all suppresses it for this invocation.
+    if (
+        args.remote is None
+        and args.all_remotes is not False
+        and fetch_all_by_config(repo)
+    ):
+        if args.refmap is not None:
+            raise RuntimeError("--refmap is incompatible with fetch.all")
+        return _run_many(repo, all_fetch_remotes(repo), args)
+
+    # A single remote group is another multi-source fetch form.
+    if args.remote is not None and not args.refspecs:
+        members = remote_group_members(repo, args.remote)
+        if members is not None:
+            if args.refmap is not None:
+                raise RuntimeError("--refmap is incompatible with a remote group")
+            return _run_many(repo, list(members), args)
+
     remote = args.remote or _default_fetch_remote(repo)
 
     if args.refmap is not None and not args.refspecs:
