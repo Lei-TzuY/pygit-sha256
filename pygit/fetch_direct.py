@@ -65,6 +65,7 @@ def fetch_direct_url(
     refspecs: Optional[Sequence[str]] = None,
     refmap: Optional[Sequence[str]] = None,
     tags: Optional[bool] = None,
+    force: bool = False,
     append_fetch_head: bool = False,
     write_fetch_head: bool = True,
 ) -> Dict[str, object]:
@@ -125,8 +126,8 @@ def fetch_direct_url(
         repo, client, advertisement, selected, native_map, known_by_native
     )
     for source, sha in imported.items():
-        for destination, force in destinations.get(source, []):
-            _update_destination(repo, destination, sha, force=force)
+        for destination, refspec_force in destinations.get(source, []):
+            _update_destination(repo, destination, sha, force=force or refspec_force)
 
     if tags is not False and tags is not True:
         followed, tag_objects = _auto_follow_tags(
