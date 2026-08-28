@@ -6,10 +6,16 @@ extends that primitive with a batched form so initial partial-clone checkout can
 resolve all blobs needed by the selected worktree in one protocol-v2 request.
 
 Phase221 removes the historical single-promisor restriction. Missing objects are
-now attempted against configured promisor remotes in deterministic repository
-configuration order, shrinking the unresolved set after every successful remote.
-This matches Git's multi-promisor fallback model while preserving batched wants
-whenever one remote can satisfy several requested objects.
+attempted against configured promisor remotes in deterministic repository config
+order, shrinking the unresolved set after every successful remote.
+
+Phase222 completes Git's primary-promisor ordering rule. Configured promisor
+remotes are discovered from ``remote.<name>.promisor`` and
+``remote.<name>.partialCloneFilter`` in addition to the persistent promisor
+sidecar, while ``extensions.partialClone`` names the primary remote that must be
+tried last. This allows cache/mirror promisors to satisfy missing objects before
+the canonical partial-clone source without changing repository-visible SHA-256
+identity.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Iterable, Sequence, Tuple
 
+from .config import GitConfig
 from .fetch_importer import TagPreservingNativeImporter
 from .fetch_server_option_config import configured_server_options
 from .promisor import (
@@ -55,11 +62,12 @@ def _promisor_remote(pygit_dir: Path, native_oid: str) -> str:
 
 
 def _promisor_remotes_for_many(pygit_dir: Path, native_oids: Sequence[str]) -> Tuple[str, ...]:
-    """Validate promises and return every recorded promisor remote.
+    """Validate promises and return every promisor recorded in sidecar metadata.
 
     The persistent promise set is intentionally global rather than assigning a
-    hard owner to each object. This mirrors Git's assumption that configured
-    promisor remotes may be tried one after another for a missing object.
+    hard owner to each object. Config-only promisor candidates are added later by
+    :func:`_ordered_promisor_remotes`; this helper retains the historical
+    sidecar-facing contract used by Phase214 compatibility callers.
     """
     if not native_oids:
         raise ValueError("promisor materialization requires at least one object id")
@@ -131,18 +139,55 @@ def _fetch_native_object(
     )
 
 
-def _ordered_promisor_remotes(repo, recorded: Sequence[str]) -> Tuple[str, ...]:
-    """Order recorded promisors by repository configuration, then by metadata.
+def _is_true_config(value: str | None) -> bool:
+    """Return whether a Git-style boolean config value is explicitly true."""
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
-    Git tries ordinary promisor remotes in configuration order. pygit's config
-    model has no separate ``extensions.partialClone`` primary marker yet, so all
-    recorded remotes participate in that order and any metadata-only names are
-    retained at the end for compatible missing-remote error handling.
+
+def _ordered_promisor_remotes(repo, recorded: Sequence[str]) -> Tuple[str, ...]:
+    """Return promisor remotes in Git-compatible missing-object fallback order.
+
+    Candidates come from three sources:
+
+    * remotes already recorded in ``promisor.json``;
+    * ``remote.<name>.promisor=true`` or a configured
+      ``remote.<name>.partialCloneFilter``;
+    * the primary remote named by ``extensions.partialClone``.
+
+    Ordinary candidates follow repository remote configuration order. Git treats
+    the ``extensions.partialClone`` remote specially and tries it last, because
+    cache/mirror promisors are expected to be preferable when available. A stale
+    metadata/config name is retained in the logical order but is skipped later if
+    its URL no longer exists.
     """
     configured = tuple(repo.list_remotes())
-    recorded_set = set(recorded)
-    ordered = [name for name in configured if name in recorded_set]
-    ordered.extend(name for name in recorded if name not in ordered)
+    config = GitConfig(repo.pygit_dir)
+    primary = config.get("extensions", "partialClone")
+    primary = primary.strip() if primary else None
+
+    candidates = set(recorded)
+    for name in configured:
+        if _is_true_config(config.get("remote", f"{name}.promisor")):
+            candidates.add(name)
+        if config.get("remote", f"{name}.partialCloneFilter") is not None:
+            candidates.add(name)
+    if primary:
+        candidates.add(primary)
+
+    ordered = [
+        name
+        for name in configured
+        if name in candidates and name != primary
+    ]
+    ordered.extend(
+        name
+        for name in recorded
+        if name not in ordered and name != primary
+    )
+    if primary and primary not in ordered:
+        ordered.append(primary)
     return tuple(ordered)
 
 
@@ -153,11 +198,12 @@ def materialize_promised_objects(
     """Return native-SHA1 -> local-SHA256 mappings for promised objects.
 
     Already-resolved objects are metadata-only hits. Every remaining object is
-    validated against the recorded promisor set. Promisor remotes are then tried
-    in repository configuration order until every requested object is resolved
-    or no usable remote remains. Each attempt asks for the complete still-missing
-    set, preserving bulk-prefetch efficiency while allowing later remotes to fill
-    gaps left by earlier caches.
+    validated against the persistent promise set. Promisor remotes are then tried
+    in Git-compatible order until every requested object is resolved or no usable
+    remote remains. Ordinary/cache promisors are tried first; the primary remote
+    named by ``extensions.partialClone`` is tried last. Each attempt asks for the
+    complete still-missing set, preserving bulk-prefetch efficiency while later
+    remotes fill gaps left by earlier caches.
 
     A one-object request deliberately retains Phase213's ``_fetch_native_object``
     call seam on every fallback attempt. Multi-object attempts use the Phase214
@@ -190,13 +236,13 @@ def materialize_promised_objects(
     repo = Repository(str(pygit_dir.parent))
     remotes = repo.list_remotes()
     remote_order = _ordered_promisor_remotes(repo, recorded_remotes)
-    configured_recorded = tuple(remote for remote in remote_order if remotes.get(remote))
-    if not configured_recorded:
+    configured_candidates = tuple(remote for remote in remote_order if remotes.get(remote))
+    if not configured_candidates:
         first = unresolved[0]
         raise PromisorMissingError(first, kinds[first])
 
     remaining = list(unresolved)
-    for remote in configured_recorded:
+    for remote in configured_candidates:
         if not remaining:
             break
         url = remotes[remote]
@@ -236,8 +282,6 @@ def materialize_promised_objects(
 
     if remaining:
         first = remaining[0]
-        # Preserve Phase212/213's intentional-missing contract when every usable
-        # fallback has been exhausted without supplying the requested object.
         raise PromisorMissingError(first, kinds[first])
 
     return result
