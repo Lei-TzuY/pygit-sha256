@@ -11,7 +11,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Dict, Iterator, Tuple
 
-from .fetch_configured import TagPreservingNativeImporter as NativeImporter
+from .fetch_importer import TagPreservingNativeImporter as NativeImporter
 from .remote import Advertisement
 
 
