@@ -1,13 +1,15 @@
 """Protocol-v2 shallow fetch state and importer orchestration.
 
 pygit stores repository-visible object identities as SHA-256 while smart HTTP
-speaks native Git SHA-1.  Existing shallow repositories therefore keep
+speaks native Git SHA-1. Existing shallow repositories therefore keep
 ``.pygit/shallow`` in local SHA-256 identity and translate boundaries only at
 the transport edge.
 
-Phase202 deliberately reuses the mature fetch/import pipeline.  A shallow
+Phase202 deliberately reuses the mature fetch/import pipeline. A shallow
 request forces one transfer even when the selected tips are already present so
-the server can return authoritative ``shallow-info`` updates.
+the server can return authoritative ``shallow-info`` updates. Phase204 switches
+that importer seam to a stable native-parent representation, allowing genuinely
+truncated shallow packs to be deepened without rewriting existing commit ids.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Dict, Iterator, Optional, Tuple
 
-from .fetch_importer import TagPreservingNativeImporter as NativeImporter
+from .fetch_importer import StableShallowNativeImporter as NativeImporter
 from .remote import Advertisement
 from .repo import Repository
 
@@ -125,13 +127,14 @@ def _fetch_import_sources_shallow(
     native_map: Dict[str, str],
     known_by_native: Dict[str, str],
 ):
-    """Force a shallow exchange and then reuse the normal SHA conversion model.
+    """Force a shallow exchange and import even genuinely truncated histories.
 
-    Existing pygit shallow repositories already retain the underlying converted
-    object graph.  Sending no ordinary ``have`` lines prevents those retained
+    Existing pygit shallow repositories may retain the underlying converted
+    object graph. Sending no ordinary ``have`` lines prevents those retained
     objects from incorrectly advertising history beyond the declared shallow
     boundary while the explicit ``shallow`` lines describe that boundary to the
-    server.
+    server. The stable shallow importer also accepts missing native parents and
+    records them for lazy resolution when later deepen operations fetch them.
     """
     if not source_oids:
         return {}, 0
