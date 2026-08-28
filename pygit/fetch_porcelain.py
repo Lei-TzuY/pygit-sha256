@@ -13,7 +13,7 @@ from .fetch_configured import (
     _select_explicit_sources,
     fetch_configured,
 )
-from .fetch_head import write_fetch_head
+from .fetch_head import write_fetch_head as _write_fetch_head
 from .fetch_policy import (
     FetchRefspec,
     configured_fetch_refspecs,
@@ -156,7 +156,7 @@ def _explicit_fetch(
         object_count += tag_objects
 
     if write_fetch_head_enabled:
-        write_fetch_head(
+        _write_fetch_head(
             repo.pygit_dir,
             imported,
             source=url,
@@ -209,7 +209,7 @@ def fetch_porcelain(
         default = result.get("default_branch")
         default_ref = f"refs/heads/{default}" if default else None
         mergeable = [default_ref] if default_ref in result["refs"] else []
-        write_fetch_head(
+        _write_fetch_head(
             repo.pygit_dir,
             result["refs"],
             source=url,
