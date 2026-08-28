@@ -7,13 +7,14 @@ may omit history behind the returned shallow boundary.
 
 The stable shallow importer stores original native commit parent identities, so
 those omitted parents can be fetched later without rewriting already-visible
-local SHA-256 commit ids.
+local SHA-256 commit ids. Phase206 adds conservative tag auto-follow: only tags
+whose peeled target is already present in the shallow graph are materialized.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from .fetch_importer import StableShallowNativeImporter
 from .fetch_shallow import _apply_shallow_response
@@ -46,6 +47,110 @@ def _selected_branch_refs(
         for name, oid in advertisement.refs.items()
         if name.startswith("refs/heads/")
     }
+
+
+def _eligible_auto_follow_tags(
+    advertisement: Advertisement,
+    known_by_native: Dict[str, str],
+) -> Dict[str, str]:
+    """Return tags whose fully peeled target is already in the shallow graph.
+
+    ``ls-refs peel`` records annotated tag targets as ``refs/tags/X^{}``. For a
+    lightweight tag the tag ref itself is already the target object. Restricting
+    auto-follow to known peeled targets prevents a tag request from implicitly
+    defeating the user's requested shallow depth.
+    """
+
+    result: Dict[str, str] = {}
+    for refname, native_oid in advertisement.refs.items():
+        if not refname.startswith("refs/tags/") or refname.endswith("^{}"):
+            continue
+        peeled = advertisement.refs.get(f"{refname}^{{}}", native_oid)
+        if peeled in known_by_native:
+            result[refname] = native_oid
+    return result
+
+
+def _record_importer_state(
+    importer: StableShallowNativeImporter,
+    known_by_native: Dict[str, str],
+    native_map: Dict[str, str],
+) -> None:
+    known_by_native.update(importer.converted)
+    native_map.update(
+        {
+            local_sha: native_oid
+            for native_oid, local_sha in importer.converted.items()
+        }
+    )
+
+
+def _auto_follow_tags(
+    repo: Repository,
+    client: SmartHttpV2FetchClient,
+    advertisement: Advertisement,
+    initial_result,
+    known_by_native: Dict[str, str],
+    native_map: Dict[str, str],
+) -> None:
+    """Materialize reachable lightweight/annotated tags without deepening.
+
+    Lightweight tags already point directly at a known imported object. Missing
+    annotated tag objects are requested in one follow-up v2 fetch while the
+    current shallow boundary is re-declared and known commits are advertised as
+    haves. The follow-up is not allowed to mutate shallow state.
+    """
+
+    eligible = _eligible_auto_follow_tags(advertisement, known_by_native)
+    if not eligible:
+        return
+
+    imported_tags: Dict[str, str] = {}
+    missing: Dict[str, str] = {}
+    for refname, native_oid in eligible.items():
+        local_oid = known_by_native.get(native_oid)
+        if local_oid is not None:
+            imported_tags[refname] = local_oid
+        else:
+            missing[refname] = native_oid
+
+    if missing:
+        selected = Advertisement(
+            refs=dict(missing),
+            capabilities=set(advertisement.capabilities),
+            symrefs=dict(advertisement.symrefs),
+        )
+        commit_haves = sorted(
+            native_oid
+            for native_oid, native in initial_result.objects.items()
+            if native.type_name == "commit" and native_oid in known_by_native
+        )
+        tag_result = client.fetch(
+            haves=commit_haves,
+            advertisement=selected,
+            shallow=tuple(getattr(initial_result, "shallow", ()) or ()),
+        )
+        if tag_result is None:
+            raise RuntimeError("shallow tag auto-follow requires protocol version 2")
+        if (
+            tuple(getattr(tag_result, "shallow", ()) or ())
+            or tuple(getattr(tag_result, "unshallow", ()) or ())
+        ):
+            raise RuntimeError(
+                "tag auto-follow unexpectedly attempted to change shallow boundaries"
+            )
+
+        importer = StableShallowNativeImporter(
+            repo.store,
+            tag_result.objects,
+            known=known_by_native,
+        )
+        for refname, native_oid in missing.items():
+            imported_tags[refname] = importer.import_oid(native_oid)
+        _record_importer_state(importer, known_by_native, native_map)
+
+    for refname, local_oid in imported_tags.items():
+        repo.refs.set_tag(refname[len("refs/tags/") :], local_oid)
 
 
 def clone_shallow_repository(
@@ -107,13 +212,21 @@ def clone_shallow_repository(
         local_sha: native_oid
         for native_oid, local_sha in importer.converted.items()
     }
-    repo._write_native_map(native_map, "origin")
 
     for refname, local_sha in imported.items():
         branch = refname[len("refs/heads/") :]
         repo.refs.set_remote("origin", branch, local_sha)
 
     _apply_shallow_response(repo, result, known_by_native)
+    _auto_follow_tags(
+        repo,
+        client,
+        advertisement,
+        result,
+        known_by_native,
+        native_map,
+    )
+    repo._write_native_map(native_map, "origin")
 
     config = repo._read_config()
     settings = config.setdefault("remotes", {}).setdefault("origin", {"url": url})
