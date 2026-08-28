@@ -1,16 +1,15 @@
 """Lazy materialization for objects promised by a partial-fetch remote.
 
 Phase212 records omitted native Git objects without inventing local SHA-256
-identities.  Phase213 turns that durable promise into a read-time capability:
-when a consumer actually needs one of those native objects, fetch exactly that
-object over protocol v2, import it into the SHA-256 store, and persist the
-native->local resolution.
+identities. Phase213 added single-object read-time materialization. Phase214
+extends that primitive with a batched form so initial partial-clone checkout can
+resolve all blobs needed by the selected worktree in one protocol-v2 request.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Dict, Iterable, Sequence
 
 from .fetch_importer import TagPreservingNativeImporter
 from .fetch_server_option_config import configured_server_options
@@ -49,13 +48,33 @@ def _promisor_remote(pygit_dir: Path, native_oid: str) -> str:
     return remotes[0]
 
 
-def _fetch_native_object(
+def _promisor_remote_for_many(pygit_dir: Path, native_oids: Sequence[str]) -> str:
+    """Validate that every unresolved oid belongs to the single promisor remote."""
+    if not native_oids:
+        raise ValueError("promisor materialization requires at least one object id")
+    state = read_promisor_state(pygit_dir)
+    for native_oid in native_oids:
+        if native_oid not in state["promised"]:
+            raise PromisorMissingError(native_oid)
+    remotes = list(state["remotes"])
+    if len(remotes) != 1:
+        raise RuntimeError(
+            "cannot materialize promisor objects: repository does not identify exactly one promisor remote"
+        )
+    return remotes[0]
+
+
+def _fetch_native_objects(
     url: str,
-    native_oid: str,
+    native_oids: Sequence[str],
     *,
     server_options: Sequence[str] = (),
 ) -> Dict[str, NativeObject]:
-    """Fetch one promised native object without applying the repository filter."""
+    """Fetch promised native objects without reapplying the repository filter."""
+    wanted = tuple(dict.fromkeys(_validate_native_oid(oid) for oid in native_oids))
+    if not wanted:
+        raise ValueError("promisor materialization requires at least one object id")
+
     client = SmartHttpV2FetchClient(url, server_options=server_options)
     capabilities = client.discover_capabilities()
     if capabilities is None:
@@ -65,7 +84,7 @@ def _fetch_native_object(
 
     body = build_fetch_request(
         capabilities,
-        [native_oid],
+        wanted,
         done=True,
         server_options=server_options,
     )
@@ -77,27 +96,50 @@ def _fetch_native_object(
     return PackParser(parsed.pack).parse()
 
 
-def materialize_promised_object(pygit_dir: Path, native_oid: str) -> str:
-    """Return the local SHA-256 identity for one promised native object.
+def _fetch_native_object(
+    url: str,
+    native_oid: str,
+    *,
+    server_options: Sequence[str] = (),
+) -> Dict[str, NativeObject]:
+    """Compatibility wrapper for the Phase213 single-object primitive."""
+    return _fetch_native_objects(
+        url,
+        [native_oid],
+        server_options=server_options,
+    )
 
-    Resolved objects are a metadata-only fast path.  Otherwise the object is
-    requested by native SHA-1 from the single recorded promisor remote, imported
-    through the normal native->SHA-256 conversion boundary, and atomically moved
+
+def materialize_promised_objects(
+    pygit_dir: Path,
+    native_oids: Iterable[str],
+) -> Dict[str, str]:
+    """Return native-SHA1 -> local-SHA256 mappings for promised objects.
+
+    Already-resolved objects are metadata-only hits. Every remaining object is
+    validated against the single promisor remote, fetched together in one v2
+    request, imported into the real SHA-256 object store, and atomically moved
     from ``promised`` to ``resolved`` in ``promisor.json``.
     """
     pygit_dir = Path(pygit_dir)
-    native_oid = _validate_native_oid(native_oid)
+    ordered = tuple(dict.fromkeys(_validate_native_oid(oid) for oid in native_oids))
+    if not ordered:
+        return {}
 
     resolved = resolved_native_objects(pygit_dir)
-    existing = resolved.get(native_oid)
-    if existing:
-        return existing
+    result = {oid: resolved[oid] for oid in ordered if oid in resolved}
+    unresolved = tuple(oid for oid in ordered if oid not in resolved)
+    if not unresolved:
+        return result
 
-    kind = promised_kind(pygit_dir, native_oid)
-    if kind is None:
-        raise PromisorMissingError(native_oid)
+    kinds = {}
+    for oid in unresolved:
+        kind = promised_kind(pygit_dir, oid)
+        if kind is None:
+            raise PromisorMissingError(oid)
+        kinds[oid] = kind
 
-    remote = _promisor_remote(pygit_dir, native_oid)
+    remote = _promisor_remote_for_many(pygit_dir, unresolved)
 
     # Import lazily to avoid a module cycle during pygit's package bootstrap.
     from .repo import Repository
@@ -106,23 +148,31 @@ def materialize_promised_object(pygit_dir: Path, native_oid: str) -> str:
     remotes = repo.list_remotes()
     url = remotes.get(remote)
     if not url:
-        # Keep Phase212's missing-object behavior when promisor metadata exists
-        # but its owning remote is no longer configured.  The object remains a
-        # known intentional omission, just not one that can currently be filled.
-        raise PromisorMissingError(native_oid, kind)
+        # Preserve Phase212/213's intentional-missing error contract when the
+        # promisor metadata survives but its owning remote is no longer configured.
+        first = unresolved[0]
+        raise PromisorMissingError(first, kinds[first])
 
     options = tuple(configured_server_options(repo, remote))
-    objects = _fetch_native_object(url, native_oid, server_options=options)
-    if native_oid not in objects:
-        raise ValueError(
-            f"promisor remote response did not contain requested {kind} {native_oid}"
-        )
+    objects = _fetch_native_objects(url, unresolved, server_options=options)
+    for oid in unresolved:
+        if oid not in objects:
+            raise ValueError(
+                f"promisor remote response did not contain requested {kinds[oid]} {oid}"
+            )
 
     importer = TagPreservingNativeImporter(
         repo.store,
         objects,
         known=resolved_native_objects(pygit_dir),
     )
-    local_oid = importer.import_oid(native_oid)
-    update_promisor_state(pygit_dir, resolved={native_oid: local_oid})
-    return local_oid
+    newly_resolved = {oid: importer.import_oid(oid) for oid in unresolved}
+    update_promisor_state(pygit_dir, resolved=newly_resolved)
+    result.update(newly_resolved)
+    return result
+
+
+def materialize_promised_object(pygit_dir: Path, native_oid: str) -> str:
+    """Return the local SHA-256 identity for one promised native object."""
+    native_oid = _validate_native_oid(native_oid)
+    return materialize_promised_objects(pygit_dir, [native_oid])[native_oid]
