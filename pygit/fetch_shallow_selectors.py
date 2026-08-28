@@ -11,7 +11,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Iterator, Optional, Sequence, Tuple
 
 from . import fetch_configured, fetch_porcelain
@@ -139,6 +139,7 @@ def _selector_fetch_request(
     shallow=(),
     deepen_since: Optional[int],
     deepen_not: Sequence[str],
+    server_options: Sequence[str] = (),
 ) -> bytes:
     """Extend the proven Phase202 request with protocol-v2 selector lines."""
     if not capabilities.feature("fetch", "shallow"):
@@ -149,6 +150,7 @@ def _selector_fetch_request(
         haves=haves,
         done=True,
         shallow=shallow,
+        server_options=server_options,
     )
     insertion = body.find(b"want ")
     if insertion < 4:
@@ -163,12 +165,20 @@ def _selector_fetch_request(
 
 
 @contextmanager
-def shallow_selector_transport(repo, remote: str, *, since: Optional[int], excludes: Sequence[str]) -> Iterator[None]:
+def shallow_selector_transport(
+    repo,
+    remote: str,
+    *,
+    since: Optional[int],
+    excludes: Sequence[str],
+) -> Iterator[None]:
     if remote not in repo.list_remotes():
         raise RuntimeError("shallow selectors currently require one named remote")
     local_boundaries = read_shallow(repo)
     if not local_boundaries:
-        raise RuntimeError("--shallow-since/--shallow-exclude require an existing shallow repository")
+        raise RuntimeError(
+            "--shallow-since/--shallow-exclude require an existing shallow repository"
+        )
     native = _native_boundaries(repo, remote, local_boundaries)
     request = ShallowSelectorRequest(
         shallow=native,
@@ -179,7 +189,10 @@ def shallow_selector_transport(repo, remote: str, *, since: Optional[int], exclu
         deepen_not=tuple(excludes),
     )
 
-    original_importers = [fetch_configured._fetch_import_sources, fetch_porcelain._fetch_import_sources]
+    original_importers = [
+        fetch_configured._fetch_import_sources,
+        fetch_porcelain._fetch_import_sources,
+    ]
     original_protocol_current = fetch_protocol_v2.current_shallow_request
     original_config_current = fetch_server_option_config.current_shallow_request
     original_v2_fetch = SmartHttpV2FetchClient.fetch
@@ -190,7 +203,12 @@ def shallow_selector_transport(repo, remote: str, *, since: Optional[int], exclu
     def fetch_with_selectors(self, haves=None, advertisement=None, **kwargs):
         active = current_selector_request()
         if active is None:
-            return original_v2_fetch(self, haves=haves, advertisement=advertisement, **kwargs)
+            return original_v2_fetch(
+                self,
+                haves=haves,
+                advertisement=advertisement,
+                **kwargs,
+            )
         capabilities = self.discover_capabilities()
         if capabilities is None:
             return None
@@ -207,6 +225,7 @@ def shallow_selector_transport(repo, remote: str, *, since: Optional[int], exclu
             shallow=active.shallow,
             deepen_since=active.deepen_since,
             deepen_not=active.deepen_not,
+            server_options=self.server_options,
         )
         parsed = self._post_fetch(body)
         if parsed.pack is None:
@@ -230,7 +249,10 @@ def shallow_selector_transport(repo, remote: str, *, since: Optional[int], exclu
         SmartHttpV2FetchClient.fetch = original_v2_fetch
         fetch_server_option_config.current_shallow_request = original_config_current
         fetch_protocol_v2.current_shallow_request = original_protocol_current
-        fetch_configured._fetch_import_sources, fetch_porcelain._fetch_import_sources = original_importers
+        (
+            fetch_configured._fetch_import_sources,
+            fetch_porcelain._fetch_import_sources,
+        ) = original_importers
         _ACTIVE_SELECTOR_REQUEST.reset(token)
 
 
@@ -239,28 +261,58 @@ def run_fetch(argv: Sequence[str]) -> int:
     if since is None and not excludes:
         return _run_fetch(forwarded)
 
-    # Protocol-v2 says deepen-since/deepen-not cannot be combined with deepen.
     option_side = forwarded[: forwarded.index("--")] if "--" in forwarded else forwarded
     if any(
-        arg == "--depth" or arg.startswith("--depth=") or arg == "--deepen" or arg.startswith("--deepen=") or arg == "--unshallow"
+        arg == "--depth"
+        or arg.startswith("--depth=")
+        or arg == "--deepen"
+        or arg.startswith("--deepen=")
+        or arg == "--unshallow"
         for arg in option_side
     ):
-        raise RuntimeError("--shallow-since/--shallow-exclude cannot be combined with depth/deepen/unshallow")
-    for incompatible in ("--all", "--multiple", "--prefetch", "--refetch", "--negotiate-only"):
-        if incompatible in option_side:
+        raise RuntimeError(
+            "--shallow-since/--shallow-exclude cannot be combined with depth/deepen/unshallow"
+        )
+    for incompatible in (
+        "--all",
+        "--multiple",
+        "--prefetch",
+        "--refetch",
+        "--negotiate-only",
+        "--negotiation-restrict",
+        "--negotiation-tip",
+        "--negotiation-include",
+    ):
+        if any(arg == incompatible or arg.startswith(incompatible + "=") for arg in option_side):
             raise RuntimeError(f"shallow selectors cannot be combined with {incompatible}")
 
     repo = find_repo()
-    if repo.config_get("protocol", "version") != "2" and not fetch_server_option_config._has_explicit_server_option(forwarded):
-        if not fetch_server_option_config.has_configured_server_options(repo):
-            raise RuntimeError("shallow selectors currently require protocol.version=2")
+    if (
+        repo.config_get("protocol", "version") != "2"
+        and not fetch_server_option_config._has_explicit_server_option(forwarded)
+        and not fetch_server_option_config.has_configured_server_options(repo)
+    ):
+        raise RuntimeError("shallow selectors currently require protocol.version=2")
 
-    # Reuse the established positional parser after selector removal.
     args_for_positionals = list(forwarded)
-    args_for_positionals, _server_options = fetch_server_option_config.fetch_frontend._extract_server_options(args_for_positionals)
-    args_for_positionals, _depth, _deepen, _unshallow = fetch_server_option_config.fetch_frontend._extract_shallow_options(args_for_positionals)
-    args_for_positionals, _restrict, _include = fetch_server_option_config.fetch_frontend._extract_negotiation_options(args_for_positionals)
-    positionals = fetch_server_option_config.fetch_frontend._fetch_positionals(args_for_positionals)
+    args_for_positionals, _server_options = (
+        fetch_server_option_config.fetch_frontend._extract_server_options(
+            args_for_positionals
+        )
+    )
+    args_for_positionals, _depth, _deepen, _unshallow = (
+        fetch_server_option_config.fetch_frontend._extract_shallow_options(
+            args_for_positionals
+        )
+    )
+    args_for_positionals, _restrict, _include = (
+        fetch_server_option_config.fetch_frontend._extract_negotiation_options(
+            args_for_positionals
+        )
+    )
+    positionals = fetch_server_option_config.fetch_frontend._fetch_positionals(
+        args_for_positionals
+    )
     remote = positionals[0] if positionals else _default_fetch_remote(repo)
     if not positionals:
         if "--" in forwarded:
