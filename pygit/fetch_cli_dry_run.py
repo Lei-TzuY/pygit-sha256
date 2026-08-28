@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Sequence
 
 from .fetch_cli import run_fetch as _run_fetch
 from .fetch_dry_run import dry_run_repository
+from .fetch_refetch import refetch_transport
 from .fetch_upstream import set_fetch_upstream
 from .tracking import find_repo
 
@@ -43,7 +45,7 @@ def _without_fetch_head_writes(argv: Sequence[str]) -> list[str]:
     return forwarded
 
 
-def _strip_set_upstream(argv: Sequence[str]) -> list[str]:
+def _strip_option(argv: Sequence[str], option: str) -> list[str]:
     forwarded: list[str] = []
     options = True
     for arg in argv:
@@ -51,10 +53,14 @@ def _strip_set_upstream(argv: Sequence[str]) -> list[str]:
             options = False
             forwarded.append(arg)
             continue
-        if options and arg == "--set-upstream":
+        if options and arg == option:
             continue
         forwarded.append(arg)
     return forwarded
+
+
+def _strip_set_upstream(argv: Sequence[str]) -> list[str]:
+    return _strip_option(argv, "--set-upstream")
 
 
 def _fetch_positionals(argv: Sequence[str]) -> list[str]:
@@ -94,20 +100,25 @@ def _apply_set_upstream(argv: Sequence[str]) -> None:
 
 
 def run_fetch(argv: Sequence[str]) -> int:
-    """Run fetch with Phase192 dry-run and Phase193 upstream tracking."""
+    """Run fetch with dry-run, upstream tracking, and refetch negotiation."""
     args = list(argv)
     wants_upstream = _option_requested(args, "--set-upstream")
+    wants_refetch = _option_requested(args, "--refetch")
     forwarded = _strip_set_upstream(args) if wants_upstream else args
+    if wants_refetch:
+        forwarded = _strip_option(forwarded, "--refetch")
 
-    if _dry_run_requested(forwarded):
-        repo = find_repo()
-        with dry_run_repository(repo):
-            code = _run_fetch(_without_fetch_head_writes(forwarded))
-            if code == 0 and wants_upstream:
-                _apply_set_upstream(forwarded)
-            return code
+    transport_scope = refetch_transport() if wants_refetch else nullcontext()
+    with transport_scope:
+        if _dry_run_requested(forwarded):
+            repo = find_repo()
+            with dry_run_repository(repo):
+                code = _run_fetch(_without_fetch_head_writes(forwarded))
+                if code == 0 and wants_upstream:
+                    _apply_set_upstream(forwarded)
+                return code
 
-    code = _run_fetch(forwarded)
-    if code == 0 and wants_upstream:
-        _apply_set_upstream(forwarded)
-    return code
+        code = _run_fetch(forwarded)
+        if code == 0 and wants_upstream:
+            _apply_set_upstream(forwarded)
+        return code
