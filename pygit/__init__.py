@@ -17,10 +17,12 @@ from .repo import Repository
 from .merge_index_stages import install_repository_merge_stage_support
 from .replay_index_stages import install_repository_replay_stage_support
 from .shallow_native_export import install_native_export_shallow_support
+from .promisor_store import install_promisor_store_support
 
 install_repository_merge_stage_support(Repository)
 install_repository_replay_stage_support(Repository)
 install_native_export_shallow_support()
+install_promisor_store_support()
 
 from .plumbing import is_ancestor, list_refs, merge_bases
 from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
@@ -82,7 +84,7 @@ from .reflog_expire import (
     default_reflog_unreachable_before,
     expire_reflogs,
 )
-from .reflog_show import ReflogShowEntry, format_reflog_entry, normalize_reflog_ref, show_reflog
+from .reflog_show import ReflogShowEntry, format_reflog_ref, format_reflog_refs, normalize_reflog_ref, show_reflog
 from .repack import RepackResult, repack
 from .remote_query import LsRemoteResult, RemoteRef, ls_remote, resolve_remote_url
 from .rev_list import RevListEntry, RevListObjectEntry, rev_list, rev_list_objects
@@ -200,7 +202,6 @@ __all__ = [
     "ReflogShowEntry",
     "normalize_reflog_ref",
     "show_reflog",
-    "format_reflog_entry",
     "RepackResult",
     "repack",
     "RemoteRef",
