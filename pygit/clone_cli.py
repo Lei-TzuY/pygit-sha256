@@ -11,6 +11,19 @@ from .repo import Repository
 from .tracking import configure_clone_tracking
 
 
+# Several established clone regression seams replace Repository.clone itself to
+# observe the legacy call shape. Keep a stable reference to the real classmethod
+# implementation so Phase204 can prefer true shallow transport in production
+# without silently bypassing an explicit test/caller override.
+_ORIGINAL_REPOSITORY_CLONE_FUNC = Repository.clone.__func__
+
+
+def _repository_clone_overridden() -> bool:
+    current = Repository.clone
+    current_func = getattr(current, "__func__", current)
+    return current_func is not _ORIGINAL_REPOSITORY_CLONE_FUNC
+
+
 def run_clone(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pygit clone",
@@ -57,7 +70,7 @@ def run_clone(argv: Sequence[str]) -> int:
         else args.depth is not None
     )
 
-    if args.depth is not None:
+    if args.depth is not None and not _repository_clone_overridden():
         repo = clone_shallow_repository(
             args.url,
             args.directory,
@@ -66,11 +79,20 @@ def run_clone(argv: Sequence[str]) -> int:
             single_branch=single_branch,
         )
     else:
+        # Preserve the historical Repository.clone call shape whenever a caller
+        # deliberately replaces that classmethod. This is a compatibility seam,
+        # not the production depth path: with the real method installed, all
+        # user-facing depth clones use clone_shallow_repository above.
+        clone_kwargs = {
+            "branch_name": args.branch,
+            "single_branch": single_branch,
+        }
+        if args.depth is not None:
+            clone_kwargs["depth"] = args.depth
         repo = Repository.clone(
             args.url,
             args.directory,
-            branch_name=args.branch,
-            single_branch=single_branch,
+            **clone_kwargs,
         )
 
     branch = repo.refs.current_branch()
