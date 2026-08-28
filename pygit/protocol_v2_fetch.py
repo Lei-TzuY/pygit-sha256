@@ -1,8 +1,9 @@
 """Git protocol-v2 smart HTTP fetch request/response transport primitives.
 
 Phase 200 introduced the isolated v2 fetch transport. Phase 201 added
-``wait-for-done`` ACK-only negotiation. Phase 202 adds the protocol-v2 shallow
-request grammar while preserving shallow-info on the returned fetch result.
+``wait-for-done`` ACK-only negotiation. Phase 202 added protocol-v2 shallow
+request grammar, and Phase207 reconciles ordered ``server-option`` forwarding
+with that shallow transport without changing repository-visible SHA-256 identity.
 """
 
 from __future__ import annotations
@@ -14,11 +15,12 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple
 from .protocol_v2 import (
     ProtocolV2Capabilities,
     SmartHttpV2QueryClient,
+    _command_prefix,
     _read_packet,
     build_ls_refs_request,
     parse_ls_refs_response,
 )
-from .remote import Advertisement, FetchResult, PackParser, pkt_line
+from .remote import Advertisement, FetchResult, PackParser
 
 
 def _validate_sha1_oid(oid: str, *, field: str) -> str:
@@ -45,13 +47,13 @@ def build_fetch_request(
     shallow: Iterable[str] = (),
     deepen: Optional[int] = None,
     deepen_relative: bool = False,
+    server_options: Sequence[str] = (),
 ) -> bytes:
     """Build one protocol-v2 ``fetch`` command request.
 
     ``deepen`` is absolute by default. ``deepen_relative`` changes it to be
-    relative to the client's current shallow boundary, matching Git's
-    ``--deepen`` behavior. Any shallow-related argument requires the remote's
-    advertised ``fetch=shallow`` feature.
+    relative to the client's current shallow boundary. Ordered server options
+    are emitted in the command capability-list before the delimiter.
     """
 
     if not capabilities.supports("fetch"):
@@ -73,36 +75,42 @@ def build_fetch_request(
     if shallow_requested and not capabilities.feature("fetch", "shallow"):
         raise RuntimeError("Remote protocol-v2 fetch does not advertise shallow")
 
-    body = pkt_line(b"command=fetch\n")
-    if capabilities.supports("agent"):
-        body += pkt_line(b"agent=pygit/0.1\n")
-    body += b"0001"
+    body = _command_prefix(
+        "fetch",
+        capabilities,
+        server_options=server_options,
+    )
 
     if no_progress:
-        body += pkt_line(b"no-progress\n")
+        body += _pkt_line(b"no-progress\n")
     if ofs_delta:
-        body += pkt_line(b"ofs-delta\n")
+        body += _pkt_line(b"ofs-delta\n")
     if include_tag:
-        body += pkt_line(b"include-tag\n")
+        body += _pkt_line(b"include-tag\n")
     if wait_for_done:
         if not capabilities.feature("fetch", "wait-for-done"):
             raise RuntimeError(
                 "Remote protocol-v2 fetch does not advertise wait-for-done"
             )
-        body += pkt_line(b"wait-for-done\n")
+        body += _pkt_line(b"wait-for-done\n")
     for oid in shallow_oids:
-        body += pkt_line(f"shallow {oid}\n".encode())
+        body += _pkt_line(f"shallow {oid}\n".encode())
     if deepen is not None:
-        body += pkt_line(f"deepen {deepen}\n".encode())
+        body += _pkt_line(f"deepen {deepen}\n".encode())
     if deepen_relative:
-        body += pkt_line(b"deepen-relative\n")
+        body += _pkt_line(b"deepen-relative\n")
     for oid in wanted:
-        body += pkt_line(f"want {oid}\n".encode())
+        body += _pkt_line(f"want {oid}\n".encode())
     for oid in have_oids:
-        body += pkt_line(f"have {oid}\n".encode())
+        body += _pkt_line(f"have {oid}\n".encode())
     if done:
-        body += pkt_line(b"done\n")
+        body += _pkt_line(b"done\n")
     return body + b"0000"
+
+
+def _pkt_line(payload: bytes) -> bytes:
+    # Local alias keeps the request builder independent from the legacy client.
+    return f"{len(payload) + 4:04x}".encode() + payload
 
 
 @dataclass(frozen=True)
@@ -126,10 +134,7 @@ class V2FetchResult(FetchResult):
     unshallow: Tuple[str, ...] = ()
 
 
-def _parse_ack_line(
-    text: str,
-    acknowledgments: list[str],
-) -> tuple[bool, bool]:
+def _parse_ack_line(text: str, acknowledgments: list[str]) -> tuple[bool, bool]:
     if text == "NAK":
         return False, True
     if text == "ready":
@@ -252,7 +257,11 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
         *,
         prefixes: Sequence[str] = (),
     ) -> Advertisement:
-        body = build_ls_refs_request(capabilities, prefixes=prefixes)
+        body = build_ls_refs_request(
+            capabilities,
+            prefixes=prefixes,
+            server_options=self.server_options,
+        )
         request = urllib.request.Request(
             f"{self.url}/git-upload-pack",
             data=body,
@@ -320,6 +329,7 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
             shallow=shallow,
             deepen=deepen,
             deepen_relative=deepen_relative,
+            server_options=self.server_options,
         )
         parsed = self._post_fetch(body)
 
@@ -338,12 +348,7 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
         haves: Iterable[str],
         advertisement: Optional[Advertisement] = None,
     ) -> Optional[Tuple[str, ...]]:
-        """Return common native SHA-1 commits, or ``None`` for a v0 server.
-
-        ``wait-for-done`` keeps this as a negotiation-only exchange: because the
-        client omits ``done``, a conforming server must not send `ready` or a
-        packfile.
-        """
+        """Return common native SHA-1 commits, or ``None`` for a v0 server."""
 
         capabilities = self.discover_capabilities()
         if capabilities is None:
@@ -362,6 +367,7 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
             haves=haves,
             done=False,
             wait_for_done=True,
+            server_options=self.server_options,
         )
         parsed = self._post_fetch(body)
         if parsed.ready or parsed.pack is not None:
