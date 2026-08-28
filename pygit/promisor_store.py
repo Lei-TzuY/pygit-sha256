@@ -1,9 +1,14 @@
-"""ObjectStore extension for Phase212 native-reference promisor trees."""
+"""ObjectStore extension for native-reference promisor trees.
+
+Resolved entries are filled from persistent metadata immediately.  Unresolved
+entries receive an ephemeral resolver which materializes the promised object
+only if a consumer later accesses ``TreeEntry.sha``.
+"""
 
 from __future__ import annotations
 
 from .objects import TreeObject
-from .promisor import resolved_native_objects
+from .promisor import promised_kind, resolved_native_objects
 from .store import ObjectStore
 
 
@@ -20,12 +25,27 @@ def install_promisor_store_support() -> None:
     def read(self: ObjectStore, sha: str):
         obj = original_read(self, sha)
         if isinstance(obj, TreeObject) and getattr(obj, "native_entries", False):
-            resolved = resolved_native_objects(self.root.parent)
+            pygit_dir = self.root.parent
+            resolved = resolved_native_objects(pygit_dir)
+
+            def resolve(native_oid: str):
+                current = resolved_native_objects(pygit_dir).get(native_oid)
+                if current:
+                    return current
+                if promised_kind(pygit_dir, native_oid) is None:
+                    return None
+                from .promisor_materialize import materialize_promised_object
+
+                return materialize_promised_object(pygit_dir, native_oid)
+
             for entry in obj.entries:
-                if entry.native_oid and not entry.is_resolved:
-                    local_oid = resolved.get(entry.native_oid)
-                    if local_oid:
-                        entry.sha = local_oid
+                if not entry.native_oid or entry.is_resolved:
+                    continue
+                local_oid = resolved.get(entry.native_oid)
+                if local_oid:
+                    entry.sha = local_oid
+                else:
+                    entry.set_resolver(resolve)
         return obj
 
     ObjectStore.read = read
