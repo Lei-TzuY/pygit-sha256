@@ -8,7 +8,11 @@ import pytest
 from pygit.objects import BlobObject, TreeObject
 from pygit.objects.tree import TreeEntry
 from pygit.promisor import PromisorMissingError, read_promisor_state, update_promisor_state
-from pygit.promisor_materialize import _fetch_native_object, materialize_promised_object
+from pygit.promisor_materialize import (
+    _fetch_native_object,
+    _promisor_remote_for_many,
+    materialize_promised_object,
+)
 from pygit.protocol_v2 import ProtocolV2Capabilities
 from pygit.remote import NativeObject
 from pygit.repo import Repository
@@ -115,7 +119,7 @@ def test_materialization_refuses_unpromised_oid(tmp_path):
         materialize_promised_object(repo.pygit_dir, "34" * 20)
 
 
-def test_materialization_requires_unambiguous_promisor_remote(tmp_path):
+def test_legacy_single_owner_helper_requires_unambiguous_promisor_remote(tmp_path):
     repo = Repository.init(str(tmp_path / "repo"))
     native = "56" * 20
     update_promisor_state(
@@ -129,8 +133,11 @@ def test_materialization_requires_unambiguous_promisor_remote(tmp_path):
         remote="backup",
         filter_spec="blob:none",
     )
+    # Phase221 intentionally makes the public lazy materializer multi-promisor.
+    # Keep the historical Phase213 ambiguity contract on the compatibility helper
+    # rather than forcing the public operation back to single-owner semantics.
     with pytest.raises(RuntimeError, match="exactly one promisor remote"):
-        materialize_promised_object(repo.pygit_dir, native)
+        _promisor_remote_for_many(repo.pygit_dir, [native])
 
 
 def test_fetch_native_object_requests_exact_promised_oid(monkeypatch):
