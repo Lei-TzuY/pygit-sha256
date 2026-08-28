@@ -166,7 +166,7 @@ def test_fetch_all_config_applies_only_without_explicit_repository(tmp_path, mon
         lambda repo, remote, **kwargs: multi_calls.append(remote),
     )
     assert fetch_cli.run_fetch([]) == 0
-    assert multi_calls == ["origin", "backup"]
+    assert multi_calls == all_fetch_remotes(repo)
 
     result = {
         "remote": "backup",
