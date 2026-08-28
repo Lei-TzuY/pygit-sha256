@@ -19,6 +19,7 @@ from typing import Optional, Set, Type
 
 from .promisor import read_promisor_state
 from .promisor_checkout import collect_checkout_promises
+from .promisor_commit import install_promisor_commit_support
 from .promisor_materialize import materialize_promised_objects
 
 
@@ -60,4 +61,7 @@ def install_promisor_worktree_support(repository_cls: Type) -> None:
         return original_replace(self, sha, remove_paths=remove_paths)
 
     repository_cls._replace_worktree_from_commit = _replace_worktree_from_commit
+    # Phase223 shares this established installer hook so public package import
+    # order remains stable while path-limited commits gain promisor batching.
+    install_promisor_commit_support(repository_cls)
     _INSTALLED = True
