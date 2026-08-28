@@ -1,4 +1,4 @@
-"""Fetch wrapper adding dry-run, upstream, refetch, negotiation and v2 policy."""
+"""Fetch wrapper adding dry-run, shallow, negotiation and protocol-v2 policy."""
 
 from __future__ import annotations
 
@@ -74,6 +74,41 @@ def _strip_set_upstream(argv: Sequence[str]) -> list[str]:
     return _strip_option(argv, "--set-upstream")
 
 
+def _extract_server_options(argv: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Strip ordered ``-o/--server-option`` values before legacy parsing."""
+    forwarded: list[str] = []
+    server_options: list[str] = []
+    args = list(argv)
+    options = True
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if options and arg == "--":
+            options = False
+            forwarded.append(arg)
+            i += 1
+            continue
+        if options and arg in {"-o", "--server-option"}:
+            if i + 1 >= len(args) or args[i + 1] == "--":
+                raise ValueError(f"{arg} requires an option value")
+            value = args[i + 1]
+            if "\n" in value or "\x00" in value:
+                raise ValueError("server option contains an invalid NUL or LF character")
+            server_options.append(value)
+            i += 2
+            continue
+        if options and arg.startswith("--server-option="):
+            value = arg.split("=", 1)[1]
+            if "\n" in value or "\x00" in value:
+                raise ValueError("server option contains an invalid NUL or LF character")
+            server_options.append(value)
+            i += 1
+            continue
+        forwarded.append(arg)
+        i += 1
+    return forwarded, server_options
+
+
 def _positive_depth(option: str, value: str) -> int:
     try:
         parsed = int(value)
@@ -103,7 +138,6 @@ def _extract_shallow_options(
             forwarded.append(arg)
             i += 1
             continue
-
         if options and arg in {"--depth", "--deepen"}:
             if i + 1 >= len(args) or args[i + 1] == "--":
                 raise ValueError(f"{arg} requires a positive integer")
@@ -118,7 +152,6 @@ def _extract_shallow_options(
                 deepen = value
             i += 2
             continue
-
         if options and arg.startswith("--depth="):
             if depth is not None:
                 raise ValueError("--depth may be specified only once")
@@ -137,7 +170,6 @@ def _extract_shallow_options(
             unshallow = True
             i += 1
             continue
-
         forwarded.append(arg)
         i += 1
 
@@ -150,12 +182,7 @@ def _extract_shallow_options(
 def _extract_negotiation_options(
     argv: Sequence[str],
 ) -> tuple[list[str], list[str], list[str]]:
-    """Strip negotiation-only CLI controls before the established parser.
-
-    Returns ``(forwarded, restrict, include)``. ``--negotiation-tip`` remains
-    accepted as the historical spelling of current Git's preferred
-    ``--negotiation-restrict`` name.
-    """
+    """Strip negotiation-only CLI controls before the established parser."""
     forwarded: list[str] = []
     restrict: list[str] = []
     include: list[str] = []
@@ -175,7 +202,6 @@ def _extract_negotiation_options(
             forwarded.append(arg)
             i += 1
             continue
-
         handled = False
         if options:
             for name, target in names.items():
@@ -197,10 +223,8 @@ def _extract_negotiation_options(
                     break
         if handled:
             continue
-
         forwarded.append(arg)
         i += 1
-
     return forwarded, restrict, include
 
 
@@ -250,12 +274,6 @@ def _apply_set_upstream(argv: Sequence[str]) -> None:
 
 
 def _optional_repo_for_config():
-    """Find the current repository without making the wrapper non-transparent.
-
-    Optional negotiation/protocol configuration needs an early repository, but
-    established wrapper-only tests and direct error paths may deliberately
-    defer repository discovery to the inner fetch implementation.
-    """
     try:
         return find_repo()
     except RuntimeError:
@@ -266,18 +284,29 @@ def _run_negotiate_only(
     forwarded: Sequence[str],
     restrict: Sequence[str],
     include: Sequence[str],
+    server_options: Sequence[str],
 ) -> int:
     repo = find_repo()
     positionals = _fetch_positionals(forwarded)
     if len(positionals) > 1:
         raise RuntimeError("--negotiate-only does not accept fetch refspecs")
     source = positionals[0] if positionals else _default_fetch_remote(repo)
-    for sha in negotiate_only(
-        repo,
-        source=source,
-        restrict=restrict,
-        include=include,
-    ):
+    if server_options:
+        common = negotiate_only(
+            repo,
+            source=source,
+            restrict=restrict,
+            include=include,
+            server_options=server_options,
+        )
+    else:
+        common = negotiate_only(
+            repo,
+            source=source,
+            restrict=restrict,
+            include=include,
+        )
+    for sha in common:
         print(sha)
     return 0
 
@@ -295,6 +324,9 @@ def run_fetch(argv: Sequence[str]) -> int:
     if wants_negotiate_only:
         forwarded = _strip_option(forwarded, "--negotiate-only")
 
+    # Extract server-option before shallow controls so a value such as
+    # ``--depth`` is metadata, not accidentally parsed as a fetch option.
+    forwarded, server_options = _extract_server_options(forwarded)
     forwarded, depth, deepen, unshallow = _extract_shallow_options(forwarded)
     wants_shallow = depth is not None or deepen is not None or unshallow
     forwarded, restrict, include = _extract_negotiation_options(forwarded)
@@ -311,7 +343,12 @@ def run_fetch(argv: Sequence[str]) -> int:
                 raise RuntimeError(
                     f"--negotiate-only cannot be combined with {incompatible}"
                 )
-        return _run_negotiate_only(forwarded, restrict, include)
+        return _run_negotiate_only(
+            forwarded,
+            restrict,
+            include,
+            server_options,
+        )
 
     repo_for_protocol = _optional_repo_for_config()
 
@@ -330,7 +367,7 @@ def run_fetch(argv: Sequence[str]) -> int:
                 )
 
         repo_for_protocol = find_repo()
-        if not protocol_v2_requested(repo_for_protocol):
+        if not (protocol_v2_requested(repo_for_protocol) or server_options):
             raise RuntimeError(
                 "shallow fetch controls currently require protocol.version=2"
             )
@@ -363,11 +400,6 @@ def run_fetch(argv: Sequence[str]) -> int:
         and has_configured_negotiation_includes(repo_for_negotiation)
     )
 
-    # Git accepts negotiation controls alongside --refetch, but refetch's core
-    # promise is a fresh transfer without local have negotiation. Validate
-    # explicit CLI tips while preserving that empty-have behavior. Per-remote
-    # negotiationInclude config is therefore intentionally inactive under
-    # refetch as well.
     if wants_refetch:
         if repo_for_negotiation is not None:
             if restrict:
@@ -392,16 +424,15 @@ def run_fetch(argv: Sequence[str]) -> int:
     else:
         transport_scope = nullcontext()
 
-    protocol_scope = (
-        protocol_v2_transport()
-        if protocol_v2_requested(repo_for_protocol)
-        else nullcontext()
-    )
+    if server_options:
+        protocol_scope = protocol_v2_transport(server_options=server_options)
+    elif protocol_v2_requested(repo_for_protocol):
+        protocol_scope = protocol_v2_transport()
+    else:
+        protocol_scope = nullcontext()
 
-    # Enter protocol first so the established policy wrappers capture the
-    # v2-aware fetch method. The shallow importer scope is innermost because it
-    # mutates repository state during the fetch and must remain inside dry-run's
-    # .pygit snapshot/restore transaction.
+    # Protocol scope is outermost so refetch/negotiation wrappers capture the
+    # v2-aware method. Shallow import remains innermost and inside dry-run state.
     with protocol_scope:
         with transport_scope:
             with shallow_scope:
