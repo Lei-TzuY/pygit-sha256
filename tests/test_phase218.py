@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Optional
 
 import pytest
 
@@ -18,7 +19,7 @@ def _native_oid(type_name: str, data: bytes) -> str:
 def _native_commit(
     tree_oid: str,
     *,
-    parent_oid: str | None = None,
+    parent_oid: Optional[str] = None,
     message: str = "commit",
 ) -> tuple[str, NativeObject]:
     parent = f"parent {parent_oid}\n" if parent_oid else ""
