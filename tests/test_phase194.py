@@ -28,6 +28,7 @@ def _result():
 
 def test_quiet_suppresses_success_output(tmp_path, monkeypatch, capsys):
     _repo(tmp_path, monkeypatch)
+    capsys.readouterr()
     monkeypatch.setattr("pygit.fetch_cli.fetch_configured", lambda *a, **k: _result())
 
     assert run_fetch(["--quiet", "--no-write-fetch-head", "origin"]) == 0
@@ -38,6 +39,7 @@ def test_quiet_suppresses_success_output(tmp_path, monkeypatch, capsys):
 
 def test_short_quiet_suppresses_success_output(tmp_path, monkeypatch, capsys):
     _repo(tmp_path, monkeypatch)
+    capsys.readouterr()
     monkeypatch.setattr("pygit.fetch_cli.fetch_configured", lambda *a, **k: _result())
 
     assert run_fetch(["-q", "--no-write-fetch-head", "origin"]) == 0
@@ -46,6 +48,7 @@ def test_short_quiet_suppresses_success_output(tmp_path, monkeypatch, capsys):
 
 def test_verbose_lists_all_fetched_refs_in_stable_order(tmp_path, monkeypatch, capsys):
     _repo(tmp_path, monkeypatch)
+    capsys.readouterr()
     monkeypatch.setattr("pygit.fetch_cli.fetch_configured", lambda *a, **k: _result())
 
     assert run_fetch(["--verbose", "--no-write-fetch-head", "origin"]) == 0
@@ -57,6 +60,7 @@ def test_verbose_lists_all_fetched_refs_in_stable_order(tmp_path, monkeypatch, c
 
 def test_short_verbose_is_supported(tmp_path, monkeypatch, capsys):
     _repo(tmp_path, monkeypatch)
+    capsys.readouterr()
     monkeypatch.setattr("pygit.fetch_cli.fetch_configured", lambda *a, **k: _result())
 
     assert run_fetch(["-v", "--no-write-fetch-head", "origin"]) == 0
@@ -65,6 +69,7 @@ def test_short_verbose_is_supported(tmp_path, monkeypatch, capsys):
 
 def test_last_quiet_or_verbose_option_wins_like_native_git(tmp_path, monkeypatch, capsys):
     _repo(tmp_path, monkeypatch)
+    capsys.readouterr()
     monkeypatch.setattr("pygit.fetch_cli.fetch_configured", lambda *a, **k: _result())
 
     assert run_fetch(["-q", "-v", "--no-write-fetch-head", "origin"]) == 0
@@ -77,7 +82,9 @@ def test_last_quiet_or_verbose_option_wins_like_native_git(tmp_path, monkeypatch
 def test_quiet_multi_fetch_hides_per_remote_progress(tmp_path, monkeypatch, capsys):
     repo = _repo(tmp_path, monkeypatch)
     repo.add_remote("backup", "https://example.test/backup.git")
+    capsys.readouterr()
     monkeypatch.setattr("pygit.fetch_cli.fetch_configured", lambda *a, **k: _result())
+    monkeypatch.setattr("pygit.fetch_cli.fetch_porcelain", lambda *a, **k: _result())
 
     assert run_fetch([
         "--quiet",
@@ -86,13 +93,17 @@ def test_quiet_multi_fetch_hides_per_remote_progress(tmp_path, monkeypatch, caps
         "origin",
         "backup",
     ]) == 0
-    assert capsys.readouterr().out == ""
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_verbose_multi_fetch_keeps_source_progress_and_ref_details(tmp_path, monkeypatch, capsys):
     repo = _repo(tmp_path, monkeypatch)
     repo.add_remote("backup", "https://example.test/backup.git")
+    capsys.readouterr()
     monkeypatch.setattr("pygit.fetch_cli.fetch_configured", lambda *a, **k: _result())
+    monkeypatch.setattr("pygit.fetch_cli.fetch_porcelain", lambda *a, **k: _result())
 
     assert run_fetch([
         "--verbose",
