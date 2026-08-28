@@ -120,6 +120,11 @@ def materialize_promised_objects(
     validated against the single promisor remote, fetched together in one v2
     request, imported into the real SHA-256 object store, and atomically moved
     from ``promised`` to ``resolved`` in ``promisor.json``.
+
+    A single unresolved object deliberately keeps Phase213's established
+    ``_fetch_native_object`` call seam. Multi-object callers use the Phase214
+    batch request, so existing lazy-read integrations remain source-compatible
+    while initial checkout avoids one HTTP round-trip per file.
     """
     pygit_dir = Path(pygit_dir)
     ordered = tuple(dict.fromkeys(_validate_native_oid(oid) for oid in native_oids))
@@ -154,7 +159,18 @@ def materialize_promised_objects(
         raise PromisorMissingError(first, kinds[first])
 
     options = tuple(configured_server_options(repo, remote))
-    objects = _fetch_native_objects(url, unresolved, server_options=options)
+    if len(unresolved) == 1:
+        objects = _fetch_native_object(
+            url,
+            unresolved[0],
+            server_options=options,
+        )
+    else:
+        objects = _fetch_native_objects(
+            url,
+            unresolved,
+            server_options=options,
+        )
     for oid in unresolved:
         if oid not in objects:
             raise ValueError(
