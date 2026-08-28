@@ -50,11 +50,12 @@ def _fetch_named(
     remote: str,
     *,
     append: bool,
+    write_fetch_head_enabled: bool,
     prune,
     prune_tags,
     tags,
 ) -> dict:
-    """Fetch one named remote and write/append its FETCH_HEAD entries."""
+    """Fetch one named remote and optionally write/append FETCH_HEAD."""
     if remote not in repo.list_remotes():
         raise KeyError(f"Unknown remote: '{remote}'")
     if not append:
@@ -65,7 +66,8 @@ def _fetch_named(
             prune_tags=prune_tags,
             tags=tags,
         )
-        _write_configured_fetch_head(repo, remote, result)
+        if write_fetch_head_enabled:
+            _write_configured_fetch_head(repo, remote, result)
         return result
     return fetch_porcelain(
         repo,
@@ -74,6 +76,7 @@ def _fetch_named(
         prune_tags=prune_tags,
         tags=tags,
         append_fetch_head=True,
+        write_fetch_head=write_fetch_head_enabled,
     )
 
 
@@ -87,6 +90,7 @@ def _run_many(repo, remotes, args) -> int:
             repo,
             remote,
             append=args.append or aggregate_append,
+            write_fetch_head_enabled=args.write_fetch_head,
             prune=args.prune,
             prune_tags=args.prune_tags,
             tags=args.tags,
@@ -115,6 +119,20 @@ def run_fetch(argv: Sequence[str]) -> int:
         "--append",
         action="store_true",
         help="append to FETCH_HEAD instead of overwriting it",
+    )
+    fetch_head_group = parser.add_mutually_exclusive_group()
+    fetch_head_group.add_argument(
+        "--write-fetch-head",
+        dest="write_fetch_head",
+        action="store_true",
+        default=True,
+        help="write fetched refs to FETCH_HEAD (default)",
+    )
+    fetch_head_group.add_argument(
+        "--no-write-fetch-head",
+        dest="write_fetch_head",
+        action="store_false",
+        help="do not write FETCH_HEAD",
     )
     parser.add_argument(
         "--atomic",
@@ -189,9 +207,6 @@ def run_fetch(argv: Sequence[str]) -> int:
             raise RuntimeError("--atomic can only be used when fetching from one remote")
         if args.refmap is not None:
             raise RuntimeError("--refmap is incompatible with --multiple")
-        # Under --multiple every positional token is a repository/group, never
-        # a refspec. argparse places the first in `remote` and the rest in
-        # `refspecs`, so reinterpret the complete ordered positional list.
         names = ([args.remote] if args.remote else []) + list(args.refspecs)
         if args.all_remotes is True:
             raise RuntimeError("--all and --multiple cannot be combined")
@@ -208,8 +223,6 @@ def run_fetch(argv: Sequence[str]) -> int:
             raise RuntimeError("--refmap is incompatible with --all")
         return _run_many(repo, all_fetch_remotes(repo), args)
 
-    # fetch.all applies only to argument-less fetch. Explicit repository/group
-    # selection overrides it, while --no-all suppresses it for this invocation.
     if (
         args.remote is None
         and args.all_remotes is not False
@@ -221,7 +234,6 @@ def run_fetch(argv: Sequence[str]) -> int:
             raise RuntimeError("--refmap is incompatible with fetch.all")
         return _run_many(repo, all_fetch_remotes(repo), args)
 
-    # A single remote group is another multi-source fetch form.
     if args.remote is not None and not args.refspecs:
         members = remote_group_members(repo, args.remote)
         if members is not None:
@@ -247,10 +259,8 @@ def run_fetch(argv: Sequence[str]) -> int:
                 refmap=args.refmap,
                 tags=args.tags,
                 append_fetch_head=args.append,
+                write_fetch_head=args.write_fetch_head,
             )
-        # Keep the established Phase183 `fetch_configured` seam for ordinary
-        # configured fetches. Explicit refspecs, --refmap, and --append need the
-        # richer Phase184/185 porcelain orchestration.
         elif not args.refspecs and not args.append:
             result = fetch_configured(
                 repo,
@@ -259,7 +269,8 @@ def run_fetch(argv: Sequence[str]) -> int:
                 prune_tags=args.prune_tags,
                 tags=args.tags,
             )
-            _write_configured_fetch_head(repo, remote, result)
+            if args.write_fetch_head:
+                _write_configured_fetch_head(repo, remote, result)
         else:
             result = fetch_porcelain(
                 repo,
@@ -270,6 +281,7 @@ def run_fetch(argv: Sequence[str]) -> int:
                 refspecs=args.refspecs or None,
                 refmap=args.refmap,
                 append_fetch_head=args.append,
+                write_fetch_head=args.write_fetch_head,
             )
 
     suffix = f"; pruned {len(result['pruned'])} refs" if result["pruned"] else ""
