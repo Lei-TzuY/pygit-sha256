@@ -101,6 +101,17 @@ class StableShallowNativeImporter(TagPreservingNativeImporter):
         resolved_parents = [
             self.converted[oid] for oid in native_parents if oid in self.converted
         ]
+        # A parent may come from the established per-remote native map rather
+        # than this pack. Mirror every already-known commit parent into the
+        # repository-global foreign index before the new child is published.
+        update_foreign_commit_map(
+            self.store.root.parent,
+            {
+                native_oid: self.converted[native_oid]
+                for native_oid in native_parents
+                if native_oid in self.converted
+            },
+        )
         local_sha = self.store.write(
             CommitObject(
                 tree=self.converted[tree],
