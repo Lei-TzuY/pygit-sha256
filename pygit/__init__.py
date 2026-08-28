@@ -16,9 +16,11 @@ Quick start::
 from .repo import Repository
 from .merge_index_stages import install_repository_merge_stage_support
 from .replay_index_stages import install_repository_replay_stage_support
+from .shallow_native_export import install_native_export_shallow_support
 
 install_repository_merge_stage_support(Repository)
 install_repository_replay_stage_support(Repository)
+install_native_export_shallow_support()
 
 from .plumbing import is_ancestor, list_refs, merge_bases
 from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
