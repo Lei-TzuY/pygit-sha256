@@ -15,7 +15,7 @@ from .fetch_configured import (
     _auto_follow_tags,
     _fetch_import_sources,
 )
-from .fetch_head import write_fetch_head
+from .fetch_head import write_fetch_head as _write_fetch_head
 from .fetch_policy import FetchRefspec, parse_fetch_refspec, source_is_excluded
 from .fetch_porcelain import _update_destination
 from .remote import SmartHttpClient
@@ -141,7 +141,7 @@ def fetch_direct_url(
         object_count += tag_objects
 
     if write_fetch_head:
-        write_fetch_head(
+        _write_fetch_head(
             repo.pygit_dir,
             imported,
             source=url,
