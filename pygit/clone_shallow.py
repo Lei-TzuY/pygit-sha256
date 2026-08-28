@@ -163,6 +163,7 @@ def clone_shallow_repository(
     branch_name: Optional[str],
     single_branch: bool,
     server_options: Sequence[str] = (),
+    checkout: bool = True,
 ) -> Repository:
     """Create a repository from a genuinely truncated protocol-v2 pack."""
     if depth <= 0:
@@ -251,5 +252,6 @@ def clone_shallow_repository(
     target_sha = imported[f"refs/heads/{target_branch}"]
     repo.refs.set_branch(target_branch, target_sha, message=f"clone: from {url}")
     repo.refs.set_head_symbolic(target_branch, message=f"clone: from {url}")
-    repo._replace_worktree_from_commit(target_sha)
+    if checkout:
+        repo._replace_worktree_from_commit(target_sha)
     return repo
