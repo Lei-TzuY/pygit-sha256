@@ -61,13 +61,16 @@ def _promisor_remote(pygit_dir: Path, native_oid: str) -> str:
     return remotes[0]
 
 
-def _promisor_remotes_for_many(pygit_dir: Path, native_oids: Sequence[str]) -> Tuple[str, ...]:
-    """Validate promises and return every promisor recorded in sidecar metadata.
+def _recorded_promisor_remotes(
+    pygit_dir: Path,
+    native_oids: Sequence[str],
+) -> Tuple[str, ...]:
+    """Validate promised OIDs and return sidecar-recorded promisor names.
 
-    The persistent promise set is intentionally global rather than assigning a
-    hard owner to each object. Config-only promisor candidates are added later by
-    :func:`_ordered_promisor_remotes`; this helper retains the historical
-    sidecar-facing contract used by Phase214 compatibility callers.
+    Public multi-promisor materialization may legitimately receive an empty
+    tuple here: Git config can identify promisor remotes even when the sidecar
+    only records the promised object set. Legacy single-owner helpers layer their
+    historical non-empty/exactly-one constraints on top of this primitive.
     """
     if not native_oids:
         raise ValueError("promisor materialization requires at least one object id")
@@ -75,7 +78,12 @@ def _promisor_remotes_for_many(pygit_dir: Path, native_oids: Sequence[str]) -> T
     for native_oid in native_oids:
         if native_oid not in state["promised"]:
             raise PromisorMissingError(native_oid)
-    remotes = tuple(state["remotes"])
+    return tuple(state["remotes"])
+
+
+def _promisor_remotes_for_many(pygit_dir: Path, native_oids: Sequence[str]) -> Tuple[str, ...]:
+    """Legacy helper requiring at least one promisor recorded in sidecar state."""
+    remotes = _recorded_promisor_remotes(pygit_dir, native_oids)
     if not remotes:
         raise RuntimeError(
             "cannot materialize promisor objects: repository does not identify a promisor remote"
@@ -228,7 +236,7 @@ def materialize_promised_objects(
             raise PromisorMissingError(oid)
         kinds[oid] = kind
 
-    recorded_remotes = _promisor_remotes_for_many(pygit_dir, unresolved)
+    recorded_remotes = _recorded_promisor_remotes(pygit_dir, unresolved)
 
     # Import lazily to avoid a module cycle during pygit's package bootstrap.
     from .repo import Repository
