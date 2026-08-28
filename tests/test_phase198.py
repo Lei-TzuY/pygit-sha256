@@ -73,11 +73,9 @@ def test_config_include_is_added_for_active_named_remote(tmp_path, monkeypatch):
 
 def test_config_includes_are_resolved_per_remote_not_per_url(tmp_path, monkeypatch):
     repo = Repository.init(str(tmp_path / "repo"))
-    main = _commit(repo, "a.txt", "main")
-    repo.refs.set_branch("topic", main, message="test")
-    _commit(repo, "b.txt", "topic")
-    topic = repo.refs.resolve_head()
+    topic = _commit(repo, "a.txt", "base")
     repo.refs.set_branch("topic", topic, message="test")
+    _commit(repo, "b.txt", "main-tip")
     repo.add_remote("origin", "https://example.test/shared.git")
     repo.add_remote("backup", "https://example.test/shared.git")
     _write_includes(repo, [("origin", "main"), ("backup", "topic")])
@@ -120,10 +118,9 @@ def test_direct_url_context_does_not_consume_named_remote_config(tmp_path, monke
 
 def test_explicit_cli_include_overrides_remote_config(tmp_path, monkeypatch):
     repo = Repository.init(str(tmp_path / "repo"))
-    main = _commit(repo, "a.txt", "main")
-    repo.refs.set_branch("topic", main, message="test")
-    topic = _commit(repo, "b.txt", "topic")
+    topic = _commit(repo, "a.txt", "base")
     repo.refs.set_branch("topic", topic, message="test")
+    _commit(repo, "b.txt", "main-tip")
     repo.add_remote("origin", "https://example.test/repo.git")
     _write_includes(repo, [("origin", "topic")])
     calls = []
