@@ -78,7 +78,6 @@ def _mapped_destinations(
     mappings: Sequence[FetchRefspec],
     command_matches: Sequence[FetchRefspec],
 ) -> List[Tuple[str, bool]]:
-    """Resolve explicit destinations, otherwise apply refmap/config mappings."""
     result: List[Tuple[str, bool]] = []
     for command in command_matches:
         destination = command.destination_for(source)
@@ -91,7 +90,6 @@ def _mapped_destinations(
             mapped = mapping.destination_for(source)
             if mapped is not None:
                 result.append((mapped, command.force or mapping.force))
-    # Preserve order while avoiding duplicate writes.
     unique: List[Tuple[str, bool]] = []
     for item in result:
         if item not in unique:
@@ -109,6 +107,7 @@ def _explicit_fetch(
     prune_tags: Optional[bool],
     tags: Optional[bool],
     append_fetch_head: bool,
+    write_fetch_head_enabled: bool,
 ) -> Dict[str, object]:
     url = fetch_url(repo, remote)
     client = SmartHttpClient(url)
@@ -117,9 +116,6 @@ def _explicit_fetch(
     if refmap is None:
         mappings = configured_fetch_refspecs(repo, remote)
     else:
-        # Git's --refmap='' suppresses remote.<name>.fetch mapping entirely.
-        # Empty entries therefore contribute no mapping, while non-empty
-        # repeated --refmap values are applied in source order.
         mappings = [parse_fetch_refspec(value) for value in refmap if value.strip()]
 
     command = [parse_fetch_refspec(value) for value in refspecs]
@@ -159,13 +155,14 @@ def _explicit_fetch(
             repo._write_native_map(native_map, remote)
         object_count += tag_objects
 
-    write_fetch_head(
-        repo.pygit_dir,
-        imported,
-        source=url,
-        mergeable=[name for name in selected if name in imported],
-        append=append_fetch_head,
-    )
+    if write_fetch_head_enabled:
+        write_fetch_head(
+            repo.pygit_dir,
+            imported,
+            source=url,
+            mergeable=[name for name in selected if name in imported],
+            append=append_fetch_head,
+        )
     return {
         "remote": remote,
         "default_branch": None,
@@ -186,6 +183,7 @@ def fetch_porcelain(
     prune_tags: Optional[bool] = None,
     tags: Optional[bool] = None,
     append_fetch_head: bool = False,
+    write_fetch_head: bool = True,
 ) -> Dict[str, object]:
     """Fetch like Git porcelain, including explicit refspec/refmap and FETCH_HEAD rules."""
     if refmap is not None and not refspecs:
@@ -200,20 +198,22 @@ def fetch_porcelain(
             prune_tags=prune_tags,
             tags=tags,
             append_fetch_head=append_fetch_head,
+            write_fetch_head_enabled=write_fetch_head,
         )
 
     result = fetch_configured(
         repo, remote, prune=prune, prune_tags=prune_tags, tags=tags
     )
-    url = fetch_url(repo, remote)
-    default = result.get("default_branch")
-    default_ref = f"refs/heads/{default}" if default else None
-    mergeable = [default_ref] if default_ref in result["refs"] else []
-    write_fetch_head(
-        repo.pygit_dir,
-        result["refs"],
-        source=url,
-        mergeable=mergeable,
-        append=append_fetch_head,
-    )
+    if write_fetch_head:
+        url = fetch_url(repo, remote)
+        default = result.get("default_branch")
+        default_ref = f"refs/heads/{default}" if default else None
+        mergeable = [default_ref] if default_ref in result["refs"] else []
+        write_fetch_head(
+            repo.pygit_dir,
+            result["refs"],
+            source=url,
+            mergeable=mergeable,
+            append=append_fetch_head,
+        )
     return result
