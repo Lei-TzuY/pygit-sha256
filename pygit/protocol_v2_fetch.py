@@ -1,8 +1,8 @@
 """Git protocol-v2 smart HTTP fetch request/response transport primitives.
 
 Phase 200 introduced the isolated v2 fetch transport. Phase 201 extends that
-foundation with ``wait-for-done`` ACK-only negotiation so porcelain can use the
-same tested framing for both object transfer and ``fetch --negotiate-only``.
+foundation with ``wait-for-done`` ACK-only negotiation, and Phase 203 adds
+ordered ``server-option`` capability forwarding.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple
 from .protocol_v2 import (
     ProtocolV2Capabilities,
     SmartHttpV2QueryClient,
+    _command_prefix,
     _read_packet,
     build_ls_refs_request,
     parse_ls_refs_response,
@@ -42,16 +43,9 @@ def build_fetch_request(
     ofs_delta: bool = True,
     include_tag: bool = False,
     wait_for_done: bool = False,
+    server_options: Sequence[str] = (),
 ) -> bytes:
-    """Build one protocol-v2 ``fetch`` command request.
-
-    pygit's current pack parser can consume OFS_DELTA, so ``ofs-delta`` is sent
-    by default. Thin packs are deliberately not requested because pygit does
-    not yet thicken a pack against objects outside the received stream.
-
-    ``wait-for-done`` is used by negotiate-only. The protocol requires the
-    server to advertise that fetch feature before a client may request it.
-    """
+    """Build one protocol-v2 ``fetch`` command request."""
 
     if not capabilities.supports("fetch"):
         raise RuntimeError("Remote protocol-v2 server does not advertise fetch")
@@ -61,11 +55,11 @@ def build_fetch_request(
         raise ValueError("protocol-v2 fetch requires at least one want")
     have_oids = sorted({_validate_sha1_oid(oid, field="have") for oid in haves})
 
-    body = pkt_line(b"command=fetch\n")
-    if capabilities.supports("agent"):
-        body += pkt_line(b"agent=pygit/0.1\n")
-    body += b"0001"
-
+    body = _command_prefix(
+        "fetch",
+        capabilities,
+        server_options=server_options,
+    )
     if no_progress:
         body += pkt_line(b"no-progress\n")
     if ofs_delta:
@@ -100,10 +94,7 @@ class ProtocolV2FetchResponse:
     pack: Optional[bytes]
 
 
-def _parse_ack_line(
-    text: str,
-    acknowledgments: list[str],
-) -> tuple[bool, bool]:
+def _parse_ack_line(text: str, acknowledgments: list[str]) -> tuple[bool, bool]:
     if text == "NAK":
         return False, True
     if text == "ready":
@@ -226,7 +217,11 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
         *,
         prefixes: Sequence[str] = (),
     ) -> Advertisement:
-        body = build_ls_refs_request(capabilities, prefixes=prefixes)
+        body = build_ls_refs_request(
+            capabilities,
+            prefixes=prefixes,
+            server_options=self.server_options,
+        )
         request = urllib.request.Request(
             f"{self.url}/git-upload-pack",
             data=body,
@@ -282,7 +277,13 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
         if not wants:
             raise RuntimeError("Remote repository does not advertise any refs.")
 
-        body = build_fetch_request(capabilities, wants, haves=haves or (), done=True)
+        body = build_fetch_request(
+            capabilities,
+            wants,
+            haves=haves or (),
+            done=True,
+            server_options=self.server_options,
+        )
         parsed = self._post_fetch(body)
 
         if parsed.pack is None:
@@ -295,12 +296,7 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
         haves: Iterable[str],
         advertisement: Optional[Advertisement] = None,
     ) -> Optional[Tuple[str, ...]]:
-        """Return common native SHA-1 commits, or ``None`` for a v0 server.
-
-        ``wait-for-done`` keeps this as a negotiation-only exchange: because the
-        client omits ``done``, a conforming server must not send `ready` or a
-        packfile.
-        """
+        """Return common native SHA-1 commits, or ``None`` for a v0 server."""
 
         capabilities = self.discover_capabilities()
         if capabilities is None:
@@ -319,6 +315,7 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
             haves=haves,
             done=False,
             wait_for_done=True,
+            server_options=self.server_options,
         )
         parsed = self._post_fetch(body)
         if parsed.ready or parsed.pack is not None:
