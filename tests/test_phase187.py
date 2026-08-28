@@ -4,6 +4,7 @@ import pytest
 
 from pygit.fetch_cli import run_fetch
 from pygit.fetch_direct import fetch_direct_url, is_direct_fetch_url
+from pygit.objects import CommitObject
 from pygit.remote import Advertisement
 from pygit.repo import Repository
 
@@ -81,7 +82,7 @@ def test_direct_source_only_refspec_updates_fetch_head_not_tracking_refs(tmp_pat
 def test_direct_explicit_destination_updates_requested_local_branch(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     native = "4" * 40
-    internal = "c" * 64
+    internal = repo.store.write(CommitObject(message="phase187 explicit destination"))
     _mock_transport(monkeypatch, {"refs/heads/dev": native}, {"refs/heads/dev": internal})
 
     fetch_direct_url(repo, URL, refspecs=["dev:peek"], tags=False)
