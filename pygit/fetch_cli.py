@@ -51,6 +51,7 @@ def _fetch_named(
     *,
     append: bool,
     write_fetch_head_enabled: bool,
+    force: bool,
     prune,
     prune_tags,
     tags,
@@ -62,6 +63,7 @@ def _fetch_named(
         result = fetch_configured(
             repo,
             remote,
+            force=force,
             prune=prune,
             prune_tags=prune_tags,
             tags=tags,
@@ -72,6 +74,7 @@ def _fetch_named(
     return fetch_porcelain(
         repo,
         remote,
+        force=force,
         prune=prune,
         prune_tags=prune_tags,
         tags=tags,
@@ -91,6 +94,7 @@ def _run_many(repo, remotes, args) -> int:
             remote,
             append=args.append or aggregate_append,
             write_fetch_head_enabled=args.write_fetch_head,
+            force=args.force,
             prune=args.prune,
             prune_tags=args.prune_tags,
             tags=args.tags,
@@ -119,6 +123,12 @@ def run_fetch(argv: Sequence[str]) -> int:
         "--append",
         action="store_true",
         help="append to FETCH_HEAD instead of overwriting it",
+    )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="force local ref updates that Git permits to be forced",
     )
     fetch_head_group = parser.add_mutually_exclusive_group()
     fetch_head_group.add_argument(
@@ -258,6 +268,7 @@ def run_fetch(argv: Sequence[str]) -> int:
                 refspecs=args.refspecs or None,
                 refmap=args.refmap,
                 tags=args.tags,
+                force=args.force,
                 append_fetch_head=args.append,
                 write_fetch_head=args.write_fetch_head,
             )
@@ -265,6 +276,7 @@ def run_fetch(argv: Sequence[str]) -> int:
             result = fetch_configured(
                 repo,
                 remote,
+                force=args.force,
                 prune=args.prune,
                 prune_tags=args.prune_tags,
                 tags=args.tags,
@@ -275,6 +287,7 @@ def run_fetch(argv: Sequence[str]) -> int:
             result = fetch_porcelain(
                 repo,
                 remote,
+                force=args.force,
                 prune=args.prune,
                 prune_tags=args.prune_tags,
                 tags=args.tags,
