@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from pygit.fetch_cli import run_fetch
@@ -31,6 +29,10 @@ def _mock_transport(monkeypatch, refs, imported):
         return {name: imported[name] for name in selected}, 3 if selected else 0
 
     monkeypatch.setattr("pygit.fetch_direct._fetch_import_sources", fake_import)
+
+
+def _snapshot(path):
+    return path.read_text(encoding="utf-8") if path.exists() else None
 
 
 def test_url_detection_is_limited_to_supported_smart_http():
@@ -109,14 +111,15 @@ def test_direct_refmap_can_create_explicit_tracking_destination(tmp_path, monkey
 def test_direct_fetch_does_not_write_remote_configuration(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     _mock_transport(monkeypatch, {"HEAD": "6" * 40}, {"HEAD": "e" * 64})
-    before_json = json.loads((repo.pygit_dir / "config.json").read_text())
-    before_ini = (repo.pygit_dir / "config").read_text() if (repo.pygit_dir / "config").exists() else ""
+    json_path = repo.pygit_dir / "config.json"
+    ini_path = repo.pygit_dir / "config"
+    before_json = _snapshot(json_path)
+    before_ini = _snapshot(ini_path)
 
     fetch_direct_url(repo, URL, tags=False)
 
-    assert json.loads((repo.pygit_dir / "config.json").read_text()) == before_json
-    after_ini = (repo.pygit_dir / "config").read_text() if (repo.pygit_dir / "config").exists() else ""
-    assert after_ini == before_ini
+    assert _snapshot(json_path) == before_json
+    assert _snapshot(ini_path) == before_ini
 
 
 def test_cli_routes_http_url_to_direct_fetch(tmp_path, monkeypatch):
