@@ -192,12 +192,6 @@ def materialize_promised_objects(
     remote_order = _ordered_promisor_remotes(repo, recorded_remotes)
     configured_recorded = tuple(remote for remote in remote_order if remotes.get(remote))
     if not configured_recorded:
-        if len(recorded_remotes) != 1:
-            # Preserve the Phase213 ambiguity contract when metadata names more
-            # than one possible owner but none is actually configured locally.
-            raise RuntimeError(
-                "cannot materialize promisor objects: repository does not identify exactly one promisor remote"
-            )
         first = unresolved[0]
         raise PromisorMissingError(first, kinds[first])
 
