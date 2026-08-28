@@ -21,12 +21,7 @@ from .repo import Repository
 
 
 def protocol_v2_requested(repo: Optional[Repository]) -> bool:
-    """Return whether a real repository explicitly selects protocol version 2.
-
-    Older fetch-wrapper regressions intentionally use lightweight stand-ins for
-    a repository. Because protocol selection is optional, those stand-ins must
-    remain transparent rather than requiring a ``config_get`` method.
-    """
+    """Return whether a real repository explicitly selects protocol version 2."""
     if repo is None:
         return False
     getter = getattr(repo, "config_get", None)
@@ -34,14 +29,15 @@ def protocol_v2_requested(repo: Optional[Repository]) -> bool:
 
 
 @contextmanager
-def protocol_v2_transport() -> Iterator[None]:
+def protocol_v2_transport(
+    *,
+    server_options: Sequence[str] = (),
+) -> Iterator[None]:
     """Make mature ``SmartHttpClient`` users prefer v2 for one command.
 
-    Higher fetch layers continue using ``SmartHttpClient``. This command-scoped
-    adapter routes that API through v2, preserving all established porcelain
-    behavior. Ordinary fetches may fall back to v0 when the server ignores v2;
-    shallow controls are stricter because pygit's v0 client does not implement
-    shallow negotiation and therefore must not silently pretend success.
+    Ordered server options and Phase202 shallow controls compose in the same v2
+    exchange. Ordinary fetches may fall back to v0 only when neither a shallow
+    request nor v2-only server metadata requires strict protocol-v2 behavior.
     """
 
     original_discover = SmartHttpClient.discover
@@ -50,30 +46,48 @@ def protocol_v2_transport() -> Iterator[None]:
     fetch_clients: Dict[str, SmartHttpV2FetchClient] = {}
     fallback: set[str] = set()
     shallow_sent: set[str] = set()
+    options = tuple(server_options)
 
     def query_for(instance: SmartHttpClient) -> SmartHttpV2QueryClient:
         client = query_clients.get(instance.url)
         if client is None:
-            client = SmartHttpV2QueryClient(instance.url, timeout=instance.timeout)
+            client = SmartHttpV2QueryClient(
+                instance.url,
+                timeout=instance.timeout,
+                server_options=options,
+            )
             query_clients[instance.url] = client
         return client
 
     def fetch_for(instance: SmartHttpClient) -> SmartHttpV2FetchClient:
         client = fetch_clients.get(instance.url)
         if client is None:
-            client = SmartHttpV2FetchClient(instance.url, timeout=instance.timeout)
+            client = SmartHttpV2FetchClient(
+                instance.url,
+                timeout=instance.timeout,
+                server_options=options,
+            )
             fetch_clients[instance.url] = client
         return client
 
+    def strict_reason() -> Optional[str]:
+        if current_shallow_request() is not None:
+            return "shallow fetch requires protocol version 2"
+        if options:
+            return "server options require protocol version 2"
+        return None
+
     def discover(self: SmartHttpClient):
         if self.url in fallback:
-            if current_shallow_request() is not None:
-                raise RuntimeError("shallow fetch requires protocol version 2")
+            reason = strict_reason()
+            if reason:
+                raise RuntimeError(reason)
             return original_discover(self)
         advertisement = query_for(self).discover_refs()
         if advertisement is None:
-            if current_shallow_request() is not None:
-                raise RuntimeError("shallow fetch requires protocol version 2")
+            reason = strict_reason()
+            if reason:
+                raise RuntimeError(reason)
             fallback.add(self.url)
             return original_discover(self)
         return advertisement
@@ -81,8 +95,9 @@ def protocol_v2_transport() -> Iterator[None]:
     def fetch(self: SmartHttpClient, haves=None, advertisement=None):
         request = current_shallow_request()
         if self.url in fallback:
-            if request is not None:
-                raise RuntimeError("shallow fetch requires protocol version 2")
+            reason = strict_reason()
+            if reason:
+                raise RuntimeError(reason)
             return original_fetch(self, haves=haves, advertisement=advertisement)
 
         if request is not None and self.url not in shallow_sent:
@@ -95,13 +110,13 @@ def protocol_v2_transport() -> Iterator[None]:
             )
             shallow_sent.add(self.url)
         else:
-            # Preserve the exact Phase201 call shape when no shallow request is
-            # active so existing monkeypatch/caller seams stay transparent.
+            # Preserve the established call shape when no shallow request is active.
             result = fetch_for(self).fetch(haves=haves, advertisement=advertisement)
 
         if result is None:
-            if request is not None:
-                raise RuntimeError("shallow fetch requires protocol version 2")
+            reason = strict_reason()
+            if reason:
+                raise RuntimeError(reason)
             fallback.add(self.url)
             return original_fetch(self, haves=haves, advertisement=advertisement)
         return result
@@ -140,7 +155,6 @@ def _effective_negotiation_includes(
     source: str,
     include: Sequence[str],
 ) -> Sequence[str]:
-    """Apply Git's CLI-over-remote-config negotiationInclude precedence."""
     if include:
         return include
     parsed = urlsplit(source)
@@ -155,13 +169,9 @@ def negotiate_only(
     source: str,
     restrict: Sequence[str],
     include: Sequence[str] = (),
+    server_options: Sequence[str] = (),
 ) -> Sequence[str]:
-    """Run a genuine protocol-v2 ACK-only negotiation.
-
-    A v0 answer is an error rather than a fallback because Git's negotiate-only
-    operation depends on v2 ``wait-for-done``. Output is translated back to
-    pygit's repository-visible SHA-256 commit identity.
-    """
+    """Run a genuine protocol-v2 ACK-only negotiation."""
     if not restrict:
         raise RuntimeError(
             "--negotiate-only requires at least one --negotiation-restrict"
@@ -173,7 +183,10 @@ def negotiate_only(
     if effective_include:
         haves.update(plan_included_haves(repo, effective_include))
 
-    client = SmartHttpV2FetchClient(_source_url(repo, source))
+    client = SmartHttpV2FetchClient(
+        _source_url(repo, source),
+        server_options=server_options,
+    )
     advertisement = client.discover_refs()
     if advertisement is None:
         raise RuntimeError("--negotiate-only requires protocol version 2")
@@ -181,6 +194,4 @@ def negotiate_only(
     if common is None:
         raise RuntimeError("--negotiate-only requires protocol version 2")
 
-    # Includes can help negotiation but current Git defines the printed domain
-    # in terms of ancestors reachable from the restriction/tip arguments.
     return [have_map[oid] for oid in common if oid in have_map]
