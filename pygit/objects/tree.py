@@ -15,7 +15,7 @@ promised object on demand without rewriting the parent tree.
 from __future__ import annotations
 
 import binascii
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from .base import GitObject
@@ -32,7 +32,11 @@ class TreeEntry:
     name: str
     _sha: str
     native_oid: Optional[str]
-    _resolver: Optional[Callable[[str], Optional[str]]]
+    _resolver: Optional[Callable[[str], Optional[str]]] = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __init__(
         self,
@@ -71,7 +75,8 @@ class TreeEntry:
         """Attach an ephemeral native->local resolver.
 
         The resolver is runtime-only and is deliberately excluded from the
-        canonical tree serialization, preserving the tree's SHA-256 identity.
+        canonical tree serialization and dataclass equality, preserving both
+        tree identity and historical value semantics.
         """
         self._resolver = resolver
 
