@@ -4,10 +4,10 @@ Phase210 adds Git-style shallow-source safety to protocol-v2 fetch.
 
 ## Behavior
 
-`pygit fetch` now rejects a protocol-v2 response that would change the local
+`pygit fetch` now refuses refs whose protocol-v2 response would change the local
 `.pygit/shallow` boundary unless `--update-shallow` is explicitly supplied.
-The error points the caller at the opt-in flag instead of allowing a shallow
-remote to silently redefine local history boundaries.
+Like native Git, the default refusal is warning-only and the fetch command can
+still exit successfully; the rejected refs are not installed.
 
 With:
 
@@ -23,10 +23,16 @@ object IDs.
 Native Git SHA-1 object IDs remain confined to protocol-v2 negotiation and the
 existing native-map interoperability boundary.
 
-## Compatibility boundary
+## Compatibility grounding
 
 Git documents `--update-shallow` as the explicit opt-in required when fetching
 from a shallow repository would require changing `.git/shallow`.
+
+A local Git 2.47.3 probe with a depth-1 source repository confirmed the exact
+status behavior: ordinary `git fetch` returned status 0 but warned that the
+remote-tracking ref was rejected because shallow roots were not allowed to be
+updated; repeating the fetch with `--update-shallow` installed the ref and
+created the local shallow boundary.
 
 Phase210 currently requires protocol v2 and one named remote. To keep the safety
 model unambiguous in this first phase, it does not combine `--update-shallow`
@@ -39,7 +45,7 @@ The standard `--` option terminator remains authoritative: a literal
 
 ## Verification focus
 
-Regression coverage checks option parsing, default shallow-info rejection,
-current-boundary SHA-256 -> native SHA-1 translation, command-scope restoration,
-protocol-v2 enforcement, default-remote insertion, and incompatible-mode
-rejection.
+Regression coverage checks option parsing, native-compatible warning-only
+refusal, current-boundary SHA-256 -> native SHA-1 translation, command-scope
+restoration, protocol-v2 enforcement, default-remote insertion, and
+incompatible-mode rejection.
