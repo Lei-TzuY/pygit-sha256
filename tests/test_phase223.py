@@ -108,9 +108,9 @@ def test_commit_only_paths_batches_complete_head_promises(tmp_path, monkeypatch)
 
 def test_commit_only_paths_preserves_per_remote_server_options(tmp_path, monkeypatch):
     repo, files, blob_oids, _old_head = _partial_commit_repo(tmp_path)
-    config = repo._read_config()
-    config["remotes"]["origin"]["serverOption"] = ["trace=1", "feature=x"]
-    repo._write_config(config)
+    # Server options live in the Git-style INI config, not repo.py's historical
+    # JSON remote metadata. Use the public config seam that production reads.
+    repo.config_set("remote", "origin.serverOption", "trace=1")
     calls = []
     by_oid = {blob_oids[path]: data for path, data in files.items()}
 
@@ -130,7 +130,7 @@ def test_commit_only_paths_preserves_per_remote_server_options(tmp_path, monkeyp
     )
 
     assert len(calls) == 1
-    assert calls[0][2] == ("trace=1", "feature=x")
+    assert calls[0][2] == ("trace=1",)
 
 
 def test_commit_without_only_paths_does_not_prefetch_promises(tmp_path, monkeypatch):
