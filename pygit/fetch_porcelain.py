@@ -65,6 +65,12 @@ def _update_destination(repo: Repository, destination: str, sha: str, *, force: 
         return
     if destination.startswith("refs/heads/"):
         name = destination[len("refs/heads/") :]
+        try:
+            new_object = repo.store.read(sha)
+        except Exception as exc:
+            raise RuntimeError(f"fetch rejected: branch '{name}' target is unavailable") from exc
+        if not isinstance(new_object, CommitObject):
+            raise RuntimeError(f"fetch rejected: branch '{name}' target is not a commit")
         current = repo.refs.get_branch(name)
         if current is not None and current != sha and not force and not _is_ancestor(repo, current, sha):
             raise RuntimeError(f"fetch rejected: branch '{name}' would not fast-forward")
@@ -103,6 +109,7 @@ def _explicit_fetch(
     refspecs: Sequence[str],
     *,
     refmap: Optional[Sequence[str]],
+    force: bool,
     prune: Optional[bool],
     prune_tags: Optional[bool],
     tags: Optional[bool],
@@ -143,8 +150,8 @@ def _explicit_fetch(
     )
     repo._write_native_map(native_map, remote)
     for source, sha in imported.items():
-        for destination, force in destinations.get(source, []):
-            _update_destination(repo, destination, sha, force=force)
+        for destination, refspec_force in destinations.get(source, []):
+            _update_destination(repo, destination, sha, force=force or refspec_force)
 
     if policy.tag_mode == "auto" and not policy.prune_tags:
         followed, tag_objects = _auto_follow_tags(
@@ -179,6 +186,7 @@ def fetch_porcelain(
     *,
     refspecs: Optional[Sequence[str]] = None,
     refmap: Optional[Sequence[str]] = None,
+    force: bool = False,
     prune: Optional[bool] = None,
     prune_tags: Optional[bool] = None,
     tags: Optional[bool] = None,
@@ -194,6 +202,7 @@ def fetch_porcelain(
             remote,
             refspecs,
             refmap=refmap,
+            force=force,
             prune=prune,
             prune_tags=prune_tags,
             tags=tags,
@@ -202,7 +211,7 @@ def fetch_porcelain(
         )
 
     result = fetch_configured(
-        repo, remote, prune=prune, prune_tags=prune_tags, tags=tags
+        repo, remote, force=force, prune=prune, prune_tags=prune_tags, tags=tags
     )
     if write_fetch_head:
         url = fetch_url(repo, remote)
