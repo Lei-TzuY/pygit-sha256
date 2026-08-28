@@ -1,7 +1,7 @@
 """Protocol-v2 partial clone built on the Phase212/213 promisor model.
 
 A filtered clone fetches the complete selected commit/tree graph while allowing
-blob filters to omit file contents.  Before the normal initial checkout,
+blob filters to omit file contents. Before the normal initial checkout,
 Phase214 batches only the still-promised blobs reachable from the selected HEAD
 worktree. Historical blobs remain promised and continue to materialize lazily
 when later commands actually need them.
@@ -174,8 +174,9 @@ def clone_partial_repository(
     branch_name: Optional[str],
     single_branch: bool,
     server_options: Sequence[str] = (),
+    checkout: bool = True,
 ) -> Repository:
-    """Create a working partial clone from a protocol-v2 filtered pack."""
+    """Create a partial clone, optionally leaving its worktree unpopulated."""
     filter_spec = _validate_filter_spec(filter_spec)
     if path is None:
         name = url.rstrip("/").rsplit("/", 1)[-1]
@@ -264,10 +265,11 @@ def clone_partial_repository(
     repo.refs.set_branch(target_branch, target_sha, message=f"clone: from {url}")
     repo.refs.set_head_symbolic(target_branch, message=f"clone: from {url}")
 
-    # Resolve current-worktree blobs in one request instead of triggering one
-    # Phase213 HTTP round-trip per file. Historical blobs remain promised.
-    checkout_promises = _collect_checkout_promises(repo, target_sha)
-    if checkout_promises:
-        materialize_promised_objects(repo.pygit_dir, sorted(checkout_promises))
-    repo._replace_worktree_from_commit(target_sha)
+    if checkout:
+        # Resolve current-worktree blobs in one request instead of triggering one
+        # Phase213 HTTP round-trip per file. Historical blobs remain promised.
+        checkout_promises = _collect_checkout_promises(repo, target_sha)
+        if checkout_promises:
+            materialize_promised_objects(repo.pygit_dir, sorted(checkout_promises))
+        repo._replace_worktree_from_commit(target_sha)
     return repo
