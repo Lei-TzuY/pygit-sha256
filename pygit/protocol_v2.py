@@ -1,8 +1,7 @@
 """Read-only Git protocol-v2 smart HTTP discovery and ``ls-refs``.
 
-This module deliberately stops at reference discovery. Object transfer remains
-on pygit's established protocol-v0 ``SmartHttpClient`` until the protocol-v2
-``fetch`` command and its sectioned response parser are implemented.
+This module deliberately keeps remote-native object identities at the smart HTTP
+boundary. Repository-visible identity remains SHA-256 throughout pygit.
 """
 
 from __future__ import annotations
@@ -60,8 +59,6 @@ def parse_capability_advertisement(data: bytes) -> Optional[ProtocolV2Capabiliti
     if kind != "data" or payload is None:
         return None
 
-    # Be tolerant of HTTP helpers that retain a v0 service preamble before a
-    # fallback response. A conforming v2 response starts directly at version 2.
     if payload == b"# service=git-upload-pack\n":
         kind, payload, offset = _read_packet(data, offset)
         if kind != "flush":
@@ -95,20 +92,51 @@ def parse_capability_advertisement(data: bytes) -> Optional[ProtocolV2Capabiliti
     return ProtocolV2Capabilities(values)
 
 
+def _validate_server_options(
+    capabilities: ProtocolV2Capabilities,
+    server_options: Sequence[str],
+) -> tuple[str, ...]:
+    """Validate ordered protocol-v2 server options against the advertisement."""
+    options = tuple(server_options)
+    if options and not capabilities.supports("server-option"):
+        raise RuntimeError("Remote protocol-v2 server does not advertise server-option")
+    for option in options:
+        if "\n" in option or "\x00" in option:
+            raise ValueError("server option contains an invalid NUL or LF character")
+    return options
+
+
+def _command_prefix(
+    command: str,
+    capabilities: ProtocolV2Capabilities,
+    *,
+    server_options: Sequence[str] = (),
+) -> bytes:
+    """Build the capability-list section shared by protocol-v2 commands."""
+    body = pkt_line(f"command={command}\n".encode())
+    if capabilities.supports("agent"):
+        body += pkt_line(b"agent=pygit/0.1\n")
+    for option in _validate_server_options(capabilities, server_options):
+        body += pkt_line(f"server-option={option}\n".encode())
+    return body + b"0001"
+
+
 def build_ls_refs_request(
     capabilities: ProtocolV2Capabilities,
     *,
     prefixes: Sequence[str] = (),
+    server_options: Sequence[str] = (),
 ) -> bytes:
     """Build one protocol-v2 ``ls-refs`` command request."""
 
     if not capabilities.supports("ls-refs"):
         raise RuntimeError("Remote protocol-v2 server does not advertise ls-refs")
 
-    body = pkt_line(b"command=ls-refs\n")
-    if capabilities.supports("agent"):
-        body += pkt_line(b"agent=pygit/0.1\n")
-    body += b"0001"
+    body = _command_prefix(
+        "ls-refs",
+        capabilities,
+        server_options=server_options,
+    )
     body += pkt_line(b"symrefs\n")
     body += pkt_line(b"peel\n")
     if capabilities.feature("ls-refs", "unborn"):
@@ -174,9 +202,16 @@ def parse_ls_refs_response(
 class SmartHttpV2QueryClient:
     """Read-only smart-HTTP protocol-v2 capability and ref discovery."""
 
-    def __init__(self, url: str, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        url: str,
+        timeout: int = 30,
+        *,
+        server_options: Sequence[str] = (),
+    ) -> None:
         self.url = url.rstrip("/")
         self.timeout = timeout
+        self.server_options = tuple(server_options)
 
     def discover_capabilities(self) -> Optional[ProtocolV2Capabilities]:
         query = urllib.parse.urlencode({"service": "git-upload-pack"})
@@ -200,7 +235,11 @@ class SmartHttpV2QueryClient:
         capabilities = self.discover_capabilities()
         if capabilities is None:
             return None
-        body = build_ls_refs_request(capabilities, prefixes=prefixes)
+        body = build_ls_refs_request(
+            capabilities,
+            prefixes=prefixes,
+            server_options=self.server_options,
+        )
         request = urllib.request.Request(
             f"{self.url}/git-upload-pack",
             data=body,
