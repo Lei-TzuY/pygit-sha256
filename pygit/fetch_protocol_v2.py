@@ -12,6 +12,7 @@ from .fetch_negotiation import (
     reachable_commits,
     resolve_negotiation_tips,
 )
+from .fetch_shallow import current_shallow_request
 from .protocol_v2 import SmartHttpV2QueryClient
 from .protocol_v2_fetch import SmartHttpV2FetchClient
 from .remote import NativeExporter, SmartHttpClient
@@ -36,11 +37,11 @@ def protocol_v2_requested(repo: Optional[Repository]) -> bool:
 def protocol_v2_transport() -> Iterator[None]:
     """Make mature ``SmartHttpClient`` users prefer v2 for one command.
 
-    The fetch stack already centralizes refspecs, tag policy, pruning, atomic
-    updates, dry-run, refetch and negotiation controls around
-    ``SmartHttpClient``. Replacing only its transport methods lets all of that
-    porcelain reuse the Phase200 v2 transport without a parallel implementation.
-    Servers that ignore the v2 handshake keep the established v0 fallback.
+    Higher fetch layers continue using ``SmartHttpClient``. This command-scoped
+    adapter routes that API through v2, preserving all established porcelain
+    behavior. Ordinary fetches may fall back to v0 when the server ignores v2;
+    shallow controls are stricter because pygit's v0 client does not implement
+    shallow negotiation and therefore must not silently pretend success.
     """
 
     original_discover = SmartHttpClient.discover
@@ -48,6 +49,7 @@ def protocol_v2_transport() -> Iterator[None]:
     query_clients: Dict[str, SmartHttpV2QueryClient] = {}
     fetch_clients: Dict[str, SmartHttpV2FetchClient] = {}
     fallback: set[str] = set()
+    shallow_sent: set[str] = set()
 
     def query_for(instance: SmartHttpClient) -> SmartHttpV2QueryClient:
         client = query_clients.get(instance.url)
@@ -65,18 +67,41 @@ def protocol_v2_transport() -> Iterator[None]:
 
     def discover(self: SmartHttpClient):
         if self.url in fallback:
+            if current_shallow_request() is not None:
+                raise RuntimeError("shallow fetch requires protocol version 2")
             return original_discover(self)
         advertisement = query_for(self).discover_refs()
         if advertisement is None:
+            if current_shallow_request() is not None:
+                raise RuntimeError("shallow fetch requires protocol version 2")
             fallback.add(self.url)
             return original_discover(self)
         return advertisement
 
     def fetch(self: SmartHttpClient, haves=None, advertisement=None):
+        request = current_shallow_request()
         if self.url in fallback:
+            if request is not None:
+                raise RuntimeError("shallow fetch requires protocol version 2")
             return original_fetch(self, haves=haves, advertisement=advertisement)
-        result = fetch_for(self).fetch(haves=haves, advertisement=advertisement)
+
+        if request is not None and self.url not in shallow_sent:
+            result = fetch_for(self).fetch(
+                haves=haves,
+                advertisement=advertisement,
+                shallow=request.shallow,
+                deepen=request.deepen,
+                deepen_relative=request.deepen_relative,
+            )
+            shallow_sent.add(self.url)
+        else:
+            # Preserve the exact Phase201 call shape when no shallow request is
+            # active so existing monkeypatch/caller seams stay transparent.
+            result = fetch_for(self).fetch(haves=haves, advertisement=advertisement)
+
         if result is None:
+            if request is not None:
+                raise RuntimeError("shallow fetch requires protocol version 2")
             fallback.add(self.url)
             return original_fetch(self, haves=haves, advertisement=advertisement)
         return result
