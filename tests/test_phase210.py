@@ -6,12 +6,12 @@ import pytest
 
 from pygit.fetch_update_shallow import (
     _extract_update_shallow,
-    reject_unrequested_shallow_updates,
+    _fetch_import_sources_refuse_shallow,
     run_fetch,
     update_shallow_transport,
 )
 from pygit.fetch_shallow import current_shallow_request, read_shallow, write_shallow
-from pygit.protocol_v2_fetch import SmartHttpV2FetchClient, V2FetchResult
+from pygit.protocol_v2_fetch import V2FetchResult
 from pygit.remote import Advertisement
 from pygit.repo import Repository
 
@@ -24,18 +24,25 @@ def test_extract_update_shallow_respects_option_terminator():
     assert forwarded == ["origin", "--", "--update-shallow"]
 
 
-def test_default_guard_rejects_server_shallow_info(monkeypatch):
+def test_default_refusal_warns_and_skips_refs(tmp_path, capsys):
+    repo = Repository.init(str(tmp_path / "repo"))
     advertisement = Advertisement({"refs/heads/main": "a" * 40}, set(), {})
 
-    def fake_fetch(self, *args, **kwargs):
-        return V2FetchResult(advertisement, {}, shallow=("b" * 40,))
+    class Client:
+        def fetch(self, haves=None, advertisement=None):
+            return V2FetchResult(advertisement, {}, shallow=("b" * 40,))
 
-    monkeypatch.setattr(SmartHttpV2FetchClient, "fetch", fake_fetch)
-    with reject_unrequested_shallow_updates():
-        with pytest.raises(RuntimeError, match="use --update-shallow"):
-            SmartHttpV2FetchClient("https://example.test/repo.git").fetch(
-                advertisement=advertisement
-            )
+    imported, count = _fetch_import_sources_refuse_shallow(
+        repo,
+        Client(),
+        advertisement,
+        {"refs/heads/main": "a" * 40},
+        {},
+        {},
+    )
+    assert imported == {}
+    assert count == 0
+    assert "shallow roots are not allowed to be updated" in capsys.readouterr().err
 
 
 def test_update_scope_advertises_native_boundary(tmp_path):
