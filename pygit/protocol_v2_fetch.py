@@ -1,10 +1,8 @@
 """Git protocol-v2 smart HTTP fetch request/response transport primitives.
 
-Phase 200 intentionally keeps this transport beside the mature protocol-v0
-``SmartHttpClient`` instead of silently switching normal fetches to v2.  The
-module owns the v2 fetch command framing and section parser so later phases can
-route porcelain fetches and negotiation-only requests through a tested wire
-format.
+Phase 200 introduced the isolated v2 fetch transport. Phase 201 extends that
+foundation with ``wait-for-done`` ACK-only negotiation so porcelain can use the
+same tested framing for both object transfer and ``fetch --negotiate-only``.
 """
 
 from __future__ import annotations
@@ -43,12 +41,16 @@ def build_fetch_request(
     no_progress: bool = True,
     ofs_delta: bool = True,
     include_tag: bool = False,
+    wait_for_done: bool = False,
 ) -> bytes:
     """Build one protocol-v2 ``fetch`` command request.
 
     pygit's current pack parser can consume OFS_DELTA, so ``ofs-delta`` is sent
-    by default.  Thin packs are deliberately not requested because pygit does
+    by default. Thin packs are deliberately not requested because pygit does
     not yet thicken a pack against objects outside the received stream.
+
+    ``wait-for-done`` is used by negotiate-only. The protocol requires the
+    server to advertise that fetch feature before a client may request it.
     """
 
     if not capabilities.supports("fetch"):
@@ -70,6 +72,12 @@ def build_fetch_request(
         body += pkt_line(b"ofs-delta\n")
     if include_tag:
         body += pkt_line(b"include-tag\n")
+    if wait_for_done:
+        if not capabilities.feature("fetch", "wait-for-done"):
+            raise RuntimeError(
+                "Remote protocol-v2 fetch does not advertise wait-for-done"
+            )
+        body += pkt_line(b"wait-for-done\n")
     for oid in wanted:
         body += pkt_line(f"want {oid}\n".encode())
     for oid in have_oids:
@@ -231,6 +239,31 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return parse_ls_refs_response(response.read(), capabilities)
 
+    def _post_fetch(self, body: bytes) -> ProtocolV2FetchResponse:
+        request = urllib.request.Request(
+            f"{self.url}/git-upload-pack",
+            data=body,
+            method="POST",
+            headers={
+                "Accept": "application/x-git-upload-pack-result",
+                "Content-Type": "application/x-git-upload-pack-request",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            return parse_fetch_response(response.read())
+
+    @staticmethod
+    def _wants(advertisement: Advertisement) -> list[str]:
+        return sorted(
+            {
+                oid
+                for name, oid in advertisement.refs.items()
+                if name == "HEAD"
+                or name.startswith("refs/heads/")
+                or (name.startswith("refs/tags/") and not name.endswith("^{}"))
+            }
+        )
+
     def fetch(
         self,
         haves: Optional[Iterable[str]] = None,
@@ -245,31 +278,51 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
             raise RuntimeError("Remote protocol-v2 server does not advertise fetch")
 
         advertisement = advertisement or self._discover_refs_with_capabilities(capabilities)
-        wants = sorted(
-            {
-                oid
-                for name, oid in advertisement.refs.items()
-                if name == "HEAD"
-                or name.startswith("refs/heads/")
-                or (name.startswith("refs/tags/") and not name.endswith("^{}"))
-            }
-        )
+        wants = self._wants(advertisement)
         if not wants:
             raise RuntimeError("Remote repository does not advertise any refs.")
 
         body = build_fetch_request(capabilities, wants, haves=haves or (), done=True)
-        request = urllib.request.Request(
-            f"{self.url}/git-upload-pack",
-            data=body,
-            method="POST",
-            headers={
-                "Accept": "application/x-git-upload-pack-result",
-                "Content-Type": "application/x-git-upload-pack-request",
-            },
-        )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            parsed = parse_fetch_response(response.read())
+        parsed = self._post_fetch(body)
 
         if parsed.pack is None:
             raise ValueError("protocol-v2 fetch response did not contain a packfile")
         return FetchResult(advertisement, PackParser(parsed.pack).parse())
+
+    def negotiate(
+        self,
+        *,
+        haves: Iterable[str],
+        advertisement: Optional[Advertisement] = None,
+    ) -> Optional[Tuple[str, ...]]:
+        """Return common native SHA-1 commits, or ``None`` for a v0 server.
+
+        ``wait-for-done`` keeps this as a negotiation-only exchange: because the
+        client omits ``done``, a conforming server must not send `ready` or a
+        packfile.
+        """
+
+        capabilities = self.discover_capabilities()
+        if capabilities is None:
+            return None
+        if not capabilities.supports("fetch"):
+            raise RuntimeError("Remote protocol-v2 server does not advertise fetch")
+
+        advertisement = advertisement or self._discover_refs_with_capabilities(capabilities)
+        wants = self._wants(advertisement)
+        if not wants:
+            raise RuntimeError("Remote repository does not advertise any refs.")
+
+        body = build_fetch_request(
+            capabilities,
+            wants,
+            haves=haves,
+            done=False,
+            wait_for_done=True,
+        )
+        parsed = self._post_fetch(body)
+        if parsed.ready or parsed.pack is not None:
+            raise RuntimeError(
+                "protocol-v2 negotiate-only unexpectedly advanced to pack transfer"
+            )
+        return parsed.acknowledgments
