@@ -18,7 +18,17 @@ from .repo import Repository
 
 
 def protocol_v2_requested(repo: Optional[Repository]) -> bool:
-    return repo is not None and repo.config_get("protocol", "version") == "2"
+    """Return whether the repository explicitly prefers protocol v2.
+
+    Fetch wrapper regressions use lightweight stand-ins for a repository when
+    exercising command-scope composition. Protocol preference is optional, so a
+    stand-in without ``config_get`` must remain transparent rather than making
+    an otherwise unrelated fetch path fail.
+    """
+    if repo is None:
+        return False
+    getter = getattr(repo, "config_get", None)
+    return callable(getter) and getter("protocol", "version") == "2"
 
 
 @contextmanager
