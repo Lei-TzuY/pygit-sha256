@@ -176,6 +176,12 @@ def run_fetch(argv: Sequence[str]) -> int:
         if restrict or include or not wants_refetch
         else None
     )
+    configured_include = (
+        repo_for_negotiation is not None
+        and not wants_refetch
+        and not include
+        and has_configured_negotiation_includes(repo_for_negotiation)
+    )
 
     # Git accepts negotiation controls alongside --refetch, but refetch's core
     # promise is a fresh transfer without local have negotiation.  Validate
@@ -189,26 +195,22 @@ def run_fetch(argv: Sequence[str]) -> int:
             if include:
                 resolve_negotiation_tips(repo_for_negotiation, include)
         transport_scope = refetch_transport()
-    elif repo_for_negotiation is not None and (
-        restrict
-        or include
-        or has_configured_negotiation_includes(repo_for_negotiation)
-    ):
-        if include:
-            # Preserve the Phase197 transport call shape when command-line
-            # include tips are explicit.  The Phase198-only keyword is needed
-            # only when the per-remote configuration fallback is active.
-            transport_scope = negotiation_transport(
-                repo_for_negotiation,
-                restrict=restrict,
-                include=include,
-            )
-        else:
+    elif repo_for_negotiation is not None and (restrict or include or configured_include):
+        if configured_include:
             transport_scope = negotiation_transport(
                 repo_for_negotiation,
                 restrict=restrict,
                 include=include,
                 use_config_include=True,
+            )
+        else:
+            # Preserve the Phase197 transport call shape unless the Phase198
+            # remote-config fallback is genuinely active.  This keeps existing
+            # monkeypatch/caller seams compatible for restrict/include-only use.
+            transport_scope = negotiation_transport(
+                repo_for_negotiation,
+                restrict=restrict,
+                include=include,
             )
     else:
         transport_scope = nullcontext()
