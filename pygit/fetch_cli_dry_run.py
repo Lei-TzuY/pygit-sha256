@@ -12,6 +12,11 @@ from .fetch_negotiation import (
     negotiation_transport,
     resolve_negotiation_tips,
 )
+from .fetch_protocol_v2 import (
+    negotiate_only,
+    protocol_v2_requested,
+    protocol_v2_transport,
+)
 from .fetch_refetch import refetch_transport
 from .fetch_upstream import set_fetch_upstream
 from .tracking import find_repo
@@ -166,8 +171,8 @@ def _optional_repo_for_config():
 
     Ordinary fetches historically delegated repository discovery to the inner
     fetch command. Phase198 needs an early repository only to inspect optional
-    negotiationInclude config, so absence of a repository here must not change
-    that established wrapper behavior.
+    negotiationInclude/protocol config, so absence of a repository here must
+    not change that established wrapper behavior.
     """
     try:
         return find_repo()
@@ -175,22 +180,60 @@ def _optional_repo_for_config():
         return None
 
 
+def _run_negotiate_only(
+    forwarded: Sequence[str],
+    restrict: Sequence[str],
+    include: Sequence[str],
+) -> int:
+    repo = find_repo()
+    positionals = _fetch_positionals(forwarded)
+    if len(positionals) > 1:
+        raise RuntimeError("--negotiate-only does not accept fetch refspecs")
+    source = positionals[0] if positionals else "origin"
+    for sha in negotiate_only(
+        repo,
+        source=source,
+        restrict=restrict,
+        include=include,
+    ):
+        print(sha)
+    return 0
+
+
 def run_fetch(argv: Sequence[str]) -> int:
     """Run fetch with command-scoped porcelain and transport policies."""
     args = list(argv)
     wants_upstream = _option_requested(args, "--set-upstream")
     wants_refetch = _option_requested(args, "--refetch")
+    wants_negotiate_only = _option_requested(args, "--negotiate-only")
+
     forwarded = _strip_set_upstream(args) if wants_upstream else args
     if wants_refetch:
         forwarded = _strip_option(forwarded, "--refetch")
+    if wants_negotiate_only:
+        forwarded = _strip_option(forwarded, "--negotiate-only")
 
     forwarded, restrict, include = _extract_negotiation_options(forwarded)
+
+    if wants_negotiate_only:
+        if wants_refetch:
+            raise RuntimeError("--negotiate-only cannot be combined with --refetch")
+        if wants_upstream:
+            raise RuntimeError("--negotiate-only cannot be combined with --set-upstream")
+        for incompatible in ("--all", "--multiple", "--prefetch"):
+            if _option_requested(forwarded, incompatible):
+                raise RuntimeError(
+                    f"--negotiate-only cannot be combined with {incompatible}"
+                )
+        return _run_negotiate_only(forwarded, restrict, include)
+
+    repo_for_protocol = _optional_repo_for_config()
     if restrict or include:
         repo_for_negotiation = find_repo()
     elif wants_refetch:
         repo_for_negotiation = None
     else:
-        repo_for_negotiation = _optional_repo_for_config()
+        repo_for_negotiation = repo_for_protocol
 
     configured_include = (
         repo_for_negotiation is not None
@@ -231,16 +274,26 @@ def run_fetch(argv: Sequence[str]) -> int:
     else:
         transport_scope = nullcontext()
 
-    with transport_scope:
-        if _dry_run_requested(forwarded):
-            repo = find_repo()
-            with dry_run_repository(repo):
-                code = _run_fetch(_without_fetch_head_writes(forwarded))
-                if code == 0 and wants_upstream:
-                    _apply_set_upstream(forwarded)
-                return code
+    protocol_scope = (
+        protocol_v2_transport()
+        if protocol_v2_requested(repo_for_protocol)
+        else nullcontext()
+    )
 
-        code = _run_fetch(forwarded)
-        if code == 0 and wants_upstream:
-            _apply_set_upstream(forwarded)
-        return code
+    # Enter the protocol preference first so refetch/negotiation wrappers see
+    # the v2-aware fetch method as their underlying transport. This preserves
+    # Phase196-198 have-set policy without duplicating it in the v2 client.
+    with protocol_scope:
+        with transport_scope:
+            if _dry_run_requested(forwarded):
+                repo = find_repo()
+                with dry_run_repository(repo):
+                    code = _run_fetch(_without_fetch_head_writes(forwarded))
+                    if code == 0 and wants_upstream:
+                        _apply_set_upstream(forwarded)
+                    return code
+
+            code = _run_fetch(forwarded)
+            if code == 0 and wants_upstream:
+                _apply_set_upstream(forwarded)
+            return code
