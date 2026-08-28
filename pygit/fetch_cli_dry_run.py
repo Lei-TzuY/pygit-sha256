@@ -214,13 +214,24 @@ def _run_negotiate_only(
     if len(positionals) > 1:
         raise RuntimeError("--negotiate-only does not accept fetch refspecs")
     source = positionals[0] if positionals else _default_fetch_remote(repo)
-    for sha in negotiate_only(
-        repo,
-        source=source,
-        restrict=restrict,
-        include=include,
-        server_options=server_options,
-    ):
+    if server_options:
+        common = negotiate_only(
+            repo,
+            source=source,
+            restrict=restrict,
+            include=include,
+            server_options=server_options,
+        )
+    else:
+        # Preserve the Phase201 call shape for wrapper seams and monkeypatched
+        # integrations when no Phase203 transport metadata is actually active.
+        common = negotiate_only(
+            repo,
+            source=source,
+            restrict=restrict,
+            include=include,
+        )
+    for sha in common:
         print(sha)
     return 0
 
