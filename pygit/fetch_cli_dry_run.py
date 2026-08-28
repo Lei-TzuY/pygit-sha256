@@ -30,7 +30,13 @@ def _without_fetch_head_writes(argv: Sequence[str]) -> list[str]:
         if options and arg in {"--dry-run", "--write-fetch-head", "--no-write-fetch-head"}:
             continue
         forwarded.append(arg)
-    forwarded.append("--no-write-fetch-head")
+
+    # Keep the forced metadata suppression on the option side of the standard
+    # ``--`` terminator; tokens after it are refspecs and must remain literal.
+    if "--" in forwarded:
+        forwarded.insert(forwarded.index("--"), "--no-write-fetch-head")
+    else:
+        forwarded.append("--no-write-fetch-head")
     return forwarded
 
 
