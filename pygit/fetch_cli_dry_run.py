@@ -161,6 +161,20 @@ def _apply_set_upstream(argv: Sequence[str]) -> None:
     set_fetch_upstream(find_repo(), remote, refspecs)
 
 
+def _optional_repo_for_config():
+    """Find the current repository without making the wrapper non-transparent.
+
+    Ordinary fetches historically delegated repository discovery to the inner
+    fetch command. Phase198 needs an early repository only to inspect optional
+    negotiationInclude config, so absence of a repository here must not change
+    that established wrapper behavior.
+    """
+    try:
+        return find_repo()
+    except RuntimeError:
+        return None
+
+
 def run_fetch(argv: Sequence[str]) -> int:
     """Run fetch with command-scoped porcelain and transport policies."""
     args = list(argv)
@@ -171,11 +185,13 @@ def run_fetch(argv: Sequence[str]) -> int:
         forwarded = _strip_option(forwarded, "--refetch")
 
     forwarded, restrict, include = _extract_negotiation_options(forwarded)
-    repo_for_negotiation = (
-        find_repo()
-        if restrict or include or not wants_refetch
-        else None
-    )
+    if restrict or include:
+        repo_for_negotiation = find_repo()
+    elif wants_refetch:
+        repo_for_negotiation = None
+    else:
+        repo_for_negotiation = _optional_repo_for_config()
+
     configured_include = (
         repo_for_negotiation is not None
         and not wants_refetch
