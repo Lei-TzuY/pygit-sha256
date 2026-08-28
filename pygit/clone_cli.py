@@ -6,6 +6,7 @@ import argparse
 from typing import Sequence
 
 from .clone_remote import clone_default_branch, configure_clone_remote
+from .clone_shallow import clone_shallow_repository
 from .repo import Repository
 from .tracking import configure_clone_tracking
 
@@ -41,7 +42,7 @@ def run_clone(argv: Sequence[str]) -> int:
         "--depth",
         type=int,
         metavar="DEPTH",
-        help="create a shallow clone with truncated depth",
+        help="create a bandwidth-saving protocol-v2 shallow clone",
     )
     args = parser.parse_args(list(argv))
 
@@ -56,13 +57,22 @@ def run_clone(argv: Sequence[str]) -> int:
         else args.depth is not None
     )
 
-    repo = Repository.clone(
-        args.url,
-        args.directory,
-        depth=args.depth,
-        branch_name=args.branch,
-        single_branch=single_branch,
-    )
+    if args.depth is not None:
+        repo = clone_shallow_repository(
+            args.url,
+            args.directory,
+            depth=args.depth,
+            branch_name=args.branch,
+            single_branch=single_branch,
+        )
+    else:
+        repo = Repository.clone(
+            args.url,
+            args.directory,
+            branch_name=args.branch,
+            single_branch=single_branch,
+        )
+
     branch = repo.refs.current_branch()
     if branch:
         configure_clone_remote(
