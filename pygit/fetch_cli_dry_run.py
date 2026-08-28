@@ -7,7 +7,11 @@ from typing import Sequence
 
 from .fetch_cli import run_fetch as _run_fetch
 from .fetch_dry_run import dry_run_repository
-from .fetch_negotiation import negotiation_transport, resolve_negotiation_tips
+from .fetch_negotiation import (
+    has_configured_negotiation_includes,
+    negotiation_transport,
+    resolve_negotiation_tips,
+)
 from .fetch_refetch import refetch_transport
 from .fetch_upstream import set_fetch_upstream
 from .tracking import find_repo
@@ -167,11 +171,17 @@ def run_fetch(argv: Sequence[str]) -> int:
         forwarded = _strip_option(forwarded, "--refetch")
 
     forwarded, restrict, include = _extract_negotiation_options(forwarded)
-    repo_for_negotiation = find_repo() if (restrict or include) else None
+    repo_for_negotiation = (
+        find_repo()
+        if restrict or include or not wants_refetch
+        else None
+    )
 
     # Git accepts negotiation controls alongside --refetch, but refetch's core
-    # promise is a fresh transfer without local have negotiation.  Validate the
-    # requested tips while preserving that empty-have behavior.
+    # promise is a fresh transfer without local have negotiation.  Validate
+    # explicit CLI tips while preserving that empty-have behavior. Per-remote
+    # negotiationInclude config is therefore intentionally inactive under
+    # refetch as well.
     if wants_refetch:
         if repo_for_negotiation is not None:
             if restrict:
@@ -179,11 +189,16 @@ def run_fetch(argv: Sequence[str]) -> int:
             if include:
                 resolve_negotiation_tips(repo_for_negotiation, include)
         transport_scope = refetch_transport()
-    elif repo_for_negotiation is not None:
+    elif repo_for_negotiation is not None and (
+        restrict
+        or include
+        or has_configured_negotiation_includes(repo_for_negotiation)
+    ):
         transport_scope = negotiation_transport(
             repo_for_negotiation,
             restrict=restrict,
             include=include,
+            use_config_include=not bool(include),
         )
     else:
         transport_scope = nullcontext()
