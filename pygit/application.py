@@ -16,7 +16,7 @@ from .checkout_index_cli import run_checkout_index
 from .clone_cli import run_clone
 from .commit_graph_cli import run_commit_graph
 from .count_objects_cli import run_count_objects
-from .fetch_update_shallow import run_fetch
+from .fetch_update_shallow_composition import run_fetch
 from .for_each_ref_cli import run_for_each_ref
 from .fsck_cli import run_fsck
 from .gc_cli import run_gc
