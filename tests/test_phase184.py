@@ -3,6 +3,7 @@ from __future__ import annotations
 from pygit.fetch_head import write_fetch_head
 from pygit.fetch_policy import parse_fetch_refspec
 from pygit.fetch_porcelain import fetch_porcelain
+from pygit.objects import CommitObject
 from pygit.remote import Advertisement
 from pygit.repo import Repository
 
@@ -86,7 +87,7 @@ def test_explicit_source_uses_configured_refmap(tmp_path, monkeypatch):
 
 def test_explicit_destination_overrides_configured_mapping(tmp_path, monkeypatch):
     repo = _configured_repo(tmp_path)
-    internal = "c" * 64
+    internal = repo.store.write(CommitObject(message="phase184 explicit destination"))
     native = "d" * 40
     repo._write_native_map({internal: native}, "origin")
 
