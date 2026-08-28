@@ -292,11 +292,14 @@ def run_fetch(argv: Sequence[str]) -> int:
     else:
         transport_scope = nullcontext()
 
-    protocol_scope = (
-        protocol_v2_transport(server_options=server_options)
-        if server_options or protocol_v2_requested(repo_for_protocol)
-        else nullcontext()
-    )
+    if server_options:
+        protocol_scope = protocol_v2_transport(server_options=server_options)
+    elif protocol_v2_requested(repo_for_protocol):
+        # Preserve the established no-argument wrapper seam for older tests and
+        # integrations that monkeypatch this command-scoped context manager.
+        protocol_scope = protocol_v2_transport()
+    else:
+        protocol_scope = nullcontext()
 
     with protocol_scope:
         with transport_scope:
