@@ -225,7 +225,15 @@ class ObjectStore:
 
     def read(self, sha: str) -> GitObject:
         """Read and parse *sha* from the primary or an alternate database."""
-        return self._parse(self.read_store_bytes(sha))
+        obj = self._parse(self.read_store_bytes(sha))
+        if isinstance(obj, CommitObject) and obj.native_parents is not None:
+            # Imported shallow commits persist native parent identities in the
+            # object itself. Resolve them only when every direct parent has
+            # actually arrived, leaving an incomplete shallow boundary root-like.
+            from .foreign_commits import resolve_native_parents
+
+            obj.parents = resolve_native_parents(self.root.parent, obj.native_parents)
+        return obj
 
     def exists(self, sha: str) -> bool:
         """Return True when *sha* exists locally or in an alternate store."""
