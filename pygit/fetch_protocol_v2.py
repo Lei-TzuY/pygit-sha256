@@ -7,6 +7,7 @@ from typing import Dict, Iterator, Optional, Sequence
 from urllib.parse import urlsplit
 
 from .fetch_negotiation import (
+    configured_negotiation_includes,
     plan_included_haves,
     reachable_commits,
     resolve_negotiation_tips,
@@ -109,6 +110,20 @@ def _negotiation_have_map(repo: Repository, expressions: Sequence[str]) -> Dict[
     return {exporter.export_oid(oid): oid for oid in commits}
 
 
+def _effective_negotiation_includes(
+    repo: Repository,
+    source: str,
+    include: Sequence[str],
+) -> Sequence[str]:
+    """Apply Git's CLI-over-remote-config negotiationInclude precedence."""
+    if include:
+        return include
+    parsed = urlsplit(source)
+    if parsed.scheme:
+        return ()
+    return configured_negotiation_includes(repo, source)
+
+
 def negotiate_only(
     repo: Repository,
     *,
@@ -129,8 +144,9 @@ def negotiate_only(
 
     have_map = _negotiation_have_map(repo, restrict)
     haves = set(have_map)
-    if include:
-        haves.update(plan_included_haves(repo, include))
+    effective_include = _effective_negotiation_includes(repo, source, include)
+    if effective_include:
+        haves.update(plan_included_haves(repo, effective_include))
 
     client = SmartHttpV2FetchClient(_source_url(repo, source))
     advertisement = client.discover_refs()
