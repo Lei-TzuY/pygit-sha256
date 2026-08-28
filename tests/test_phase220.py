@@ -197,4 +197,4 @@ def test_ordinary_reset_paths_keeps_historical_implementation(tmp_path, monkeypa
 
     result = repo.reset_paths(["a.txt"], target=head)
     assert result["paths"] == ["a.txt"]
-    assert repo.index["a.txt"].sha == repo._commit_tree_entries(head)["a.txt"][0]
+    assert repo.index.entries["a.txt"].sha == repo._commit_tree_entries(head)["a.txt"][0]
