@@ -179,7 +179,13 @@ def clone_shallow_repository(
     repo = Repository.init(str(destination))
     repo.add_remote("origin", url)
 
-    client = SmartHttpV2FetchClient(url, server_options=server_options)
+    # Preserve the exact Phase204/206 constructor call shape unless transport
+    # metadata is active; several established regressions replace this class.
+    client = (
+        SmartHttpV2FetchClient(url, server_options=server_options)
+        if server_options
+        else SmartHttpV2FetchClient(url)
+    )
     advertisement = client.discover_refs()
     if advertisement is None:
         raise RuntimeError("shallow clone requires protocol version 2")
