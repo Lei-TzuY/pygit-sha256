@@ -190,16 +190,22 @@ def materialize_promised_objects(
     repo = Repository(str(pygit_dir.parent))
     remotes = repo.list_remotes()
     remote_order = _ordered_promisor_remotes(repo, recorded_remotes)
-    remaining = list(unresolved)
-    attempted_configured_remote = False
+    configured_recorded = tuple(remote for remote in remote_order if remotes.get(remote))
+    if not configured_recorded:
+        if len(recorded_remotes) != 1:
+            # Preserve the Phase213 ambiguity contract when metadata names more
+            # than one possible owner but none is actually configured locally.
+            raise RuntimeError(
+                "cannot materialize promisor objects: repository does not identify exactly one promisor remote"
+            )
+        first = unresolved[0]
+        raise PromisorMissingError(first, kinds[first])
 
-    for remote in remote_order:
+    remaining = list(unresolved)
+    for remote in configured_recorded:
         if not remaining:
             break
-        url = remotes.get(remote)
-        if not url:
-            continue
-        attempted_configured_remote = True
+        url = remotes[remote]
         options = tuple(configured_server_options(repo, remote))
         try:
             if len(remaining) == 1:
@@ -236,13 +242,8 @@ def materialize_promised_objects(
 
     if remaining:
         first = remaining[0]
-        # Preserve Phase212/213's intentional-missing contract both when all
-        # owning remotes disappeared from config and when fallbacks were tried
-        # but none could supply the object.
-        raise PromisorMissingError(first, kinds[first])
-
-    if not attempted_configured_remote:
-        first = unresolved[0]
+        # Preserve Phase212/213's intentional-missing contract when every usable
+        # fallback has been exhausted without supplying the requested object.
         raise PromisorMissingError(first, kinds[first])
 
     return result
