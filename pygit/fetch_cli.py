@@ -18,6 +18,7 @@ from .fetch_multiple import (
     remote_group_members,
     run_multi_fetch,
 )
+from .fetch_negotiation import negotiation_remote
 from .fetch_porcelain import fetch_porcelain
 from .fetch_prefetch_run import fetch_prefetched
 from .remote_ops import configured_upstream
@@ -89,39 +90,40 @@ def _fetch_named(
     """Fetch one named remote and optionally write/append FETCH_HEAD."""
     if remote not in repo.list_remotes():
         raise KeyError(f"Unknown remote: '{remote}'")
-    if prefetch:
-        return fetch_prefetched(
+    with negotiation_remote(remote):
+        if prefetch:
+            return fetch_prefetched(
+                repo,
+                remote,
+                force=force,
+                prune=prune,
+                prune_tags=prune_tags,
+                tags=tags,
+                append_fetch_head=append,
+                write_fetch_head_enabled=write_fetch_head_enabled,
+            )
+        if not append:
+            result = fetch_configured(
+                repo,
+                remote,
+                prune=prune,
+                prune_tags=prune_tags,
+                tags=tags,
+                **_force_kwargs(force),
+            )
+            if write_fetch_head_enabled:
+                _write_configured_fetch_head(repo, remote, result)
+            return result
+        return fetch_porcelain(
             repo,
             remote,
-            force=force,
             prune=prune,
             prune_tags=prune_tags,
             tags=tags,
-            append_fetch_head=append,
-            write_fetch_head_enabled=write_fetch_head_enabled,
-        )
-    if not append:
-        result = fetch_configured(
-            repo,
-            remote,
-            prune=prune,
-            prune_tags=prune_tags,
-            tags=tags,
+            append_fetch_head=True,
+            write_fetch_head=write_fetch_head_enabled,
             **_force_kwargs(force),
         )
-        if write_fetch_head_enabled:
-            _write_configured_fetch_head(repo, remote, result)
-        return result
-    return fetch_porcelain(
-        repo,
-        remote,
-        prune=prune,
-        prune_tags=prune_tags,
-        tags=tags,
-        append_fetch_head=True,
-        write_fetch_head=write_fetch_head_enabled,
-        **_force_kwargs(force),
-    )
 
 
 def _run_many(repo, remotes, args) -> int:
@@ -325,7 +327,12 @@ def run_fetch(argv: Sequence[str]) -> int:
     if args.refmap is not None and not args.refspecs:
         raise RuntimeError("--refmap option is only meaningful with command-line refspec(s)")
 
-    with _atomic_scope(repo, args.atomic):
+    remote_scope = (
+        nullcontext()
+        if is_direct_fetch_url(remote)
+        else negotiation_remote(remote)
+    )
+    with remote_scope, _atomic_scope(repo, args.atomic):
         if is_direct_fetch_url(remote):
             if args.prune is True or args.prune_tags is True:
                 raise RuntimeError("pruning a direct URL fetch is not supported without a named remote")
