@@ -45,6 +45,11 @@ def _write_configured_fetch_head(repo, remote: str, result: dict) -> None:
     )
 
 
+def _force_kwargs(force: bool) -> dict:
+    """Preserve older fetch monkeypatch/caller seams when force is inactive."""
+    return {"force": True} if force else {}
+
+
 def _fetch_named(
     repo,
     remote: str,
@@ -63,10 +68,10 @@ def _fetch_named(
         result = fetch_configured(
             repo,
             remote,
-            force=force,
             prune=prune,
             prune_tags=prune_tags,
             tags=tags,
+            **_force_kwargs(force),
         )
         if write_fetch_head_enabled:
             _write_configured_fetch_head(repo, remote, result)
@@ -74,12 +79,12 @@ def _fetch_named(
     return fetch_porcelain(
         repo,
         remote,
-        force=force,
         prune=prune,
         prune_tags=prune_tags,
         tags=tags,
         append_fetch_head=True,
         write_fetch_head=write_fetch_head_enabled,
+        **_force_kwargs(force),
     )
 
 
@@ -268,18 +273,18 @@ def run_fetch(argv: Sequence[str]) -> int:
                 refspecs=args.refspecs or None,
                 refmap=args.refmap,
                 tags=args.tags,
-                force=args.force,
                 append_fetch_head=args.append,
                 write_fetch_head=args.write_fetch_head,
+                **_force_kwargs(args.force),
             )
         elif not args.refspecs and not args.append:
             result = fetch_configured(
                 repo,
                 remote,
-                force=args.force,
                 prune=args.prune,
                 prune_tags=args.prune_tags,
                 tags=args.tags,
+                **_force_kwargs(args.force),
             )
             if args.write_fetch_head:
                 _write_configured_fetch_head(repo, remote, result)
@@ -287,7 +292,6 @@ def run_fetch(argv: Sequence[str]) -> int:
             result = fetch_porcelain(
                 repo,
                 remote,
-                force=args.force,
                 prune=args.prune,
                 prune_tags=args.prune_tags,
                 tags=args.tags,
@@ -295,6 +299,7 @@ def run_fetch(argv: Sequence[str]) -> int:
                 refmap=args.refmap,
                 append_fetch_head=args.append,
                 write_fetch_head=args.write_fetch_head,
+                **_force_kwargs(args.force),
             )
 
     suffix = f"; pruned {len(result['pruned'])} refs" if result["pruned"] else ""
