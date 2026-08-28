@@ -1,20 +1,24 @@
-"""Tag-preserving native importer for the modern configured fetch path.
+"""Native importers for the modern fetch path.
 
 The historical :class:`pygit.remote.NativeImporter` predates pygit's full
-``TagObject`` support and peels native tag objects to their target SHA.  That
-was sufficient when fetch treated tags as aliases, but it loses annotation
-metadata and makes the fetch side asymmetric with Phase174's tag-aware native
-exporter.
+``TagObject`` support and peels native tag objects to their target SHA. That was
+sufficient when fetch treated tags as aliases, but it loses annotation metadata
+and makes the fetch side asymmetric with Phase174's tag-aware native exporter.
 
 Phase183 keeps the legacy importer behavior untouched for compatibility and
-uses this narrow subclass only in the modern configured fetch path.
+uses ``TagPreservingNativeImporter`` in the modern configured fetch path.
+Phase204 adds ``StableShallowNativeImporter`` for genuinely truncated native
+commit graphs: imported commits preserve their original SHA-1 parent identities
+inside the local content-addressed commit payload, so an omitted parent can be
+resolved later without rewriting the child SHA-256 object.
 """
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import List, Tuple
 
-from .objects import Identity, TagObject
+from .foreign_commits import update_foreign_commit_map
+from .objects import CommitObject, Identity, TagObject
 from .remote import NativeImporter, NativeObject
 
 
@@ -68,3 +72,47 @@ class TagPreservingNativeImporter(NativeImporter):
             raise ValueError("Remote tag object has no tag name")
 
         return target_oid, target_type, tag_name, tagger, message
+
+
+class StableShallowNativeImporter(TagPreservingNativeImporter):
+    """Import a native graph even when shallow commit parents are absent.
+
+    Trees remain ordinary SHA-256 pygit trees. Commits record the complete
+    native parent list in ``parent-sha1`` headers and expose only parents whose
+    native objects are already known locally. ObjectStore re-resolves those
+    edges from the persistent foreign-commit map on every read, so deepening a
+    repository reconnects history without changing any existing child object id.
+    """
+
+    def _dependencies(self, obj: NativeObject) -> List[str]:
+        if obj.type_name != "commit":
+            return super()._dependencies(obj)
+        tree, parents, _, _, _ = self._parse_commit(obj.data)
+        available_parents = [
+            oid for oid in parents if oid in self.objects or oid in self.converted
+        ]
+        return [tree, *available_parents]
+
+    def _convert_one(self, obj: NativeObject) -> str:
+        if obj.type_name != "commit":
+            return super()._convert_one(obj)
+
+        tree, native_parents, author, committer, message = self._parse_commit(obj.data)
+        resolved_parents = [
+            self.converted[oid] for oid in native_parents if oid in self.converted
+        ]
+        local_sha = self.store.write(
+            CommitObject(
+                tree=self.converted[tree],
+                parents=resolved_parents,
+                native_parents=native_parents,
+                author=author,
+                committer=committer,
+                message=message,
+            )
+        )
+        update_foreign_commit_map(
+            self.store.root.parent,
+            {obj.oid: local_sha},
+        )
+        return local_sha
