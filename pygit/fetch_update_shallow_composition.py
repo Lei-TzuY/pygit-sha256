@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from . import fetch_server_option_config
 from .fetch_shallow_selectors import run_fetch as _run_shallow_fetch
 from .fetch_update_shallow import _extract_update_shallow, run_fetch as _run_fetch
 
@@ -31,10 +32,17 @@ _SHALLOW_MUTATION_OPTIONS = (
 
 
 def _has_explicit_shallow_mutation(argv: Sequence[str]) -> bool:
-    """Return whether the option side explicitly requests a shallow mutation."""
-    option_side = list(argv)
-    if "--" in option_side:
-        option_side = option_side[: option_side.index("--")]
+    """Return whether the option side explicitly requests a shallow mutation.
+
+    Server-option values are removed first because a perfectly valid payload such
+    as ``-o --deepen=2`` belongs to the server and must never be reinterpreted as
+    a client-side shallow option. The standard ``--`` terminator remains owned by
+    the established extractors.
+    """
+    args, _server_options = (
+        fetch_server_option_config.fetch_frontend._extract_server_options(list(argv))
+    )
+    option_side = args[: args.index("--")] if "--" in args else args
     return any(
         arg == option or arg.startswith(option + "=")
         for arg in option_side
