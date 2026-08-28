@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from typing import Sequence
 
-from .fetch_cli import run_fetch as _run_fetch
+from .fetch_cli import _default_fetch_remote, run_fetch as _run_fetch
 from .fetch_dry_run import dry_run_repository
 from .fetch_negotiation import (
     has_configured_negotiation_includes,
@@ -188,7 +188,7 @@ def _run_negotiate_only(
     positionals = _fetch_positionals(forwarded)
     if len(positionals) > 1:
         raise RuntimeError("--negotiate-only does not accept fetch refspecs")
-    source = positionals[0] if positionals else "origin"
+    source = positionals[0] if positionals else _default_fetch_remote(repo)
     for sha in negotiate_only(
         repo,
         source=source,
