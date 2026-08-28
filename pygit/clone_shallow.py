@@ -9,12 +9,14 @@ The stable shallow importer stores original native commit parent identities, so
 those omitted parents can be fetched later without rewriting already-visible
 local SHA-256 commit ids. Phase206 adds conservative tag auto-follow: only tags
 whose peeled target is already present in the shallow graph are materialized.
+Phase209 lets the same ordered protocol-v2 server options flow through discovery,
+the initial shallow fetch, and any annotated-tag follow-up request.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 from .fetch_importer import StableShallowNativeImporter
 from .fetch_shallow import _apply_shallow_response
@@ -160,6 +162,7 @@ def clone_shallow_repository(
     depth: int,
     branch_name: Optional[str],
     single_branch: bool,
+    server_options: Sequence[str] = (),
 ) -> Repository:
     """Create a repository from a genuinely truncated protocol-v2 pack."""
     if depth <= 0:
@@ -176,7 +179,7 @@ def clone_shallow_repository(
     repo = Repository.init(str(destination))
     repo.add_remote("origin", url)
 
-    client = SmartHttpV2FetchClient(url)
+    client = SmartHttpV2FetchClient(url, server_options=server_options)
     advertisement = client.discover_refs()
     if advertisement is None:
         raise RuntimeError("shallow clone requires protocol version 2")
