@@ -1,9 +1,9 @@
-"""Fetch wrapper adding dry-run, upstream, refetch, and negotiation policy."""
+"""Fetch wrapper adding dry-run, upstream, refetch, negotiation and v2 policy."""
 
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import Sequence
+from typing import Optional, Sequence
 
 from .fetch_cli import _default_fetch_remote, run_fetch as _run_fetch
 from .fetch_dry_run import dry_run_repository
@@ -18,6 +18,7 @@ from .fetch_protocol_v2 import (
     protocol_v2_transport,
 )
 from .fetch_refetch import refetch_transport
+from .fetch_shallow import shallow_fetch_transport
 from .fetch_upstream import set_fetch_upstream
 from .tracking import find_repo
 
@@ -71,6 +72,79 @@ def _strip_option(argv: Sequence[str], option: str) -> list[str]:
 
 def _strip_set_upstream(argv: Sequence[str]) -> list[str]:
     return _strip_option(argv, "--set-upstream")
+
+
+def _positive_depth(option: str, value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{option} requires a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{option} requires a positive integer")
+    return parsed
+
+
+def _extract_shallow_options(
+    argv: Sequence[str],
+) -> tuple[list[str], Optional[int], Optional[int], bool]:
+    """Strip Phase202 shallow controls before the established fetch parser."""
+    forwarded: list[str] = []
+    depth: Optional[int] = None
+    deepen: Optional[int] = None
+    unshallow = False
+    args = list(argv)
+    options = True
+    i = 0
+
+    while i < len(args):
+        arg = args[i]
+        if options and arg == "--":
+            options = False
+            forwarded.append(arg)
+            i += 1
+            continue
+
+        if options and arg in {"--depth", "--deepen"}:
+            if i + 1 >= len(args) or args[i + 1] == "--":
+                raise ValueError(f"{arg} requires a positive integer")
+            value = _positive_depth(arg, args[i + 1])
+            if arg == "--depth":
+                if depth is not None:
+                    raise ValueError("--depth may be specified only once")
+                depth = value
+            else:
+                if deepen is not None:
+                    raise ValueError("--deepen may be specified only once")
+                deepen = value
+            i += 2
+            continue
+
+        if options and arg.startswith("--depth="):
+            if depth is not None:
+                raise ValueError("--depth may be specified only once")
+            depth = _positive_depth("--depth", arg.split("=", 1)[1])
+            i += 1
+            continue
+        if options and arg.startswith("--deepen="):
+            if deepen is not None:
+                raise ValueError("--deepen may be specified only once")
+            deepen = _positive_depth("--deepen", arg.split("=", 1)[1])
+            i += 1
+            continue
+        if options and arg == "--unshallow":
+            if unshallow:
+                raise ValueError("--unshallow may be specified only once")
+            unshallow = True
+            i += 1
+            continue
+
+        forwarded.append(arg)
+        i += 1
+
+    selected = int(depth is not None) + int(deepen is not None) + int(unshallow)
+    if selected > 1:
+        raise RuntimeError("--depth, --deepen, and --unshallow are mutually exclusive")
+    return forwarded, depth, deepen, unshallow
 
 
 def _extract_negotiation_options(
@@ -156,6 +230,15 @@ def _fetch_positionals(argv: Sequence[str]) -> list[str]:
     return result
 
 
+def _with_default_remote(argv: Sequence[str], remote: str) -> list[str]:
+    forwarded = list(argv)
+    if "--" in forwarded:
+        forwarded.insert(forwarded.index("--"), remote)
+    else:
+        forwarded.append(remote)
+    return forwarded
+
+
 def _apply_set_upstream(argv: Sequence[str]) -> None:
     positionals = _fetch_positionals(argv)
     if not positionals:
@@ -212,9 +295,13 @@ def run_fetch(argv: Sequence[str]) -> int:
     if wants_negotiate_only:
         forwarded = _strip_option(forwarded, "--negotiate-only")
 
+    forwarded, depth, deepen, unshallow = _extract_shallow_options(forwarded)
+    wants_shallow = depth is not None or deepen is not None or unshallow
     forwarded, restrict, include = _extract_negotiation_options(forwarded)
 
     if wants_negotiate_only:
+        if wants_shallow:
+            raise RuntimeError("--negotiate-only cannot be combined with shallow controls")
         if wants_refetch:
             raise RuntimeError("--negotiate-only cannot be combined with --refetch")
         if wants_upstream:
@@ -227,6 +314,40 @@ def run_fetch(argv: Sequence[str]) -> int:
         return _run_negotiate_only(forwarded, restrict, include)
 
     repo_for_protocol = _optional_repo_for_config()
+
+    shallow_scope = nullcontext()
+    if wants_shallow:
+        if wants_refetch:
+            raise RuntimeError("shallow fetch controls cannot be combined with --refetch")
+        if restrict or include:
+            raise RuntimeError(
+                "shallow fetch controls cannot be combined with negotiation restrictions/includes"
+            )
+        for incompatible in ("--all", "--multiple", "--prefetch"):
+            if _option_requested(forwarded, incompatible):
+                raise RuntimeError(
+                    f"shallow fetch controls cannot be combined with {incompatible}"
+                )
+
+        repo_for_protocol = find_repo()
+        if not protocol_v2_requested(repo_for_protocol):
+            raise RuntimeError(
+                "shallow fetch controls currently require protocol.version=2"
+            )
+        positionals = _fetch_positionals(forwarded)
+        remote = positionals[0] if positionals else _default_fetch_remote(repo_for_protocol)
+        if remote not in repo_for_protocol.list_remotes():
+            raise RuntimeError("shallow fetch controls currently require one named remote")
+        if not positionals:
+            forwarded = _with_default_remote(forwarded, remote)
+        shallow_scope = shallow_fetch_transport(
+            repo_for_protocol,
+            remote,
+            depth=depth,
+            deepen=deepen,
+            unshallow=unshallow,
+        )
+
     if restrict or include:
         repo_for_negotiation = find_repo()
     elif wants_refetch:
@@ -237,6 +358,7 @@ def run_fetch(argv: Sequence[str]) -> int:
     configured_include = (
         repo_for_negotiation is not None
         and not wants_refetch
+        and not wants_shallow
         and not include
         and has_configured_negotiation_includes(repo_for_negotiation)
     )
@@ -276,20 +398,22 @@ def run_fetch(argv: Sequence[str]) -> int:
         else nullcontext()
     )
 
-    # Enter the protocol layer first. Phase196-198 wrappers then capture the
-    # v2-aware fetch method as their underlying transport, so refetch and have
-    # planning compose without duplicating their logic.
+    # Enter protocol first so the established policy wrappers capture the
+    # v2-aware fetch method. The shallow importer scope is innermost because it
+    # mutates repository state during the fetch and must remain inside dry-run's
+    # .pygit snapshot/restore transaction.
     with protocol_scope:
         with transport_scope:
-            if _dry_run_requested(forwarded):
-                repo = find_repo()
-                with dry_run_repository(repo):
-                    code = _run_fetch(_without_fetch_head_writes(forwarded))
-                    if code == 0 and wants_upstream:
-                        _apply_set_upstream(forwarded)
-                    return code
+            with shallow_scope:
+                if _dry_run_requested(forwarded):
+                    repo = find_repo()
+                    with dry_run_repository(repo):
+                        code = _run_fetch(_without_fetch_head_writes(forwarded))
+                        if code == 0 and wants_upstream:
+                            _apply_set_upstream(forwarded)
+                        return code
 
-            code = _run_fetch(forwarded)
-            if code == 0 and wants_upstream:
-                _apply_set_upstream(forwarded)
-            return code
+                code = _run_fetch(forwarded)
+                if code == 0 and wants_upstream:
+                    _apply_set_upstream(forwarded)
+                return code
