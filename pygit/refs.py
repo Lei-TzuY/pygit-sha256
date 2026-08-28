@@ -1,12 +1,14 @@
 """
 pygit/refs.py
 =============
-Reference storage for loose, symbolic, and packed refs.
+Reference storage for loose, symbolic, packed, and selected pseudo refs.
 
 Loose refs live below ``.pygit/refs`` and shadow entries from
 ``.pygit/packed-refs``. ``HEAD`` and remote default-branch refs may be
-symbolic. The public API keeps the original branch/tag/remote helpers while
-making packed storage transparent to callers.
+symbolic. ``FETCH_HEAD`` is repository metadata rather than a normal ref, but
+Git revision syntax exposes its first recorded object as a pseudo-ref. The
+public API keeps the original branch/tag/remote helpers while making packed
+storage transparent to callers.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Set
 
+from .fetch_head import read_fetch_head_oid
 from .packed_refs import (
     PackedRef,
     list_packed_refnames,
@@ -241,7 +244,6 @@ class RefStore:
         """Point a remote's symbolic ``HEAD`` at one tracking branch."""
         if not branch:
             raise ValueError("Remote HEAD branch must be non-empty")
-        # Validate both components through the same traversal guard used for refs.
         self._path_under(self._remotes, f"{remote}/{branch}")
         path = self._path_under(self._remotes, f"{remote}/HEAD")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,9 +329,6 @@ class RefStore:
 
         root = self._path_under(self._remotes, remote)
         loose = set(self._list_under(root)) if root.exists() else set()
-        # ``HEAD`` is a symbolic alias, not a remote branch. Excluding it from
-        # the branch-only view also prevents prune logic from treating it as a
-        # stale advertised head.
         loose.discard("HEAD")
         prefix = f"refs/remotes/{remote}/"
         packed = {
@@ -384,6 +383,8 @@ class RefStore:
     def resolve(self, name: str) -> Optional[str]:
         if name == "HEAD":
             return self.resolve_head()
+        if name == "FETCH_HEAD":
+            return read_fetch_head_oid(self._root)
         if self._is_oid(name):
             return name.lower()
         if name.startswith("refs/"):
@@ -399,8 +400,6 @@ class RefStore:
             remote_sha = self.get_remote(remote, branch_name)
             if remote_sha:
                 return remote_sha
-        # Git's revision rules allow a remote name to stand for its symbolic
-        # refs/remotes/<remote>/HEAD target.
         if self.get_remote_head(name) is not None:
             return self.get_remote(name, "HEAD")
         return None
