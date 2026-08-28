@@ -1,11 +1,11 @@
-"""Promisor-aware hard-reset batching.
+"""Promisor-aware reset batching.
 
-A partial clone may keep target-tree blobs promised until they are needed.  A
-hard reset restores the complete target worktree, so resolving each missing
-``TreeEntry.sha`` independently would degrade into one fetch per file.  This
-module mirrors the checkout batching path: collect all unresolved promised
-blobs before the reset mutates HEAD/index/worktree and materialize them in one
-request.
+A partial clone may keep target-tree blobs promised until they are needed.
+Hard reset restores the target worktree, and mixed reset rebuilds pygit's index.
+Both operations therefore need local SHA-256 blob identities for target entries.
+Resolving each missing ``TreeEntry.sha`` independently would degrade into one
+fetch per file, so this wrapper collects all unresolved promised blobs first and
+materializes them in one request before reset mutates repository state.
 """
 
 from __future__ import annotations
@@ -31,9 +31,10 @@ def install_promisor_reset_support(repository_cls: Type) -> None:
 
     @wraps(original_reset)
     def reset(self, target: str = "HEAD", mode: str = "mixed"):
-        # Soft and mixed reset never restore blob contents to the worktree.
-        # Preserve their exact historical behavior and avoid network I/O.
-        if mode == "hard":
+        # Soft reset moves only refs, so it never needs promised blob contents.
+        # Mixed reset rebuilds pygit's SHA-256 index; unlike native Git, pygit
+        # cannot store the foreign SHA-1 tree-entry identity directly there.
+        if mode in {"mixed", "hard"}:
             state = read_promisor_state(self.pygit_dir)
             if state.get("promised"):
                 # Resolve and materialize before the original reset moves HEAD.
