@@ -1,4 +1,4 @@
-"""Phase192 wrapper adding Git-style ``fetch --dry-run`` semantics."""
+"""Phase192/193 wrapper adding fetch dry-run and upstream semantics."""
 
 from __future__ import annotations
 
@@ -6,17 +6,22 @@ from typing import Sequence
 
 from .fetch_cli import run_fetch as _run_fetch
 from .fetch_dry_run import dry_run_repository
+from .fetch_upstream import set_fetch_upstream
 from .tracking import find_repo
 
 
-def _dry_run_requested(argv: Sequence[str]) -> bool:
-    """Recognize the option only before ``--``; later tokens are refspecs."""
+def _option_requested(argv: Sequence[str], option: str) -> bool:
+    """Recognize an option only before ``--``; later tokens are refspecs."""
     for arg in argv:
         if arg == "--":
             return False
-        if arg == "--dry-run":
+        if arg == option:
             return True
     return False
+
+
+def _dry_run_requested(argv: Sequence[str]) -> bool:
+    return _option_requested(argv, "--dry-run")
 
 
 def _without_fetch_head_writes(argv: Sequence[str]) -> list[str]:
@@ -31,8 +36,6 @@ def _without_fetch_head_writes(argv: Sequence[str]) -> list[str]:
             continue
         forwarded.append(arg)
 
-    # Keep the forced metadata suppression on the option side of the standard
-    # ``--`` terminator; tokens after it are refspecs and must remain literal.
     if "--" in forwarded:
         forwarded.insert(forwarded.index("--"), "--no-write-fetch-head")
     else:
@@ -40,12 +43,71 @@ def _without_fetch_head_writes(argv: Sequence[str]) -> list[str]:
     return forwarded
 
 
-def run_fetch(argv: Sequence[str]) -> int:
-    """Run fetch, sandboxing repository mutations under ``--dry-run``."""
-    args = list(argv)
-    if not _dry_run_requested(args):
-        return _run_fetch(args)
+def _strip_set_upstream(argv: Sequence[str]) -> list[str]:
+    forwarded: list[str] = []
+    options = True
+    for arg in argv:
+        if options and arg == "--":
+            options = False
+            forwarded.append(arg)
+            continue
+        if options and arg == "--set-upstream":
+            continue
+        forwarded.append(arg)
+    return forwarded
 
-    repo = find_repo()
-    with dry_run_repository(repo):
-        return _run_fetch(_without_fetch_head_writes(args))
+
+def _fetch_positionals(argv: Sequence[str]) -> list[str]:
+    """Return repository/refspec positionals for the current fetch grammar."""
+    result: list[str] = []
+    args = list(argv)
+    i = 0
+    options = True
+    while i < len(args):
+        arg = args[i]
+        if options and arg == "--":
+            options = False
+            i += 1
+            continue
+        if options and arg == "--refmap":
+            i += 2
+            continue
+        if options and arg.startswith("--refmap="):
+            i += 1
+            continue
+        if options and arg.startswith("-"):
+            i += 1
+            continue
+        result.append(arg)
+        i += 1
+    return result
+
+
+def _apply_set_upstream(argv: Sequence[str]) -> None:
+    positionals = _fetch_positionals(argv)
+    if not positionals:
+        set_fetch_upstream(find_repo(), "origin", [])
+        return
+    remote = positionals[0]
+    refspecs = positionals[1:]
+    set_fetch_upstream(find_repo(), remote, refspecs)
+
+
+def run_fetch(argv: Sequence[str]) -> int:
+    """Run fetch with Phase192 dry-run and Phase193 upstream tracking."""
+    args = list(argv)
+    wants_upstream = _option_requested(args, "--set-upstream")
+    forwarded = _strip_set_upstream(args) if wants_upstream else args
+
+    if _dry_run_requested(forwarded):
+        repo = find_repo()
+        with dry_run_repository(repo):
+            code = _run_fetch(_without_fetch_head_writes(forwarded))
+            if code == 0 and wants_upstream:
+                _apply_set_upstream(forwarded)
+            return code
+
+    code = _run_fetch(forwarded)
+    if code == 0 and wants_upstream:
+        _apply_set_upstream(forwarded)
+    return code
