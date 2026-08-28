@@ -1,8 +1,8 @@
 """Git protocol-v2 smart HTTP fetch request/response transport primitives.
 
-Phase 200 introduced the isolated v2 fetch transport. Phase 201 extends that
-foundation with ``wait-for-done`` ACK-only negotiation so porcelain can use the
-same tested framing for both object transfer and ``fetch --negotiate-only``.
+Phase 200 introduced the isolated v2 fetch transport. Phase 201 added
+``wait-for-done`` ACK-only negotiation. Phase 202 adds the protocol-v2 shallow
+request grammar while preserving shallow-info on the returned fetch result.
 """
 
 from __future__ import annotations
@@ -42,15 +42,16 @@ def build_fetch_request(
     ofs_delta: bool = True,
     include_tag: bool = False,
     wait_for_done: bool = False,
+    shallow: Iterable[str] = (),
+    deepen: Optional[int] = None,
+    deepen_relative: bool = False,
 ) -> bytes:
     """Build one protocol-v2 ``fetch`` command request.
 
-    pygit's current pack parser can consume OFS_DELTA, so ``ofs-delta`` is sent
-    by default. Thin packs are deliberately not requested because pygit does
-    not yet thicken a pack against objects outside the received stream.
-
-    ``wait-for-done`` is used by negotiate-only. The protocol requires the
-    server to advertise that fetch feature before a client may request it.
+    ``deepen`` is absolute by default. ``deepen_relative`` changes it to be
+    relative to the client's current shallow boundary, matching Git's
+    ``--deepen`` behavior. Any shallow-related argument requires the remote's
+    advertised ``fetch=shallow`` feature.
     """
 
     if not capabilities.supports("fetch"):
@@ -60,6 +61,17 @@ def build_fetch_request(
     if not wanted:
         raise ValueError("protocol-v2 fetch requires at least one want")
     have_oids = sorted({_validate_sha1_oid(oid, field="have") for oid in haves})
+    shallow_oids = sorted(
+        {_validate_sha1_oid(oid, field="shallow") for oid in shallow}
+    )
+
+    if deepen is not None and deepen <= 0:
+        raise ValueError("protocol-v2 deepen must be a positive integer")
+    if deepen_relative and deepen is None:
+        raise ValueError("deepen-relative requires deepen")
+    shallow_requested = bool(shallow_oids) or deepen is not None or deepen_relative
+    if shallow_requested and not capabilities.feature("fetch", "shallow"):
+        raise RuntimeError("Remote protocol-v2 fetch does not advertise shallow")
 
     body = pkt_line(b"command=fetch\n")
     if capabilities.supports("agent"):
@@ -78,6 +90,12 @@ def build_fetch_request(
                 "Remote protocol-v2 fetch does not advertise wait-for-done"
             )
         body += pkt_line(b"wait-for-done\n")
+    for oid in shallow_oids:
+        body += pkt_line(f"shallow {oid}\n".encode())
+    if deepen is not None:
+        body += pkt_line(f"deepen {deepen}\n".encode())
+    if deepen_relative:
+        body += pkt_line(b"deepen-relative\n")
     for oid in wanted:
         body += pkt_line(f"want {oid}\n".encode())
     for oid in have_oids:
@@ -98,6 +116,14 @@ class ProtocolV2FetchResponse:
     unshallow: Tuple[str, ...]
     wanted_refs: Dict[str, str]
     pack: Optional[bytes]
+
+
+@dataclass
+class V2FetchResult(FetchResult):
+    """FetchResult carrying native shallow-info for the importer boundary."""
+
+    shallow: Tuple[str, ...] = ()
+    unshallow: Tuple[str, ...] = ()
 
 
 def _parse_ack_line(
@@ -268,6 +294,10 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
         self,
         haves: Optional[Iterable[str]] = None,
         advertisement: Optional[Advertisement] = None,
+        *,
+        shallow: Iterable[str] = (),
+        deepen: Optional[int] = None,
+        deepen_relative: bool = False,
     ) -> Optional[FetchResult]:
         """Fetch a v2 pack, returning ``None`` when the server answered as v0."""
 
@@ -282,12 +312,25 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
         if not wants:
             raise RuntimeError("Remote repository does not advertise any refs.")
 
-        body = build_fetch_request(capabilities, wants, haves=haves or (), done=True)
+        body = build_fetch_request(
+            capabilities,
+            wants,
+            haves=haves or (),
+            done=True,
+            shallow=shallow,
+            deepen=deepen,
+            deepen_relative=deepen_relative,
+        )
         parsed = self._post_fetch(body)
 
         if parsed.pack is None:
             raise ValueError("protocol-v2 fetch response did not contain a packfile")
-        return FetchResult(advertisement, PackParser(parsed.pack).parse())
+        return V2FetchResult(
+            advertisement,
+            PackParser(parsed.pack).parse(),
+            parsed.shallow,
+            parsed.unshallow,
+        )
 
     def negotiate(
         self,
