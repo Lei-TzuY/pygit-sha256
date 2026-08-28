@@ -7,16 +7,16 @@ Ordinary pygit trees store local SHA-256 child object ids.  Phase212 adds a
 second canonical representation for filtered foreign trees: entries retain the
 original native Git SHA-1 identities so a tree can be content-addressed even
 when a blob was deliberately omitted by a promisor remote.  Runtime reads fill
-resolved local SHA-256 ids from persistent promisor metadata; accessing an
-unresolved entry raises ``PromisorMissingError`` rather than pretending a fake
-SHA-256 object exists.
+resolved local SHA-256 ids from persistent promisor metadata; Phase213 may also
+attach a lazy resolver so accessing an unresolved entry materializes the
+promised object on demand without rewriting the parent tree.
 """
 
 from __future__ import annotations
 
 import binascii
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from .base import GitObject
 
@@ -32,6 +32,7 @@ class TreeEntry:
     name: str
     _sha: str
     native_oid: Optional[str]
+    _resolver: Optional[Callable[[str], Optional[str]]]
 
     def __init__(
         self,
@@ -44,11 +45,17 @@ class TreeEntry:
         self.name = name
         self._sha = sha
         self.native_oid = native_oid
+        self._resolver = None
 
     @property
     def sha(self) -> str:
         if self._sha:
             return self._sha
+        if self.native_oid and self._resolver is not None:
+            resolved = self._resolver(self.native_oid)
+            if resolved:
+                self._sha = resolved
+                return resolved
         if self.native_oid:
             from ..promisor import PromisorMissingError
 
@@ -59,6 +66,14 @@ class TreeEntry:
     @sha.setter
     def sha(self, value: str) -> None:
         self._sha = value
+
+    def set_resolver(self, resolver: Optional[Callable[[str], Optional[str]]]) -> None:
+        """Attach an ephemeral native->local resolver.
+
+        The resolver is runtime-only and is deliberately excluded from the
+        canonical tree serialization, preserving the tree's SHA-256 identity.
+        """
+        self._resolver = resolver
 
     @property
     def is_resolved(self) -> bool:
