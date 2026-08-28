@@ -1,4 +1,4 @@
-"""Fetch wrapper adding dry-run, upstream, refetch, and negotiation policy."""
+"""Fetch wrapper adding dry-run, upstream, refetch, negotiation and v2 policy."""
 
 from __future__ import annotations
 
@@ -73,15 +73,45 @@ def _strip_set_upstream(argv: Sequence[str]) -> list[str]:
     return _strip_option(argv, "--set-upstream")
 
 
+def _extract_server_options(argv: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Strip ordered ``-o/--server-option`` values before legacy parsing."""
+    forwarded: list[str] = []
+    server_options: list[str] = []
+    args = list(argv)
+    options = True
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if options and arg == "--":
+            options = False
+            forwarded.append(arg)
+            i += 1
+            continue
+        if options and arg in {"-o", "--server-option"}:
+            if i + 1 >= len(args) or args[i + 1] == "--":
+                raise ValueError(f"{arg} requires an option value")
+            value = args[i + 1]
+            if "\n" in value or "\x00" in value:
+                raise ValueError("server option contains an invalid NUL or LF character")
+            server_options.append(value)
+            i += 2
+            continue
+        if options and arg.startswith("--server-option="):
+            value = arg.split("=", 1)[1]
+            if "\n" in value or "\x00" in value:
+                raise ValueError("server option contains an invalid NUL or LF character")
+            server_options.append(value)
+            i += 1
+            continue
+        forwarded.append(arg)
+        i += 1
+    return forwarded, server_options
+
+
 def _extract_negotiation_options(
     argv: Sequence[str],
 ) -> tuple[list[str], list[str], list[str]]:
-    """Strip negotiation-only CLI controls before the established parser.
-
-    Returns ``(forwarded, restrict, include)``. ``--negotiation-tip`` remains
-    accepted as the historical spelling of current Git's preferred
-    ``--negotiation-restrict`` name.
-    """
+    """Strip negotiation-only CLI controls before the established parser."""
     forwarded: list[str] = []
     restrict: list[str] = []
     include: list[str] = []
@@ -167,12 +197,6 @@ def _apply_set_upstream(argv: Sequence[str]) -> None:
 
 
 def _optional_repo_for_config():
-    """Find the current repository without making the wrapper non-transparent.
-
-    Optional negotiation/protocol configuration needs an early repository, but
-    established wrapper-only tests and direct error paths may deliberately
-    defer repository discovery to the inner fetch implementation.
-    """
     try:
         return find_repo()
     except RuntimeError:
@@ -183,6 +207,7 @@ def _run_negotiate_only(
     forwarded: Sequence[str],
     restrict: Sequence[str],
     include: Sequence[str],
+    server_options: Sequence[str],
 ) -> int:
     repo = find_repo()
     positionals = _fetch_positionals(forwarded)
@@ -194,6 +219,7 @@ def _run_negotiate_only(
         source=source,
         restrict=restrict,
         include=include,
+        server_options=server_options,
     ):
         print(sha)
     return 0
@@ -212,6 +238,7 @@ def run_fetch(argv: Sequence[str]) -> int:
     if wants_negotiate_only:
         forwarded = _strip_option(forwarded, "--negotiate-only")
 
+    forwarded, server_options = _extract_server_options(forwarded)
     forwarded, restrict, include = _extract_negotiation_options(forwarded)
 
     if wants_negotiate_only:
@@ -224,7 +251,7 @@ def run_fetch(argv: Sequence[str]) -> int:
                 raise RuntimeError(
                     f"--negotiate-only cannot be combined with {incompatible}"
                 )
-        return _run_negotiate_only(forwarded, restrict, include)
+        return _run_negotiate_only(forwarded, restrict, include, server_options)
 
     repo_for_protocol = _optional_repo_for_config()
     if restrict or include:
@@ -241,11 +268,6 @@ def run_fetch(argv: Sequence[str]) -> int:
         and has_configured_negotiation_includes(repo_for_negotiation)
     )
 
-    # Git accepts negotiation controls alongside --refetch, but refetch's core
-    # promise is a fresh transfer without local have negotiation. Validate
-    # explicit CLI tips while preserving that empty-have behavior. Per-remote
-    # negotiationInclude config is therefore intentionally inactive under
-    # refetch as well.
     if wants_refetch:
         if repo_for_negotiation is not None:
             if restrict:
@@ -271,14 +293,11 @@ def run_fetch(argv: Sequence[str]) -> int:
         transport_scope = nullcontext()
 
     protocol_scope = (
-        protocol_v2_transport()
-        if protocol_v2_requested(repo_for_protocol)
+        protocol_v2_transport(server_options=server_options)
+        if server_options or protocol_v2_requested(repo_for_protocol)
         else nullcontext()
     )
 
-    # Enter the protocol layer first. Phase196-198 wrappers then capture the
-    # v2-aware fetch method as their underlying transport, so refetch and have
-    # planning compose without duplicating their logic.
     with protocol_scope:
         with transport_scope:
             if _dry_run_requested(forwarded):
