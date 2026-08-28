@@ -137,7 +137,12 @@ def test_fetch_native_object_requests_exact_promised_oid(monkeypatch):
     native = "78" * 20
     seen = {}
     capabilities = ProtocolV2Capabilities(
-        {"ls-refs": "unborn", "fetch": "", "object-format": "sha1"}
+        {
+            "ls-refs": "unborn",
+            "fetch": "",
+            "object-format": "sha1",
+            "server-option": None,
+        }
     )
 
     class FakeClient:
