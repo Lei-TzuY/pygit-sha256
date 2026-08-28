@@ -7,6 +7,7 @@ from typing import Sequence
 
 from .clone_remote import clone_default_branch, configure_clone_remote
 from .clone_shallow import clone_shallow_repository
+from .fetch_protocol_v2 import protocol_v2_transport
 from .repo import Repository
 from .tracking import configure_clone_tracking
 
@@ -22,6 +23,15 @@ def _repository_clone_overridden() -> bool:
     current = Repository.clone
     current_func = getattr(current, "__func__", current)
     return current_func is not _ORIGINAL_REPOSITORY_CLONE_FUNC
+
+
+def _server_option(value: str) -> str:
+    """Validate one Git protocol-v2 clone server option."""
+    if "\n" in value or "\x00" in value:
+        raise argparse.ArgumentTypeError(
+            "server option contains an invalid NUL or LF character"
+        )
+    return value
 
 
 def run_clone(argv: Sequence[str]) -> int:
@@ -57,10 +67,20 @@ def run_clone(argv: Sequence[str]) -> int:
         metavar="DEPTH",
         help="create a bandwidth-saving protocol-v2 shallow clone",
     )
+    parser.add_argument(
+        "--server-option",
+        action="append",
+        default=[],
+        type=_server_option,
+        metavar="OPTION",
+        help="transmit an ordered server-specific option using protocol version 2",
+    )
     args = parser.parse_args(list(argv))
 
     if args.depth is not None and args.depth <= 0:
         parser.error("--depth must be a positive integer")
+
+    server_options = tuple(args.server_option)
 
     # Native Git makes --depth imply --single-branch unless the user explicitly
     # asks for --no-single-branch.
@@ -70,30 +90,49 @@ def run_clone(argv: Sequence[str]) -> int:
         else args.depth is not None
     )
 
-    if args.depth is not None and not _repository_clone_overridden():
+    # A real depth clone always uses the Phase204+ truncated protocol-v2 path.
+    # Preserve the historical Repository.clone override seam only when no new
+    # Phase209 transport metadata is requested.
+    if args.depth is not None and (
+        server_options or not _repository_clone_overridden()
+    ):
+        shallow_kwargs = {
+            "depth": args.depth,
+            "branch_name": args.branch,
+            "single_branch": single_branch,
+        }
+        if server_options:
+            shallow_kwargs["server_options"] = server_options
         repo = clone_shallow_repository(
             args.url,
             args.directory,
-            depth=args.depth,
-            branch_name=args.branch,
-            single_branch=single_branch,
+            **shallow_kwargs,
         )
     else:
         # Preserve the historical Repository.clone call shape whenever a caller
-        # deliberately replaces that classmethod. This is a compatibility seam,
-        # not the production depth path: with the real method installed, all
-        # user-facing depth clones use clone_shallow_repository above.
+        # deliberately replaces that classmethod. With the real method installed,
+        # ordinary server-option clones reuse the mature clone/import pipeline and
+        # change only the command-scoped transport to protocol v2.
         clone_kwargs = {
             "branch_name": args.branch,
             "single_branch": single_branch,
         }
         if args.depth is not None:
             clone_kwargs["depth"] = args.depth
-        repo = Repository.clone(
-            args.url,
-            args.directory,
-            **clone_kwargs,
-        )
+
+        if server_options:
+            with protocol_v2_transport(server_options=server_options):
+                repo = Repository.clone(
+                    args.url,
+                    args.directory,
+                    **clone_kwargs,
+                )
+        else:
+            repo = Repository.clone(
+                args.url,
+                args.directory,
+                **clone_kwargs,
+            )
 
     branch = repo.refs.current_branch()
     if branch:
