@@ -175,11 +175,15 @@ def configured_negotiation_includes(repo: Repository, remote: str) -> List[str]:
 
 
 def has_configured_negotiation_includes(repo: Repository) -> bool:
-    """Return whether any configured named remote has include tips."""
-    return any(
-        configured_negotiation_includes(repo, remote)
-        for remote in repo.list_remotes()
-    )
+    """Return whether config contains an effective negotiationInclude value."""
+    for section, key, value in GitConfig(repo.pygit_dir).list_all():
+        if (
+            section.strip().lower() == "remote"
+            and key.strip().lower().endswith(".negotiationinclude")
+            and value.strip()
+        ):
+            return True
+    return False
 
 
 @contextmanager
