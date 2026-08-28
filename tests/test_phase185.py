@@ -4,6 +4,7 @@ import pytest
 
 from pygit.fetch_cli import run_fetch
 from pygit.fetch_porcelain import fetch_porcelain
+from pygit.objects import CommitObject
 from pygit.remote import Advertisement
 from pygit.repo import Repository
 
@@ -97,7 +98,8 @@ def test_empty_refmap_disables_configured_destination_mapping(tmp_path, monkeypa
 
 def test_explicit_destination_wins_over_refmap(tmp_path, monkeypatch):
     repo = _configured_repo(tmp_path)
-    internal, native = "1" * 64, "2" * 40
+    internal = repo.store.write(CommitObject(message="phase185 explicit destination"))
+    native = "2" * 40
     repo._write_native_map({internal: native}, "origin")
     _known_client(monkeypatch, {"refs/heads/main": native})
 
