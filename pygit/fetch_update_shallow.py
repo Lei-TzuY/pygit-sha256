@@ -1,20 +1,22 @@
 """Git-style ``fetch --update-shallow`` safety and acceptance.
 
-Ordinary protocol-v2 fetches refuse a server-provided ``shallow-info`` update
-unless the user explicitly opts in.  With ``--update-shallow`` active, pygit
-advertises the repository's current shallow boundary, imports a genuinely
-truncated pack with the stable foreign-parent importer, and applies returned
-boundary changes in repository-visible SHA-256 identity.
+Ordinary fetches refuse refs whose protocol-v2 response would redefine the
+local shallow boundary, while keeping the command itself successful. With
+``--update-shallow`` active, pygit advertises the repository's current shallow
+boundary, imports a genuinely truncated pack with the stable foreign-parent
+importer, and applies returned boundary changes in repository-visible SHA-256
+identity.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
+import sys
 from typing import Dict, Iterator, Sequence
 
 from . import fetch_configured, fetch_porcelain
 from .fetch_cli import _default_fetch_remote
-from .fetch_importer import StableShallowNativeImporter
+from .fetch_importer import StableShallowNativeImporter, TagPreservingNativeImporter
 from .fetch_server_option_config import (
     _has_explicit_server_option,
     has_configured_server_options,
@@ -27,7 +29,6 @@ from .fetch_shallow import (
     read_shallow,
 )
 from .fetch_shallow_selectors import run_fetch as _run_fetch
-from .protocol_v2_fetch import SmartHttpV2FetchClient
 from .remote import Advertisement
 from .tracking import find_repo
 
@@ -73,6 +74,69 @@ def _with_default_remote(argv: Sequence[str], remote: str) -> list[str]:
     return forwarded
 
 
+def _selected_advertisement(
+    advertisement: Advertisement,
+    source_oids: Dict[str, str],
+) -> Advertisement:
+    return Advertisement(
+        refs=dict(source_oids),
+        capabilities=set(advertisement.capabilities),
+        symrefs=dict(advertisement.symrefs),
+    )
+
+
+def _fetch_import_sources_refuse_shallow(
+    repo,
+    client,
+    advertisement: Advertisement,
+    source_oids: Dict[str, str],
+    native_map: Dict[str, str],
+    known_by_native: Dict[str, str],
+):
+    """Fetch normally, but refuse selected refs if shallow roots would change.
+
+    Native Git reports this as a warning and exits successfully. Returning an
+    empty imported-ref mapping keeps higher-level destination/FETCH_HEAD logic
+    from accepting the rejected refs while preserving that command status.
+    """
+    if not source_oids:
+        return {}, 0
+    if all(oid in known_by_native for oid in source_oids.values()):
+        return {name: known_by_native[oid] for name, oid in source_oids.items()}, 0
+
+    result = client.fetch(
+        haves=native_map.values(),
+        advertisement=_selected_advertisement(advertisement, source_oids),
+    )
+    shallow = tuple(getattr(result, "shallow", ()) or ())
+    unshallow = tuple(getattr(result, "unshallow", ()) or ())
+    if shallow or unshallow:
+        for source in sorted(source_oids):
+            print(
+                f"warning: rejected {source} because shallow roots are not allowed to be updated",
+                file=sys.stderr,
+            )
+        return {}, 0
+
+    importer = TagPreservingNativeImporter(
+        repo.store,
+        result.objects,
+        known=known_by_native,
+    )
+    imported = {
+        ref_name: importer.import_oid(native_oid)
+        for ref_name, native_oid in source_oids.items()
+    }
+    known_by_native.update(importer.converted)
+    native_map.update(
+        {
+            pygit_sha: native_oid
+            for native_oid, pygit_sha in importer.converted.items()
+        }
+    )
+    return imported, len(result.objects)
+
+
 def _fetch_import_sources_update_shallow(
     repo,
     client,
@@ -87,12 +151,10 @@ def _fetch_import_sources_update_shallow(
     if all(oid in known_by_native for oid in source_oids.values()):
         return {name: known_by_native[oid] for name, oid in source_oids.items()}, 0
 
-    selected = Advertisement(
-        refs=dict(source_oids),
-        capabilities=set(advertisement.capabilities),
-        symrefs=dict(advertisement.symrefs),
+    result = client.fetch(
+        haves=native_map.values(),
+        advertisement=_selected_advertisement(advertisement, source_oids),
     )
-    result = client.fetch(haves=native_map.values(), advertisement=selected)
     if result is None:
         raise RuntimeError("--update-shallow requires protocol version 2")
 
@@ -118,26 +180,20 @@ def _fetch_import_sources_update_shallow(
 
 @contextmanager
 def reject_unrequested_shallow_updates() -> Iterator[None]:
-    """Refuse protocol-v2 shallow boundary changes without explicit opt-in."""
-    original = SmartHttpV2FetchClient.fetch
-
-    def guarded(self, *args, **kwargs):
-        result = original(self, *args, **kwargs)
-        if result is not None and (
-            tuple(getattr(result, "shallow", ()) or ())
-            or tuple(getattr(result, "unshallow", ()) or ())
-        ):
-            raise RuntimeError(
-                "fetch from shallow remote would update .pygit/shallow; "
-                "use --update-shallow to accept it"
-            )
-        return result
-
-    SmartHttpV2FetchClient.fetch = guarded
+    """Install Git-style warning-only refusal for shallow-source ref updates."""
+    originals = [
+        fetch_configured._fetch_import_sources,
+        fetch_porcelain._fetch_import_sources,
+    ]
     try:
+        fetch_configured._fetch_import_sources = _fetch_import_sources_refuse_shallow
+        fetch_porcelain._fetch_import_sources = _fetch_import_sources_refuse_shallow
         yield
     finally:
-        SmartHttpV2FetchClient.fetch = original
+        (
+            fetch_configured._fetch_import_sources,
+            fetch_porcelain._fetch_import_sources,
+        ) = originals
 
 
 @contextmanager
