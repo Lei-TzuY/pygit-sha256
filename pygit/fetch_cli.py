@@ -6,6 +6,7 @@ import argparse
 from typing import Sequence
 
 from .fetch_configured import fetch_configured
+from .fetch_direct import fetch_direct_url, is_direct_fetch_url
 from .fetch_head import write_fetch_head
 from .fetch_porcelain import fetch_porcelain
 from .remote_ops import configured_upstream
@@ -95,10 +96,21 @@ def run_fetch(argv: Sequence[str]) -> int:
     if args.refmap is not None and not args.refspecs:
         raise RuntimeError("--refmap option is only meaningful with command-line refspec(s)")
 
+    if is_direct_fetch_url(remote):
+        if args.prune is True or args.prune_tags is True:
+            raise RuntimeError("pruning a direct URL fetch is not supported without a named remote")
+        result = fetch_direct_url(
+            repo,
+            remote,
+            refspecs=args.refspecs or None,
+            refmap=args.refmap,
+            tags=args.tags,
+            append_fetch_head=args.append,
+        )
     # Keep the established Phase183 `fetch_configured` seam for ordinary
     # configured fetches. Explicit refspecs, --refmap, and --append need the
     # richer Phase184/185 porcelain orchestration.
-    if not args.refspecs and not args.append:
+    elif not args.refspecs and not args.append:
         result = fetch_configured(
             repo,
             remote,
