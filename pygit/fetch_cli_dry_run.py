@@ -194,12 +194,22 @@ def run_fetch(argv: Sequence[str]) -> int:
         or include
         or has_configured_negotiation_includes(repo_for_negotiation)
     ):
-        transport_scope = negotiation_transport(
-            repo_for_negotiation,
-            restrict=restrict,
-            include=include,
-            use_config_include=not bool(include),
-        )
+        if include:
+            # Preserve the Phase197 transport call shape when command-line
+            # include tips are explicit.  The Phase198-only keyword is needed
+            # only when the per-remote configuration fallback is active.
+            transport_scope = negotiation_transport(
+                repo_for_negotiation,
+                restrict=restrict,
+                include=include,
+            )
+        else:
+            transport_scope = negotiation_transport(
+                repo_for_negotiation,
+                restrict=restrict,
+                include=include,
+                use_config_include=True,
+            )
     else:
         transport_scope = nullcontext()
 
