@@ -10,7 +10,12 @@ from __future__ import annotations
 from typing import Optional, Sequence
 
 from .fetch_head import write_fetch_head
-from .fetch_policy import configured_fetch_refspecs, parse_fetch_refspec, source_is_excluded
+from .fetch_policy import (
+    configured_fetch_refspecs,
+    parse_fetch_refspec,
+    resolve_fetch_policy,
+    source_is_excluded,
+)
 from .fetch_porcelain import fetch_porcelain
 from .fetch_prefetch import (
     delete_prefetch_ref,
@@ -106,6 +111,13 @@ def fetch_prefetched(
 
     url = fetch_url(repo, remote)
     advertisement = SmartHttpClient(url).discover()
+    policy = resolve_fetch_policy(
+        repo,
+        remote,
+        prune=prune,
+        prune_tags=prune_tags,
+        tags=tags,
+    )
     command_specs = [parse_fetch_refspec(value) for value in refspecs or []]
 
     if refspecs:
@@ -113,23 +125,22 @@ def fetch_prefetched(
     else:
         transport_refspecs = [_source_only(spec) for spec in configured]
 
-    # Disable the configured destination map inside the existing explicit
-    # fetch path. Explicit command destinations still apply; configured
-    # destinations are materialized below under refs/prefetch/.
+    # Disable ordinary destination pruning inside the established path. The
+    # rewritten prefetch namespace owns the configured prune domain below.
     result = fetch_porcelain(
         repo,
         remote,
         refspecs=transport_refspecs or None,
         refmap=[] if transport_refspecs else None,
         force=force,
-        prune=False if prune is not None else None,
+        prune=False,
         prune_tags=prune_tags,
         tags=tags,
         append_fetch_head=append_fetch_head,
         write_fetch_head=False,
     )
 
-    pruned = _prefetch_prune(repo, advertisement, mappings) if prune is True else []
+    pruned = _prefetch_prune(repo, advertisement, mappings) if policy.prune else []
     _write_prefetch_destinations(
         repo,
         result.get("refs", {}),
