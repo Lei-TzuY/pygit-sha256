@@ -3,41 +3,67 @@ pygit/objects/tree.py
 =====================
 A **tree** object is Git's representation of a directory snapshot.
 
-Each entry in a tree records:
-  - a Unix-style mode (e.g. "100644" for a regular file, "040000" for a dir)
-  - a name  (the filename or sub-directory name — NOT the full path)
-  - the SHA-256 hash of a blob (for a file) or another tree (for a sub-dir)
-
-This is how Git builds directory hierarchies out of a flat object store:
-trees point to blobs (leaf files) and to other trees (sub-directories).
-The root tree of a commit is the snapshot of the entire project at that
-moment in time.
-
-On-disk format (before zlib, after the outer header is stripped):
-
-    For each entry, concatenated:
-        <mode> SP <name> NUL <20-byte binary hash>
-                              ^^^^^^^^^^^^^^^^^^^
-                              raw bytes, NOT hex; for sha256 use 32 bytes
-
-Since we use SHA-256 (32-byte digests) we store 32 raw bytes per entry.
+Ordinary pygit trees store local SHA-256 child object ids.  Phase212 adds a
+second canonical representation for filtered foreign trees: entries retain the
+original native Git SHA-1 identities so a tree can be content-addressed even
+when a blob was deliberately omitted by a promisor remote.  Runtime reads fill
+resolved local SHA-256 ids from persistent promisor metadata; accessing an
+unresolved entry raises ``PromisorMissingError`` rather than pretending a fake
+SHA-256 object exists.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import List
+
 import binascii
+from dataclasses import dataclass
+from typing import List, Optional
+
 from .base import GitObject
 
 
-@dataclass
+_NATIVE_TREE_MAGIC = b"pygit-native-tree-v1\x00"
+
+
+@dataclass(init=False)
 class TreeEntry:
     """A single directory entry inside a tree object."""
-    mode: str    # e.g. "100644", "100755", "040000", "120000"
-    name: str    # filename or directory name (no path separators)
-    sha: str     # hex digest of the referenced blob or tree
 
-    # Convenience helpers for mode interpretation
+    mode: str
+    name: str
+    _sha: str
+    native_oid: Optional[str]
+
+    def __init__(
+        self,
+        mode: str,
+        name: str,
+        sha: str = "",
+        native_oid: Optional[str] = None,
+    ) -> None:
+        self.mode = mode
+        self.name = name
+        self._sha = sha
+        self.native_oid = native_oid
+
+    @property
+    def sha(self) -> str:
+        if self._sha:
+            return self._sha
+        if self.native_oid:
+            from ..promisor import PromisorMissingError
+
+            kind = "tree" if self.is_dir else "blob"
+            raise PromisorMissingError(self.native_oid, kind)
+        return ""
+
+    @sha.setter
+    def sha(self, value: str) -> None:
+        self._sha = value
+
+    @property
+    def is_resolved(self) -> bool:
+        return bool(self._sha)
+
     @property
     def is_dir(self) -> bool:
         return self.mode == "040000"
@@ -52,67 +78,97 @@ class TreeEntry:
 
     def __repr__(self) -> str:
         kind = "tree" if self.is_dir else "blob"
-        return f"TreeEntry({self.mode} {kind} {self.sha[:12]}  {self.name})"
+        identity = self._sha or self.native_oid or ""
+        suffix = " native" if self.native_oid is not None else ""
+        return f"TreeEntry({self.mode} {kind} {identity[:12]}{suffix}  {self.name})"
 
 
 class TreeObject(GitObject):
-    """
-    A directory snapshot.
-
-    ``entries`` is a list of :class:`TreeEntry` objects, sorted by name
-    (Git sorts tree entries lexicographically — directories sort as if
-    they had a trailing slash).
-    """
+    """A directory snapshot in local or native-reference canonical form."""
 
     type_name = b"tree"
 
-    def __init__(self, entries: List[TreeEntry] | None = None) -> None:
+    def __init__(
+        self,
+        entries: List[TreeEntry] | None = None,
+        *,
+        native_entries: bool = False,
+    ) -> None:
         self.entries: List[TreeEntry] = entries or []
-
-    # ------------------------------------------------------------------
-    # GitObject protocol
-    # ------------------------------------------------------------------
+        self.native_entries = native_entries
 
     def serialize(self) -> bytes:
-        """
-        Encode all entries as::
+        if self.native_entries:
+            buf = bytearray(_NATIVE_TREE_MAGIC)
+            for entry in sorted(self.entries, key=lambda e: e.name):
+                if not entry.native_oid:
+                    raise ValueError("native tree entry is missing its native SHA-1 oid")
+                if len(entry.native_oid) != 40:
+                    raise ValueError("native tree entry oid must be a 40-hex SHA-1")
+                try:
+                    raw_oid = bytes.fromhex(entry.native_oid)
+                except ValueError as exc:
+                    raise ValueError("native tree entry oid must be a 40-hex SHA-1") from exc
+                buf.extend(entry.mode.encode())
+                buf.extend(b" ")
+                buf.extend(entry.name.encode())
+                buf.extend(b"\x00")
+                buf.extend(raw_oid)
+            return bytes(buf)
 
-            <mode>SP<name>NUL<32-byte-raw-sha>  (repeated)
-        """
-        buf = b""
+        buf = bytearray()
         for entry in sorted(self.entries, key=lambda e: e.name):
             raw_sha = binascii.unhexlify(entry.sha)
-            buf += (
-                entry.mode.encode()
-                + b" "
-                + entry.name.encode()
-                + b"\x00"
-                + raw_sha
-            )
-        return buf
+            if len(raw_sha) != 32:
+                raise ValueError("tree entry must reference a SHA-256 object")
+            buf.extend(entry.mode.encode())
+            buf.extend(b" ")
+            buf.extend(entry.name.encode())
+            buf.extend(b"\x00")
+            buf.extend(raw_sha)
+        return bytes(buf)
 
     def deserialize(self, data: bytes) -> None:
-        """Parse concatenated tree-entry bytes back into ``self.entries``."""
         self.entries = []
+        if data.startswith(_NATIVE_TREE_MAGIC):
+            self.native_entries = True
+            i = len(_NATIVE_TREE_MAGIC)
+            digest_size = 20
+            while i < len(data):
+                space = data.index(b" ", i)
+                null = data.index(b"\x00", space)
+                mode = data[i:space].decode()
+                name = data[space + 1:null].decode()
+                raw_oid = data[null + 1:null + 1 + digest_size]
+                if len(raw_oid) != digest_size:
+                    raise ValueError("truncated native tree entry")
+                self.entries.append(
+                    TreeEntry(
+                        mode=mode,
+                        name=name,
+                        native_oid=raw_oid.hex(),
+                    )
+                )
+                i = null + 1 + digest_size
+            return
+
+        self.native_entries = False
         i = 0
         while i < len(data):
-            # Read "<mode> <name>\x00"
             space = data.index(b" ", i)
-            null  = data.index(b"\x00", space)
-            mode  = data[i:space].decode()
-            name  = data[space + 1:null].decode()
-            # Read 32-byte raw hash (SHA-256)
-            raw_sha = data[null + 1: null + 33]
+            null = data.index(b"\x00", space)
+            mode = data[i:space].decode()
+            name = data[space + 1:null].decode()
+            raw_sha = data[null + 1:null + 33]
+            if len(raw_sha) != 32:
+                raise ValueError("truncated tree entry")
             sha = binascii.hexlify(raw_sha).decode()
             self.entries.append(TreeEntry(mode=mode, name=name, sha=sha))
             i = null + 33
 
-    # ------------------------------------------------------------------
-    # Mutation helpers
-    # ------------------------------------------------------------------
-
     def add_entry(self, mode: str, name: str, sha: str) -> None:
-        """Add or update an entry (by name)."""
+        if self.native_entries:
+            raise RuntimeError("cannot mutate a native-reference foreign tree")
         self.entries = [e for e in self.entries if e.name != name]
         self.entries.append(TreeEntry(mode=mode, name=name, sha=sha))
 
