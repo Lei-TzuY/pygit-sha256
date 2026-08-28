@@ -19,6 +19,7 @@ from .fetch_multiple import (
     run_multi_fetch,
 )
 from .fetch_porcelain import fetch_porcelain
+from .fetch_prefetch_run import fetch_prefetched
 from .remote_ops import configured_upstream
 from .remote_urls import fetch_url
 from .tracking import find_repo
@@ -80,6 +81,7 @@ def _fetch_named(
     append: bool,
     write_fetch_head_enabled: bool,
     force: bool,
+    prefetch: bool,
     prune,
     prune_tags,
     tags,
@@ -87,6 +89,17 @@ def _fetch_named(
     """Fetch one named remote and optionally write/append FETCH_HEAD."""
     if remote not in repo.list_remotes():
         raise KeyError(f"Unknown remote: '{remote}'")
+    if prefetch:
+        return fetch_prefetched(
+            repo,
+            remote,
+            force=force,
+            prune=prune,
+            prune_tags=prune_tags,
+            tags=tags,
+            append_fetch_head=append,
+            write_fetch_head_enabled=write_fetch_head_enabled,
+        )
     if not append:
         result = fetch_configured(
             repo,
@@ -124,6 +137,7 @@ def _run_many(repo, remotes, args) -> int:
             append=args.append or aggregate_append,
             write_fetch_head_enabled=args.write_fetch_head,
             force=args.force,
+            prefetch=args.prefetch,
             prune=args.prune,
             prune_tags=args.prune_tags,
             tags=args.tags,
@@ -160,6 +174,11 @@ def run_fetch(argv: Sequence[str]) -> int:
         "--force",
         action="store_true",
         help="force local ref updates that Git permits to be forced",
+    )
+    parser.add_argument(
+        "--prefetch",
+        action="store_true",
+        help="redirect configured fetch destinations into refs/prefetch/",
     )
     parser.add_argument(
         "-q",
@@ -319,6 +338,19 @@ def run_fetch(argv: Sequence[str]) -> int:
                 append_fetch_head=args.append,
                 write_fetch_head=args.write_fetch_head,
                 **_force_kwargs(args.force),
+            )
+        elif args.prefetch:
+            result = fetch_prefetched(
+                repo,
+                remote,
+                refspecs=args.refspecs or None,
+                refmap=args.refmap,
+                force=args.force,
+                prune=args.prune,
+                prune_tags=args.prune_tags,
+                tags=args.tags,
+                append_fetch_head=args.append,
+                write_fetch_head_enabled=args.write_fetch_head,
             )
         elif not args.refspecs and not args.append:
             result = fetch_configured(
