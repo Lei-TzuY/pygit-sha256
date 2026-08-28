@@ -31,6 +31,8 @@ Missing-object materialization now builds candidates from:
 
 This matters for cache-like remotes added after the original partial clone: they can participate in lazy materialization through normal promisor config without rewriting the promise sidecar's remote list.
 
+The public multi-promisor materializer no longer requires the sidecar to name a remote at all. If `.pygit/promisor.json` records the promised native object IDs while Git config supplies `extensions.partialClone` or other promisor candidates, config alone is sufficient to select the demand-fetch source. The historical sidecar-owner requirement remains only on the legacy single-owner compatibility helpers.
+
 ## Ordering
 
 Candidate order is:
@@ -55,6 +57,7 @@ The Phase213 single-object fetch seam also remains intact. `remote.<name>.server
 - ordinary repositories remain network-free;
 - legacy single-owner validation helpers are unchanged;
 - stale or removed primary remotes are skipped rather than made authoritative;
+- config-only promisor discovery is allowed for the public multi-promisor path;
 - no protocol request or object format changes are introduced.
 
 ## Verification targets
@@ -62,6 +65,7 @@ The Phase213 single-object fetch seam also remains intact. `remote.<name>.server
 Focused regressions cover:
 
 - an `origin` configured first but marked primary being attempted after a config-only cache promisor;
+- config-only primary materialization when the sidecar records promised OIDs but no remote names;
 - `remote.<name>.partialCloneFilter` alone marking a promisor candidate;
 - the primary marker contributing a candidate even when the sidecar did not record that remote;
 - a removed/stale primary remote not blocking a working cache;
