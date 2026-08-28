@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import nullcontext
 from typing import Sequence
 
+from .fetch_atomic import atomic_ref_updates
 from .fetch_configured import fetch_configured
 from .fetch_direct import fetch_direct_url, is_direct_fetch_url
 from .fetch_head import write_fetch_head
@@ -97,6 +99,10 @@ def _run_many(repo, remotes, args) -> int:
     return 1 if failures else 0
 
 
+def _atomic_scope(repo, enabled: bool):
+    return atomic_ref_updates(repo) if enabled else nullcontext()
+
+
 def run_fetch(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pygit fetch",
@@ -109,6 +115,11 @@ def run_fetch(argv: Sequence[str]) -> int:
         "--append",
         action="store_true",
         help="append to FETCH_HEAD instead of overwriting it",
+    )
+    parser.add_argument(
+        "--atomic",
+        action="store_true",
+        help="update local refs atomically for a single fetch source",
     )
     parser.add_argument(
         "--multiple",
@@ -174,6 +185,8 @@ def run_fetch(argv: Sequence[str]) -> int:
     repo = find_repo()
 
     if args.multiple:
+        if args.atomic:
+            raise RuntimeError("--atomic can only be used when fetching from one remote")
         if args.refmap is not None:
             raise RuntimeError("--refmap is incompatible with --multiple")
         # Under --multiple every positional token is a repository/group, never
@@ -187,6 +200,8 @@ def run_fetch(argv: Sequence[str]) -> int:
         return _run_many(repo, expand_fetch_sources(repo, names), args)
 
     if args.all_remotes is True:
+        if args.atomic:
+            raise RuntimeError("--atomic can only be used when fetching from one remote")
         if args.remote is not None or args.refspecs:
             raise RuntimeError("--all does not accept a repository or refspec")
         if args.refmap is not None:
@@ -200,6 +215,8 @@ def run_fetch(argv: Sequence[str]) -> int:
         and args.all_remotes is not False
         and fetch_all_by_config(repo)
     ):
+        if args.atomic:
+            raise RuntimeError("--atomic can only be used when fetching from one remote")
         if args.refmap is not None:
             raise RuntimeError("--refmap is incompatible with fetch.all")
         return _run_many(repo, all_fetch_remotes(repo), args)
@@ -208,6 +225,8 @@ def run_fetch(argv: Sequence[str]) -> int:
     if args.remote is not None and not args.refspecs:
         members = remote_group_members(repo, args.remote)
         if members is not None:
+            if args.atomic:
+                raise RuntimeError("--atomic can only be used when fetching from one remote")
             if args.refmap is not None:
                 raise RuntimeError("--refmap is incompatible with a remote group")
             return _run_many(repo, list(members), args)
@@ -217,40 +236,41 @@ def run_fetch(argv: Sequence[str]) -> int:
     if args.refmap is not None and not args.refspecs:
         raise RuntimeError("--refmap option is only meaningful with command-line refspec(s)")
 
-    if is_direct_fetch_url(remote):
-        if args.prune is True or args.prune_tags is True:
-            raise RuntimeError("pruning a direct URL fetch is not supported without a named remote")
-        result = fetch_direct_url(
-            repo,
-            remote,
-            refspecs=args.refspecs or None,
-            refmap=args.refmap,
-            tags=args.tags,
-            append_fetch_head=args.append,
-        )
-    # Keep the established Phase183 `fetch_configured` seam for ordinary
-    # configured fetches. Explicit refspecs, --refmap, and --append need the
-    # richer Phase184/185 porcelain orchestration.
-    elif not args.refspecs and not args.append:
-        result = fetch_configured(
-            repo,
-            remote,
-            prune=args.prune,
-            prune_tags=args.prune_tags,
-            tags=args.tags,
-        )
-        _write_configured_fetch_head(repo, remote, result)
-    else:
-        result = fetch_porcelain(
-            repo,
-            remote,
-            prune=args.prune,
-            prune_tags=args.prune_tags,
-            tags=args.tags,
-            refspecs=args.refspecs or None,
-            refmap=args.refmap,
-            append_fetch_head=args.append,
-        )
+    with _atomic_scope(repo, args.atomic):
+        if is_direct_fetch_url(remote):
+            if args.prune is True or args.prune_tags is True:
+                raise RuntimeError("pruning a direct URL fetch is not supported without a named remote")
+            result = fetch_direct_url(
+                repo,
+                remote,
+                refspecs=args.refspecs or None,
+                refmap=args.refmap,
+                tags=args.tags,
+                append_fetch_head=args.append,
+            )
+        # Keep the established Phase183 `fetch_configured` seam for ordinary
+        # configured fetches. Explicit refspecs, --refmap, and --append need the
+        # richer Phase184/185 porcelain orchestration.
+        elif not args.refspecs and not args.append:
+            result = fetch_configured(
+                repo,
+                remote,
+                prune=args.prune,
+                prune_tags=args.prune_tags,
+                tags=args.tags,
+            )
+            _write_configured_fetch_head(repo, remote, result)
+        else:
+            result = fetch_porcelain(
+                repo,
+                remote,
+                prune=args.prune,
+                prune_tags=args.prune_tags,
+                tags=args.tags,
+                refspecs=args.refspecs or None,
+                refmap=args.refmap,
+                append_fetch_head=args.append,
+            )
 
     suffix = f"; pruned {len(result['pruned'])} refs" if result["pruned"] else ""
     print(f"Fetched {len(result['refs'])} refs from {remote}{suffix}")
