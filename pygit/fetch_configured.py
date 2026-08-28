@@ -19,6 +19,7 @@ from .fetch_policy import (
     resolve_fetch_policy,
     source_is_excluded,
 )
+from .objects import CommitObject
 from .remote import Advertisement, SmartHttpClient
 from .remote_urls import fetch_url
 from .repo import Repository
@@ -91,14 +92,10 @@ def _selection_specs(
     prune_domain = list(configured)
 
     if policy.prune_tags:
-        # --prune-tags is an explicit tag mapping even without --prune. The
-        # pruning itself only happens when prune policy is enabled.
         tag_spec = _tag_refspec(force=True)
         selected.append(tag_spec)
         prune_domain.append(tag_spec)
     elif policy.tag_mode == "all":
-        # --tags fetches every tag, but --prune --tags alone does not make tags
-        # part of the pruning domain.
         selected.append(_tag_refspec(force=False))
 
     return selected, prune_domain
@@ -145,8 +142,6 @@ def _fetch_import_sources(
     if all(oid in known_by_native for oid in source_oids.values()):
         return {name: known_by_native[oid] for name, oid in source_oids.items()}, 0
 
-    # Reuse the mature SmartHttpClient without widening its public API: a
-    # narrowed advertisement naturally generates only the selected wants.
     selected_advertisement = Advertisement(
         refs=dict(source_oids),
         capabilities=set(advertisement.capabilities),
@@ -169,6 +164,27 @@ def _fetch_import_sources(
         }
     )
     return imported, len(result.objects)
+
+
+def _is_ancestor(repo: Repository, old: str, new: str) -> bool:
+    if old == new:
+        return True
+    pending = [new]
+    seen = set()
+    while pending:
+        oid = pending.pop()
+        if oid in seen:
+            continue
+        seen.add(oid)
+        if oid == old:
+            return True
+        try:
+            obj = repo.store.read(oid)
+        except Exception:
+            continue
+        if isinstance(obj, CommitObject):
+            pending.extend(obj.parents)
+    return False
 
 
 def _update_destination(
@@ -194,6 +210,20 @@ def _update_destination(
         repo.refs.set_tag(name, sha)
         return
 
+    if destination.startswith("refs/heads/"):
+        name = destination[len("refs/heads/") :]
+        try:
+            new_object = repo.store.read(sha)
+        except Exception as exc:
+            raise RuntimeError(f"fetch rejected: branch '{name}' target is unavailable") from exc
+        if not isinstance(new_object, CommitObject):
+            raise RuntimeError(f"fetch rejected: branch '{name}' target is not a commit")
+        current = repo.refs.get_branch(name)
+        if current is not None and current != sha and not force and not _is_ancestor(repo, current, sha):
+            raise RuntimeError(f"fetch rejected: branch '{name}' would not fast-forward")
+        repo.refs.set_branch(name, sha, message="fetch")
+        return
+
     raise ValueError(f"unsupported fetch destination: {destination!r}")
 
 
@@ -201,10 +231,12 @@ def _apply_destinations(
     repo: Repository,
     imported: Dict[str, str],
     destinations: Dict[str, List[Tuple[str, bool]]],
+    *,
+    force: bool = False,
 ) -> None:
     for source, sha in imported.items():
-        for destination, force in destinations.get(source, []):
-            _update_destination(repo, destination, sha, force=force)
+        for destination, refspec_force in destinations.get(source, []):
+            _update_destination(repo, destination, sha, force=force or refspec_force)
 
 
 def _auto_follow_tags(
@@ -223,12 +255,9 @@ def _auto_follow_tags(
         if not refname.startswith("refs/tags/") or refname in selected:
             continue
         tag_name = refname[len("refs/tags/") :]
-        # Automatic tag following never clobbers an existing local tag.
         if repo.refs.get_tag(tag_name) is not None:
             continue
         peeled = advertisement.refs.get(f"{refname}^{{}}", tag_oid)
-        # A tag is auto-followed only when its target is already among objects
-        # known from this remote, including objects imported by this fetch.
         if peeled not in known_by_native:
             continue
         if tag_oid in known_by_native:
@@ -314,6 +343,7 @@ def fetch_configured(
     repo: Repository,
     remote: str = "origin",
     *,
+    force: bool = False,
     prune: Optional[bool] = None,
     prune_tags: Optional[bool] = None,
     tags: Optional[bool] = None,
@@ -332,8 +362,6 @@ def fetch_configured(
     configured = _parsed_fetch_refspecs(repo, remote)
     selection_specs, prune_specs = _selection_specs(configured, policy)
 
-    # Git prunes before applying fetched updates. A later transfer failure does
-    # not resurrect refs already identified as stale.
     pruned = _prune_refs(repo, remote, advertisement, prune_specs) if policy.prune else []
 
     native_map = repo._read_native_map(remote)
@@ -349,7 +377,7 @@ def fetch_configured(
         known_by_native,
     )
     repo._write_native_map(native_map, remote)
-    _apply_destinations(repo, imported, destinations)
+    _apply_destinations(repo, imported, destinations, force=force)
 
     if policy.tag_mode == "auto" and not policy.prune_tags:
         followed, tag_objects = _auto_follow_tags(
@@ -372,8 +400,6 @@ def fetch_configured(
         else repo._infer_default_branch(advertisement.refs)
     )
 
-    # Keep historical JSON metadata coherent, but never retarget the symbolic
-    # remote HEAD during ordinary fetch. `remote set-head -a` owns that action.
     config = repo._read_config()
     settings = config.get("remotes", {}).get(remote)
     if settings is not None:
