@@ -16,13 +16,14 @@ from typing import Type
 from .promisor import read_promisor_state
 from .promisor_checkout import collect_checkout_promises
 from .promisor_materialize import materialize_promised_objects
+from .promisor_reset_paths import install_promisor_reset_paths_support
 
 
 _INSTALLED = False
 
 
 def install_promisor_reset_support(repository_cls: Type) -> None:
-    """Install a transparent promisor-aware wrapper around ``reset``."""
+    """Install transparent promisor-aware wrappers around reset operations."""
     global _INSTALLED
     if _INSTALLED:
         return
@@ -51,4 +52,5 @@ def install_promisor_reset_support(repository_cls: Type) -> None:
         return original_reset(self, target=target, mode=mode)
 
     repository_cls.reset = reset
+    install_promisor_reset_paths_support(repository_cls)
     _INSTALLED = True
