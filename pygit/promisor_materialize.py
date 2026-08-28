@@ -21,7 +21,7 @@ identity.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Iterable, Sequence, Tuple
+from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 from .config import GitConfig
 from .fetch_importer import TagPreservingNativeImporter
@@ -139,7 +139,7 @@ def _fetch_native_object(
     )
 
 
-def _is_true_config(value: str | None) -> bool:
+def _is_true_config(value: Optional[str]) -> bool:
     """Return whether a Git-style boolean config value is explicitly true."""
     if value is None:
         return False
@@ -261,9 +261,6 @@ def materialize_promised_objects(
                     server_options=options,
                 )
         except (RuntimeError, ValueError):
-            # A cache-like promisor can legitimately be unable to satisfy a
-            # request. Git's multi-promisor model falls through to the next
-            # configured promisor rather than making that remote authoritative.
             continue
 
         available = [oid for oid in remaining if oid in objects]
