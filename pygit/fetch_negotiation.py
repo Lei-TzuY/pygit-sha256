@@ -1,24 +1,28 @@
 """Git-style fetch negotiation have-set controls.
 
-Phase197 keeps pygit's protocol-v0 smart-HTTP transport while making the set of
-local commits reported as ``have`` lines controllable.  The command-scoped
-policy mirrors current Git's ``--negotiation-restrict`` (with the older
-``--negotiation-tip`` spelling retained as an alias) and
-``--negotiation-include`` semantics.
+Phase197 added explicit command-line restriction/include planning. Phase198 adds
+Git's per-remote ``remote.<name>.negotiationInclude`` fallback without losing
+remote identity during multi-remote or multi-URL fetch orchestration.
 """
 
 from __future__ import annotations
 
 import fnmatch
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Set
 
+from .config import GitConfig
 from .objects import CommitObject, TagObject
 from .remote import NativeExporter, SmartHttpClient
 from .repo import Repository
 
 
 _GLOB_CHARS = frozenset("*?[")
+_ACTIVE_NEGOTIATION_REMOTE: ContextVar[Optional[str]] = ContextVar(
+    "pygit_fetch_negotiation_remote",
+    default=None,
+)
 
 
 def _all_ref_values(repo: Repository) -> Dict[str, str]:
@@ -162,28 +166,72 @@ def plan_included_haves(repo: Repository, expressions: Sequence[str]) -> Set[str
     return _native_commit_oids(repo, tips)
 
 
+def configured_negotiation_includes(repo: Repository, remote: str) -> List[str]:
+    """Return ordered ``remote.<name>.negotiationInclude`` values."""
+    return GitConfig(repo.pygit_dir).get_all(
+        "remote",
+        f"{remote}.negotiationInclude",
+    )
+
+
+def has_configured_negotiation_includes(repo: Repository) -> bool:
+    """Return whether any configured named remote has include tips."""
+    return any(
+        configured_negotiation_includes(repo, remote)
+        for remote in repo.list_remotes()
+    )
+
+
+@contextmanager
+def negotiation_remote(remote: Optional[str]) -> Iterator[None]:
+    """Expose the currently executing named remote to negotiation policy."""
+    token = _ACTIVE_NEGOTIATION_REMOTE.set(remote)
+    try:
+        yield
+    finally:
+        _ACTIVE_NEGOTIATION_REMOTE.reset(token)
+
+
 @contextmanager
 def negotiation_transport(
     repo: Repository,
     *,
     restrict: Sequence[str] = (),
     include: Sequence[str] = (),
+    use_config_include: bool = False,
 ) -> Iterator[None]:
     """Temporarily rewrite ``SmartHttpClient.fetch`` have selection.
 
     Restriction replaces the caller's broad have set with commits reachable only
-    from the selected tips.  Inclusion then adds the exact selected tip commits.
-    The original transport method is restored even when a fetch raises.
+    from the selected tips. Explicit inclusion then adds the exact selected tip
+    commits. When explicit include values are absent, Phase198 may instead load
+    ``remote.<name>.negotiationInclude`` for the named remote currently being
+    fetched. Per-remote planning is cached for the duration of one command.
     """
     restricted: Optional[Set[str]] = (
         plan_restricted_haves(repo, restrict) if restrict else None
     )
     included = plan_included_haves(repo, include) if include else set()
+    config_cache: Dict[str, Set[str]] = {}
     original = SmartHttpClient.fetch
+
+    def configured_for_active_remote() -> Set[str]:
+        if not use_config_include or include:
+            return set()
+        remote = _ACTIVE_NEGOTIATION_REMOTE.get()
+        if remote is None:
+            return set()
+        if remote not in config_cache:
+            expressions = configured_negotiation_includes(repo, remote)
+            config_cache[remote] = (
+                plan_included_haves(repo, expressions) if expressions else set()
+            )
+        return config_cache[remote]
 
     def fetch_with_negotiation(self, haves=None, advertisement=None):
         planned = set(haves or []) if restricted is None else set(restricted)
         planned.update(included)
+        planned.update(configured_for_active_remote())
         return original(self, haves=planned, advertisement=advertisement)
 
     SmartHttpClient.fetch = fetch_with_negotiation
