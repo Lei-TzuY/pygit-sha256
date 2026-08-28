@@ -106,7 +106,10 @@ def materialize_promised_object(pygit_dir: Path, native_oid: str) -> str:
     remotes = repo.list_remotes()
     url = remotes.get(remote)
     if not url:
-        raise RuntimeError(f"promisor remote '{remote}' is not configured")
+        # Keep Phase212's missing-object behavior when promisor metadata exists
+        # but its owning remote is no longer configured.  The object remains a
+        # known intentional omission, just not one that can currently be filled.
+        raise PromisorMissingError(native_oid, kind)
 
     options = tuple(configured_server_options(repo, remote))
     objects = _fetch_native_object(url, native_oid, server_options=options)
