@@ -12,6 +12,7 @@ from fnmatch import fnmatchcase
 from typing import Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
+from .protocol_v2 import SmartHttpV2QueryClient
 from .remote import SmartHttpClient
 from .remote_urls import fetch_url
 from .repo import Repository
@@ -70,6 +71,21 @@ def _matches_pattern(refname: str, pattern: str) -> bool:
     return any(fnmatchcase(candidate, pattern) for candidate in candidates)
 
 
+def _discover(url: str, repo: Optional[Repository]):
+    """Discover refs, honoring repository ``protocol.version=2`` when set.
+
+    Git's HTTP v2 handshake is opportunistic: a server that ignores the
+    ``Git-Protocol: version=2`` request may answer using protocol v0. In that
+    case pygit cleanly falls back to its established v0 discovery path.
+    """
+    protocol_version = repo.config_get("protocol", "version") if repo else None
+    if protocol_version == "2":
+        advertisement = SmartHttpV2QueryClient(url).discover_refs()
+        if advertisement is not None:
+            return advertisement
+    return SmartHttpClient(url).discover()
+
+
 def ls_remote(
     source: str,
     *,
@@ -81,7 +97,7 @@ def ls_remote(
 ) -> LsRemoteResult:
     """Return selected refs from a remote advertisement without fetching data."""
     url = resolve_remote_url(source, repo)
-    advertisement = SmartHttpClient(url).discover()
+    advertisement = _discover(url, repo)
 
     selected = []
     for name, oid in advertisement.refs.items():
