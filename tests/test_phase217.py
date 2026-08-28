@@ -100,23 +100,53 @@ def test_hard_reset_one_promise_preserves_single_fetch_seam(tmp_path, monkeypatc
     assert (repo.worktree / "one.txt").read_bytes() == files["one.txt"]
 
 
-@pytest.mark.parametrize("mode", ["soft", "mixed"])
-def test_non_hard_reset_does_not_materialize_promises(tmp_path, monkeypatch, mode):
+def test_mixed_reset_batches_promises_for_sha256_index(tmp_path, monkeypatch):
+    files = {"a.txt": b"alpha\n", "b.txt": b"beta\n"}
+    repo, blob_oids = _promisor_repo(tmp_path, files)
+    calls = []
+
+    def fake_many(url, oids, *, server_options=()):
+        wanted = tuple(oids)
+        calls.append((url, wanted, tuple(server_options)))
+        by_oid = {blob_oids[name]: data for name, data in files.items()}
+        return {oid: NativeObject("blob", by_oid[oid], oid) for oid in wanted}
+
+    monkeypatch.setattr("pygit.promisor_materialize._fetch_native_objects", fake_many)
+    monkeypatch.setattr(
+        "pygit.promisor_materialize._fetch_native_object",
+        lambda *args, **kwargs: pytest.fail("multi-blob mixed reset must batch"),
+    )
+
+    repo.reset("HEAD", mode="mixed")
+
+    assert len(calls) == 1
+    assert set(calls[0][1]) == set(blob_oids.values())
+    assert set(repo.index.paths()) == set(files)
+    assert not (repo.worktree / "a.txt").exists()
+    assert not (repo.worktree / "b.txt").exists()
+    state = read_promisor_state(repo.pygit_dir)
+    assert state["promised"] == {}
+    assert set(blob_oids.values()) <= set(state["resolved"])
+
+
+def test_soft_reset_does_not_materialize_promises(tmp_path, monkeypatch):
     repo, blob_oids = _promisor_repo(tmp_path, {"later.txt": b"later\n"})
     monkeypatch.setattr(
         promisor_reset,
         "materialize_promised_objects",
-        lambda *args, **kwargs: pytest.fail(f"{mode} reset must not fetch blobs"),
+        lambda *args, **kwargs: pytest.fail("soft reset must not fetch blobs"),
     )
 
-    repo.reset("HEAD", mode=mode)
+    repo.reset("HEAD", mode="soft")
     state = read_promisor_state(repo.pygit_dir)
     assert next(iter(blob_oids.values())) in state["promised"]
 
 
-def test_hard_reset_materialization_failure_precedes_ref_mutation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["mixed", "hard"])
+def test_materialization_failure_precedes_reset_mutation(tmp_path, monkeypatch, mode):
     repo, _ = _promisor_repo(tmp_path, {"blocked.txt": b"blocked\n"})
     before = repo.refs.resolve_head()
+    assert list(repo.index.paths()) == []
 
     def fail(*args, **kwargs):
         raise RuntimeError("promisor unavailable")
@@ -124,9 +154,10 @@ def test_hard_reset_materialization_failure_precedes_ref_mutation(tmp_path, monk
     monkeypatch.setattr(promisor_reset, "materialize_promised_objects", fail)
 
     with pytest.raises(RuntimeError, match="promisor unavailable"):
-        repo.reset("HEAD", mode="hard")
+        repo.reset("HEAD", mode=mode)
 
     assert repo.refs.resolve_head() == before
+    assert list(repo.index.paths()) == []
     assert not (repo.worktree / "blocked.txt").exists()
 
 
