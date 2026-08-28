@@ -68,6 +68,28 @@ def test_primary_promisor_is_tried_last_and_config_only_cache_is_discovered(
     assert state["resolved"][OID] == LOCAL
 
 
+def test_primary_config_can_materialize_without_sidecar_remote_names(
+    tmp_path, monkeypatch
+):
+    repo = Repository.init(str(tmp_path / "repo"))
+    repo.add_remote("origin", "https://origin.example/repo.git")
+    # The sidecar deliberately records only object demand. Git config owns the
+    # promisor-source policy in this fixture.
+    update_promisor_state(repo.pygit_dir, promised={OID: "blob"})
+    repo.config_set("extensions", "partialClone", "origin")
+    calls = []
+
+    def fake_one(url, oid, *, server_options=()):
+        calls.append((url, oid, tuple(server_options)))
+        return {oid: object()}
+
+    monkeypatch.setattr(pm, "_fetch_native_object", fake_one)
+    monkeypatch.setattr(pm, "TagPreservingNativeImporter", _FakeImporter)
+
+    assert pm.materialize_promised_objects(repo.pygit_dir, [OID]) == {OID: LOCAL}
+    assert calls == [("https://origin.example/repo.git", OID, ())]
+
+
 def test_partial_clone_filter_config_alone_marks_promisor_candidate(tmp_path):
     repo = _promisor_repo(tmp_path)
     repo.config_set("extensions", "partialClone", "origin")
