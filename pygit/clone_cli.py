@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 from typing import Sequence
 
+from .clone_partial import clone_partial_repository
 from .clone_remote import clone_default_branch, configure_clone_remote
 from .clone_shallow import clone_shallow_repository
+from .fetch_partial import _validate_filter_spec
 from .fetch_protocol_v2 import protocol_v2_transport
 from .repo import Repository
 from .tracking import configure_clone_tracking
@@ -32,6 +34,14 @@ def _server_option(value: str) -> str:
             "server option contains an invalid NUL or LF character"
         )
     return value
+
+
+def _filter_spec(value: str) -> str:
+    """Validate the currently supported partial-clone filter grammar."""
+    try:
+        return _validate_filter_spec(value)
+    except (RuntimeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def run_clone(argv: Sequence[str]) -> int:
@@ -68,6 +78,12 @@ def run_clone(argv: Sequence[str]) -> int:
         help="create a bandwidth-saving protocol-v2 shallow clone",
     )
     parser.add_argument(
+        "--filter",
+        type=_filter_spec,
+        metavar="FILTER",
+        help="create a protocol-v2 partial clone (blob:none or blob:limit=<bytes>)",
+    )
+    parser.add_argument(
         "--server-option",
         action="append",
         default=[],
@@ -79,21 +95,33 @@ def run_clone(argv: Sequence[str]) -> int:
 
     if args.depth is not None and args.depth <= 0:
         parser.error("--depth must be a positive integer")
+    if args.filter is not None and args.depth is not None:
+        parser.error("Phase214 does not yet combine --filter with --depth")
 
     server_options = tuple(args.server_option)
 
     # Native Git makes --depth imply --single-branch unless the user explicitly
-    # asks for --no-single-branch.
+    # asks for --no-single-branch. A partial clone alone keeps the ordinary
+    # multi-branch default because filtering is object-level, not DAG-level.
     single_branch = (
         args.single_branch
         if args.single_branch is not None
         else args.depth is not None
     )
 
+    if args.filter is not None:
+        repo = clone_partial_repository(
+            args.url,
+            args.directory,
+            filter_spec=args.filter,
+            branch_name=args.branch,
+            single_branch=single_branch,
+            server_options=server_options,
+        )
     # A real depth clone always uses the Phase204+ truncated protocol-v2 path.
     # Preserve the historical Repository.clone override seam only when no new
     # Phase209 transport metadata is requested.
-    if args.depth is not None and (
+    elif args.depth is not None and (
         server_options or not _repository_clone_overridden()
     ):
         shallow_kwargs = {
