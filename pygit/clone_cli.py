@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from typing import Sequence
 
 from .clone_partial import clone_partial_repository
@@ -44,6 +45,31 @@ def _filter_spec(value: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+@contextmanager
+def _suppress_repository_clone_checkout(enabled: bool):
+    """Suppress the legacy Repository.clone checkout without changing its API.
+
+    Modern shallow/partial clone paths accept an explicit ``checkout`` flag.
+    The historical ``Repository.clone`` call shape is intentionally stable for
+    compatibility tests and callers, so ``clone -n`` temporarily suppresses only
+    its final worktree replacement step and restores the method in ``finally``.
+    """
+    if not enabled:
+        yield
+        return
+
+    original = Repository._replace_worktree_from_commit
+
+    def _skip_checkout(self, commit_sha):
+        return None
+
+    Repository._replace_worktree_from_commit = _skip_checkout
+    try:
+        yield
+    finally:
+        Repository._replace_worktree_from_commit = original
+
+
 def run_clone(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pygit clone",
@@ -56,6 +82,12 @@ def run_clone(argv: Sequence[str]) -> int:
         "--branch",
         metavar="BRANCH",
         help="point HEAD to the specified branch after cloning",
+    )
+    parser.add_argument(
+        "-n",
+        "--no-checkout",
+        action="store_true",
+        help="do not populate the working tree after cloning",
     )
     single = parser.add_mutually_exclusive_group()
     single.add_argument(
@@ -110,13 +142,18 @@ def run_clone(argv: Sequence[str]) -> int:
     )
 
     if args.filter is not None:
+        partial_kwargs = {
+            "filter_spec": args.filter,
+            "branch_name": args.branch,
+            "single_branch": single_branch,
+            "server_options": server_options,
+        }
+        if args.no_checkout:
+            partial_kwargs["checkout"] = False
         repo = clone_partial_repository(
             args.url,
             args.directory,
-            filter_spec=args.filter,
-            branch_name=args.branch,
-            single_branch=single_branch,
-            server_options=server_options,
+            **partial_kwargs,
         )
     # A real depth clone always uses the Phase204+ truncated protocol-v2 path.
     # Preserve the historical Repository.clone override seam only when no new
@@ -131,6 +168,8 @@ def run_clone(argv: Sequence[str]) -> int:
         }
         if server_options:
             shallow_kwargs["server_options"] = server_options
+        if args.no_checkout:
+            shallow_kwargs["checkout"] = False
         repo = clone_shallow_repository(
             args.url,
             args.directory,
@@ -148,19 +187,20 @@ def run_clone(argv: Sequence[str]) -> int:
         if args.depth is not None:
             clone_kwargs["depth"] = args.depth
 
-        if server_options:
-            with protocol_v2_transport(server_options=server_options):
+        with _suppress_repository_clone_checkout(args.no_checkout):
+            if server_options:
+                with protocol_v2_transport(server_options=server_options):
+                    repo = Repository.clone(
+                        args.url,
+                        args.directory,
+                        **clone_kwargs,
+                    )
+            else:
                 repo = Repository.clone(
                     args.url,
                     args.directory,
                     **clone_kwargs,
                 )
-        else:
-            repo = Repository.clone(
-                args.url,
-                args.directory,
-                **clone_kwargs,
-            )
 
     branch = repo.refs.current_branch()
     if branch:
