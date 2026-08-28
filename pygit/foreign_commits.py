@@ -1,16 +1,16 @@
 """Stable native-parent identity support for shallow imported commits.
 
 A real shallow pack may contain a commit while omitting one or more of that
-commit's native parents.  pygit cannot translate an unavailable native SHA-1
+commit's native parents. pygit cannot translate an unavailable native SHA-1
 parent to a local SHA-256 commit id at import time without either inventing an
 object id or later rewriting the child commit.
 
 Phase204 therefore gives imported shallow commits a stable local representation:
 the commit payload stores its original native SHA-1 parent ids in
-``parent-sha1`` headers.  The commit itself remains a normal content-addressed
-SHA-256 pygit object.  This small repository-side index maps native commit ids
-to the local SHA-256 commit ids that have actually arrived so ObjectStore can
-resolve those parent edges lazily as a repository is deepened.
+``parent-sha1`` headers. The commit itself remains a normal content-addressed
+SHA-256 pygit object. This repository-side index maps native commit ids to the
+local SHA-256 commit ids that have actually arrived so repository object reads
+can resolve those parent edges lazily as history is deepened.
 """
 
 from __future__ import annotations
@@ -20,6 +20,9 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Dict, Iterable, List
+
+from .objects import CommitObject
+from .store import ObjectStore
 
 
 _FILE_NAME = "foreign-commits.json"
@@ -108,3 +111,13 @@ def resolve_native_parents(pygit_dir: Path, native_parents: Iterable[str]) -> Li
     if any(local is None for local in resolved):
         return []
     return [str(local) for local in resolved]
+
+
+class ForeignAwareObjectStore(ObjectStore):
+    """Repository ObjectStore that lazily resolves imported native parents."""
+
+    def read(self, sha: str):
+        obj = super().read(sha)
+        if isinstance(obj, CommitObject) and obj.native_parents is not None:
+            obj.parents = resolve_native_parents(self.root.parent, obj.native_parents)
+        return obj
