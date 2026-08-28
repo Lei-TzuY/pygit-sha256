@@ -8,17 +8,19 @@ and makes the fetch side asymmetric with Phase174's tag-aware native exporter.
 Phase183 keeps the legacy importer behavior untouched for compatibility and
 uses ``TagPreservingNativeImporter`` in the modern configured fetch path.
 Phase204 adds ``StableShallowNativeImporter`` for genuinely truncated native
-commit graphs: imported commits preserve their original SHA-1 parent identities
-inside the local content-addressed commit payload, so an omitted parent can be
-resolved later without rewriting the child SHA-256 object.
+commit graphs. Phase212 adds ``PromisorFilteredNativeImporter`` for filtered
+packs that intentionally omit blob objects while retaining stable foreign-tree
+identity through native SHA-1 entry references.
 """
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Optional, Set, Tuple
 
 from .foreign_commits import update_foreign_commit_map
-from .objects import CommitObject, Identity, TagObject
+from .objects import CommitObject, Identity, TagObject, TreeObject
+from .objects.tree import TreeEntry
+from .promisor import update_promisor_state
 from .remote import NativeImporter, NativeObject
 
 
@@ -75,14 +77,7 @@ class TagPreservingNativeImporter(NativeImporter):
 
 
 class StableShallowNativeImporter(TagPreservingNativeImporter):
-    """Import a native graph even when shallow commit parents are absent.
-
-    Trees remain ordinary SHA-256 pygit trees. Commits record the complete
-    native parent list in ``parent-sha1`` headers and expose only parents whose
-    native objects are already known locally. ObjectStore re-resolves those
-    edges from the persistent foreign-commit map on every read, so deepening a
-    repository reconnects history without changing any existing child object id.
-    """
+    """Import a native graph even when shallow commit parents are absent."""
 
     def _dependencies(self, obj: NativeObject) -> List[str]:
         if obj.type_name != "commit":
@@ -101,9 +96,6 @@ class StableShallowNativeImporter(TagPreservingNativeImporter):
         resolved_parents = [
             self.converted[oid] for oid in native_parents if oid in self.converted
         ]
-        # A parent may come from the established per-remote native map rather
-        # than this pack. Mirror every already-known commit parent into the
-        # repository-global foreign index before the new child is published.
         update_foreign_commit_map(
             self.store.root.parent,
             {
@@ -127,3 +119,78 @@ class StableShallowNativeImporter(TagPreservingNativeImporter):
             {obj.oid: local_sha},
         )
         return local_sha
+
+
+class PromisorFilteredNativeImporter(TagPreservingNativeImporter):
+    """Import filtered native packs while allowing promised blobs to be absent.
+
+    Native Git tree objects remain in the pack for ``blob:none`` and
+    ``blob:limit`` filters, but some blob entries may be omitted.  Foreign trees
+    therefore store every original native entry oid in a special local canonical
+    representation. Resolved children are exposed as real SHA-256 ids at runtime;
+    unresolved children raise :class:`PromisorMissingError` on access.
+    """
+
+    def __init__(
+        self,
+        store,
+        objects,
+        known=None,
+        *,
+        remote: str,
+        filter_spec: str,
+    ) -> None:
+        super().__init__(store, objects, known=known)
+        self.remote = remote
+        self.filter_spec = filter_spec
+        self._initial_known: Set[str] = set(self.converted)
+        self._tree_references: Set[str] = set()
+        self._promised: dict[str, str] = {}
+
+    def _dependencies(self, obj: NativeObject) -> List[str]:
+        if obj.type_name != "tree":
+            return super()._dependencies(obj)
+
+        dependencies: List[str] = []
+        for mode, _name, oid in self._parse_tree(obj.data):
+            self._tree_references.add(oid)
+            if mode == "040000":
+                if oid not in self.objects and oid not in self.converted:
+                    raise KeyError(f"Filtered pack is missing required tree {oid}")
+                dependencies.append(oid)
+            elif oid in self.objects or oid in self.converted:
+                dependencies.append(oid)
+            else:
+                self._promised[oid] = "blob"
+        return dependencies
+
+    def _convert_one(self, obj: NativeObject) -> str:
+        if obj.type_name != "tree":
+            return super()._convert_one(obj)
+
+        entries = [
+            TreeEntry(
+                mode=mode,
+                name=name,
+                sha=self.converted.get(oid, ""),
+                native_oid=oid,
+            )
+            for mode, name, oid in self._parse_tree(obj.data)
+        ]
+        return self.store.write(TreeObject(entries, native_entries=True))
+
+    def import_oid(self, oid: str) -> str:
+        result = super().import_oid(oid)
+        resolved = {
+            native_oid: self.converted[native_oid]
+            for native_oid in self._tree_references
+            if native_oid in self.converted
+        }
+        update_promisor_state(
+            self.store.root.parent,
+            remote=self.remote,
+            filter_spec=self.filter_spec,
+            promised=self._promised,
+            resolved=resolved,
+        )
+        return result
