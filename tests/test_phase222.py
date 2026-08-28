@@ -26,8 +26,6 @@ class _FakeImporter:
 
 def _promisor_repo(tmp_path):
     repo = Repository.init(str(tmp_path / "repo"))
-    # Deliberately configure origin first. extensions.partialClone must still
-    # move it behind cache-like promisors during missing-object lookup.
     repo.add_remote("origin", "https://origin.example/repo.git")
     repo.add_remote("cache", "https://cache.example/repo.git")
     update_promisor_state(
@@ -126,7 +124,7 @@ def test_stale_primary_marker_does_not_block_working_cache(tmp_path, monkeypatch
     assert calls == ["https://cache.example/repo.git"]
 
 
-def test_without_primary_marker_phase221_configuration_order_is_preserved(tmp_path):
+def test_without_primary_marker_phase221_repository_order_is_preserved(tmp_path):
     repo = _promisor_repo(tmp_path)
     update_promisor_state(
         repo.pygit_dir,
@@ -134,9 +132,13 @@ def test_without_primary_marker_phase221_configuration_order_is_preserved(tmp_pa
         filter_spec="blob:none",
     )
 
+    # Phase221 derives this order from repo.list_remotes(). The historical JSON
+    # config writer sorts remote keys, so this fixture's established repository
+    # order is cache then origin. Phase222 must not change that when no primary
+    # marker exists.
     assert pm._ordered_promisor_remotes(repo, ("origin", "cache")) == (
-        "origin",
         "cache",
+        "origin",
     )
 
 
