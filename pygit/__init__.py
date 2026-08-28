@@ -21,6 +21,7 @@ from .promisor_store import install_promisor_store_support
 from .promisor_checkout import install_promisor_checkout_support
 from .promisor_reset import install_promisor_reset_support
 from .promisor_worktree import install_promisor_worktree_support
+from .promisor_checkout_paths import install_promisor_checkout_paths_support
 
 install_repository_merge_stage_support(Repository)
 install_repository_replay_stage_support(Repository)
@@ -29,6 +30,7 @@ install_promisor_store_support()
 install_promisor_checkout_support(Repository)
 install_promisor_reset_support(Repository)
 install_promisor_worktree_support(Repository)
+install_promisor_checkout_paths_support(Repository)
 
 from .plumbing import is_ancestor, list_refs, merge_bases
 from .graph_query import independent_commits, merge_bases_many, octopus_merge_bases
