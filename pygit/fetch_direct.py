@@ -1,8 +1,8 @@
 """One-shot fetches from an explicit smart-HTTP URL.
 
 A direct URL is not a named remote: it has no configured fetch refspec, no
-remote-tracking namespace, and no persistent per-remote metadata.  Objects are
-still imported into the SHA-256-native store and recorded in FETCH_HEAD.
+remote-tracking namespace, and no persistent per-remote metadata. Objects are
+still imported into the SHA-256-native store and may be recorded in FETCH_HEAD.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from .fetch_configured import (
 from .fetch_head import write_fetch_head
 from .fetch_policy import FetchRefspec, parse_fetch_refspec, source_is_excluded
 from .fetch_porcelain import _update_destination
-from .remote import Advertisement, SmartHttpClient
+from .remote import SmartHttpClient
 from .repo import Repository
 
 
@@ -66,14 +66,9 @@ def fetch_direct_url(
     refmap: Optional[Sequence[str]] = None,
     tags: Optional[bool] = None,
     append_fetch_head: bool = False,
+    write_fetch_head: bool = True,
 ) -> Dict[str, object]:
-    """Fetch from *url* without creating or consulting named-remote config.
-
-    With no command-line refspec Git fetches the remote HEAD into FETCH_HEAD.
-    Explicit source-only refspecs likewise update only FETCH_HEAD unless a
-    ``--refmap`` is supplied.  An explicit ``src:dst`` always owns its local
-    destination.
-    """
+    """Fetch from *url* without creating or consulting named-remote config."""
     if not is_direct_fetch_url(url):
         raise ValueError("direct fetch currently supports only http:// and https:// URLs")
     if refmap is not None and not refspecs:
@@ -124,9 +119,6 @@ def fetch_direct_url(
                     selected[refname] = oid
                     destinations[refname] = [(refname, False)]
 
-    # A URL fetch has no persistent remote identity. Re-downloading an already
-    # known graph is acceptable; imported objects deduplicate naturally by
-    # SHA-256 and no synthetic remote/native-map file is left behind.
     native_map: Dict[str, str] = {}
     known_by_native: Dict[str, str] = {}
     imported, object_count = _fetch_import_sources(
@@ -148,13 +140,14 @@ def fetch_direct_url(
         imported.update(followed)
         object_count += tag_objects
 
-    write_fetch_head(
-        repo.pygit_dir,
-        imported,
-        source=url,
-        mergeable=mergeable,
-        append=append_fetch_head,
-    )
+    if write_fetch_head:
+        write_fetch_head(
+            repo.pygit_dir,
+            imported,
+            source=url,
+            mergeable=mergeable,
+            append=append_fetch_head,
+        )
     return {
         "remote": url,
         "default_branch": None,
