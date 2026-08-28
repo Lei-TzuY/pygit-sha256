@@ -258,6 +258,7 @@ def clone_partial_repository(
     repo._write_config(config)
 
     repo.config_set("protocol", "version", "2")
+    repo.config_set("extensions", "partialClone", "origin")
     repo.config_set("remote", "origin.promisor", "true")
     repo.config_set("remote", "origin.partialCloneFilter", filter_spec)
 
