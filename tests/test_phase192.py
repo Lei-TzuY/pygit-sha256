@@ -93,3 +93,13 @@ def test_dry_run_option_after_separator_is_left_as_refspec(monkeypatch):
 
     assert dry_cli.run_fetch(["origin", "--", "--dry-run"]) == 0
     assert seen == ["origin", "--", "--dry-run"]
+
+
+def test_dry_run_fetch_head_suppression_stays_before_separator(tmp_path, monkeypatch):
+    repo = Repository.init(str(tmp_path / "repo"))
+    monkeypatch.chdir(repo.worktree)
+    seen = []
+    monkeypatch.setattr(dry_cli, "_run_fetch", lambda argv: seen.extend(argv) or 0)
+
+    assert dry_cli.run_fetch(["--dry-run", "origin", "--", "topic"]) == 0
+    assert seen == ["origin", "--no-write-fetch-head", "--", "topic"]
