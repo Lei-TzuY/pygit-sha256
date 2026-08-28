@@ -50,6 +50,29 @@ def _force_kwargs(force: bool) -> dict:
     return {"force": True} if force else {}
 
 
+def _is_quiet(args) -> bool:
+    return getattr(args, "verbosity", "normal") == "quiet"
+
+
+def _is_verbose(args) -> bool:
+    return getattr(args, "verbosity", "normal") == "verbose"
+
+
+def _print_verbose_refs(remote: str, result: dict) -> None:
+    """Emit stable ref diagnostics, including refs that are already up to date."""
+    for ref_name, oid in sorted(result.get("refs", {}).items()):
+        print(f" {str(oid)[:12]} {ref_name} from {remote}")
+
+
+def _print_fetch_summary(remote: str, result: dict, args) -> None:
+    if _is_quiet(args):
+        return
+    suffix = f"; pruned {len(result['pruned'])} refs" if result.get("pruned") else ""
+    print(f"Fetched {len(result.get('refs', {}))} refs from {remote}{suffix}")
+    if _is_verbose(args):
+        _print_verbose_refs(remote, result)
+
+
 def _fetch_named(
     repo,
     remote: str,
@@ -93,8 +116,9 @@ def _run_many(repo, remotes, args) -> int:
         return 0
 
     def fetch_one(remote: str, aggregate_append: bool) -> None:
-        print(f"Fetching {remote}")
-        _fetch_named(
+        if not _is_quiet(args):
+            print(f"Fetching {remote}")
+        result = _fetch_named(
             repo,
             remote,
             append=args.append or aggregate_append,
@@ -104,6 +128,8 @@ def _run_many(repo, remotes, args) -> int:
             prune_tags=args.prune_tags,
             tags=args.tags,
         )
+        if _is_verbose(args):
+            _print_verbose_refs(remote, result)
 
     results = run_multi_fetch(repo, remotes, fetch_one)
     failures = [result for result in results if not result.ok]
@@ -134,6 +160,23 @@ def run_fetch(argv: Sequence[str]) -> int:
         "--force",
         action="store_true",
         help="force local ref updates that Git permits to be forced",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        dest="verbosity",
+        action="store_const",
+        const="quiet",
+        default="normal",
+        help="suppress successful fetch status and progress output",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="verbosity",
+        action="store_const",
+        const="verbose",
+        help="show fetched ref diagnostics, including up-to-date refs",
     )
     fetch_head_group = parser.add_mutually_exclusive_group()
     fetch_head_group.add_argument(
@@ -302,6 +345,5 @@ def run_fetch(argv: Sequence[str]) -> int:
                 **_force_kwargs(args.force),
             )
 
-    suffix = f"; pruned {len(result['pruned'])} refs" if result["pruned"] else ""
-    print(f"Fetched {len(result['refs'])} refs from {remote}{suffix}")
+    _print_fetch_summary(remote, result, args)
     return 0
