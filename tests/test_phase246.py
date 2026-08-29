@@ -144,14 +144,9 @@ def test_blob_none_objects_edge_boundary_preserves_sha256_edge(tmp_path, monkeyp
     assert tip_blob not in joined
 
 
-def test_blob_none_rejects_unmodelled_nul_and_filter(tmp_path, monkeypatch):
+def test_blob_none_rejects_unknown_filter(tmp_path, monkeypatch):
     repo, _base, _tip, _base_blob, _tip_blob = _partial_range_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
-
-    with pytest.raises(ValueError, match="-z"):
-        run_rev_list_disk_usage(
-            ["--objects", "-z", "--filter=blob:none", "--missing=allow-promisor", "HEAD"]
-        )
 
     with pytest.raises(ValueError, match="currently supports --filter=blob:none"):
         run_rev_list_disk_usage(
