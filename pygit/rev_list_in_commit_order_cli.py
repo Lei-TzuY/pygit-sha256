@@ -1,4 +1,4 @@
-"""Git-style ``rev-list --objects --in-commit-order`` traversal.
+"""Git-style ``rev-list --objects* --in-commit-order`` traversal.
 
 The existing promisor object inventory deliberately emits all selected commits
 before walking their snapshots. Git's ``--in-commit-order`` mode changes only
@@ -6,11 +6,11 @@ that presentation order: each selected commit is emitted immediately before the
 first tree/blob objects reached from that commit, while object identity remains
 globally deduplicated across the walk.
 
-Phase260 composes that ordering with ``--boundary``. Selected and boundary commit
-frames come from the existing metadata-only boundary planner; each frame is
-followed immediately by the first tree/blob objects reached from its snapshot.
+Phase260 composes that ordering with ``--boundary``. Phase261 additionally
+composes it with ``--objects-edge``: excluded edge commits are emitted first,
+then selected commits and their first-seen snapshot objects remain interleaved.
 Explicit negative-revision closure still subtracts snapshot objects, but never
-removes the top-level selected/boundary commit frame itself.
+removes top-level selected/boundary presentation frames.
 """
 
 from __future__ import annotations
@@ -34,8 +34,6 @@ def _parse(argv: Sequence[str]):
 
     if "-z" in argv:
         raise ValueError("rev-list --in-commit-order with -z is not yet supported")
-    if "--objects-edge" in argv:
-        raise ValueError("rev-list --in-commit-order with --objects-edge is not yet supported")
     if any(arg == "--disk-usage" or arg.startswith("--disk-usage=") for arg in argv):
         raise ValueError("rev-list --in-commit-order with --disk-usage is not yet supported")
     if any(
@@ -46,8 +44,15 @@ def _parse(argv: Sequence[str]):
         raise ValueError("rev-list --in-commit-order with --filter is not yet supported")
 
     object_modes = [arg for arg in argv if arg in {"--objects", "--objects-edge"}]
-    if object_modes != ["--objects"]:
-        raise ValueError("rev-list --in-commit-order currently requires exactly one --objects")
+    if len(object_modes) != 1:
+        raise ValueError(
+            "rev-list --in-commit-order currently requires exactly one of --objects or --objects-edge"
+        )
+    objects_edge = object_modes[0] == "--objects-edge"
+    if objects_edge and "--boundary" in argv:
+        raise ValueError(
+            "rev-list --in-commit-order with --objects-edge and --boundary is not yet supported"
+        )
 
     missing = [arg for arg in argv if arg.startswith("--missing=")]
     if len(missing) > 1:
@@ -63,11 +68,17 @@ def _parse(argv: Sequence[str]):
     else:
         mode = "ordinary"
 
+    # Reuse the mature inventory parser with an --objects projection, then keep
+    # objects-edge presentation local to this adapter. This avoids inheriting
+    # older generic parser guards for print-info + objects-edge while preserving
+    # exactly the same revision-selection controls.
     projected: list[str] = []
     for arg in argv:
         if arg == _IN_COMMIT_ORDER:
             continue
-        if arg == "--missing=print":
+        if arg == "--objects-edge":
+            projected.append("--objects")
+        elif arg == "--missing=print":
             projected.append("--missing=print-info")
         else:
             projected.append(arg)
@@ -79,6 +90,7 @@ def _parse(argv: Sequence[str]):
         raise RuntimeError("promisor rev-list parser declined in-commit-order projection")
     parsed = dict(parsed)
     parsed["in_commit_order_missing_mode"] = mode
+    parsed["in_commit_order_objects_edge"] = objects_edge
     return parsed
 
 
@@ -208,6 +220,7 @@ def _render(
     parsed,
     mode: str,
     boundary_oids: frozenset[str],
+    edges: Sequence[str] = (),
 ) -> int:
     missing = tuple(entry for entry in entries if entry.missing)
     if mode == "ordinary" and missing:
@@ -215,6 +228,12 @@ def _render(
         raise RuntimeError(
             f"missing object {native}; use --missing=allow-promisor, print, or print-info"
         )
+
+    # Native Git emits excluded object edges before the in-commit-order object
+    # stream, even with --reverse and --count. Edge records are presentation
+    # metadata and do not contribute to the present-object count.
+    for oid in edges:
+        print(f"-{oid}")
 
     present_count = 0
     for entry in entries:
@@ -247,9 +266,18 @@ def try_run_rev_list_in_commit_order(argv: Sequence[str]) -> Optional[int]:
 
     repo = _promisor._find_repo()
     entries, boundary_oids = _ordered_inventory(repo, parsed)
+    edges: Tuple[str, ...] = ()
+    if parsed["in_commit_order_objects_edge"]:
+        edges = _promisor._promisor_object_edges(
+            repo,
+            parsed["revisions"],
+            all_refs=parsed["all_refs"],
+            first_parent=parsed["first_parent"],
+        )
     return _render(
         entries,
         parsed=parsed,
         mode=parsed["in_commit_order_missing_mode"],
         boundary_oids=boundary_oids,
+        edges=edges,
     )
