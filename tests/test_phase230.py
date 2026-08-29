@@ -77,7 +77,7 @@ def _install_fetches(monkeypatch, blobs, blob_oids, many_calls, one_calls):
 
     def fake_one(url, oid, *, server_options=()):
         one_calls.append((url, oid, tuple(server_options)))
-        return NativeObject("blob", by_oid[oid], oid)
+        return {oid: NativeObject("blob", by_oid[oid], oid)}
 
     monkeypatch.setattr("pygit.promisor_materialize._fetch_native_objects", fake_many)
     monkeypatch.setattr("pygit.promisor_materialize._fetch_native_object", fake_one)
@@ -148,12 +148,15 @@ def test_buffered_flush_boundaries_do_not_prefetch_future_group(tmp_path, monkey
     assert set(many_calls[0][1]) == {blob_oids["b"], blob_oids["c"]}
 
 
-def test_invalid_blob_peel_does_not_speculatively_fetch(tmp_path, monkeypatch):
-    repo, _blobs, blob_oids = _partial_cat_file_repo(tmp_path)
+def test_incompatible_peel_is_not_added_to_phase230_prefetch(tmp_path, monkeypatch):
+    repo, blobs, blob_oids = _partial_cat_file_repo(tmp_path)
+    many_calls = []
+    one_calls = []
+    _install_fetches(monkeypatch, blobs, blob_oids, many_calls, one_calls)
 
     monkeypatch.setattr(
         "pygit.promisor_cat_file.materialize_promised_objects",
-        lambda *args, **kwargs: pytest.fail("invalid tree peel must not prefetch blob"),
+        lambda *args, **kwargs: pytest.fail("incompatible peel must not enter Phase230 prefetch"),
     )
 
     chunks = list(
@@ -165,8 +168,14 @@ def test_invalid_blob_peel_does_not_speculatively_fetch(tmp_path, monkeypatch):
     )
 
     assert chunks == [b"HEAD:a.txt^{tree} missing\n"]
+    # The historical resolver first resolves HEAD:a.txt and therefore performs
+    # its established single-object lazy fetch before rejecting ^{tree}.  The
+    # Phase230 planner itself deliberately did not add a speculative prefetch.
+    assert many_calls == []
+    assert len(one_calls) == 1
+    assert one_calls[0][1] == blob_oids["a"]
     state = read_promisor_state(repo.pygit_dir)
-    assert blob_oids["a"] in state["promised"]
+    assert blob_oids["a"] in state["resolved"]
 
 
 def test_nonbuffered_batch_command_stays_on_historical_path(tmp_path, monkeypatch):
