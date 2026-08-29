@@ -12,7 +12,11 @@ and finally the count. Phase255 extends the same structured ordering to
 ``--boundary`` and includes boundary snapshots when computing blob omissions.
 It also corrects an earlier compatibility assumption: Git 2.55's
 ``object:type`` filter does not populate the omitted-object set, so pygit must
-not invent ``~`` records for objects merely hidden by that filter.
+not invent ``~`` records for objects merely hidden by that filter. Phase256
+composes the same line-oriented omission channel with ``--objects-edge``:
+explicit exclusion edges remain leading ``-<local SHA-256>`` traversal records,
+while filtered blobs from the selected object closure are emitted later through
+the independent ``~<local SHA-256>`` omission channel.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ from . import rev_list_promisor_cli as _promisor
 
 
 _FILTER_PRINT_OMITTED = "--filter-print-omitted"
-_DEFERRED_WITH_OMITTED = {"-z", "--objects-edge"}
+_DEFERRED_WITH_OMITTED = {"-z"}
 
 
 def _omitted_local_oids(repo, argv: Sequence[str], *, spec: str) -> tuple[str, ...]:
@@ -42,7 +46,10 @@ def _omitted_local_oids(repo, argv: Sequence[str], *, spec: str) -> tuple[str, .
     For ``blob:none``, boundary traversal needs the same snapshot roots as the
     underlying filter adapter. Otherwise blobs that are visited only because
     ``--boundary`` exposes an older boundary snapshot would be silently absent
-    from the omission set.
+    from the omission set. ``--objects-edge`` needs no extra inventory roots:
+    its ``-<oid>`` records advertise excluded commits as a presentation channel,
+    while the normal revision grammar already keeps their object closure out of
+    the selected inventory.
 
     The textual omitted-object channel is a repository object-id channel. If an
     unresolved promise itself would have to be reported as omitted, pygit fails
@@ -110,9 +117,10 @@ def _partition_projected_lines(
 
     The underlying metadata-only filter path already computes the correct
     filtered integer. Git's rev-list source emits omitted objects after the
-    traversal (including boundary records) but before missing-object diagnostics
-    and the final ``--count`` line, so this helper only rearranges presentation;
-    it does not recompute selection or count semantics.
+    traversal (including object-edge and boundary records) but before
+    missing-object diagnostics and the final ``--count`` line, so this helper
+    only rearranges presentation; it does not recompute selection or count
+    semantics.
     """
 
     projected = list(lines)
