@@ -163,13 +163,10 @@ def _parse_allow_promisor(argv: Sequence[str]):
         raise ValueError(
             f"--boundary with --objects-edge is not yet supported with --missing={missing_action}"
         )
-    if missing_action == "print-info":
-        if objects_edge:
-            raise ValueError(
-                "--objects-edge is not yet supported with --missing=print-info"
-            )
-        if count:
-            raise ValueError("--count is not yet supported with --missing=print-info")
+    if missing_action == "print-info" and objects_edge:
+        raise ValueError(
+            "--objects-edge is not yet supported with --missing=print-info"
+        )
 
     return {
         "missing_action": missing_action,
@@ -296,25 +293,35 @@ def _print_present(entry: PromisorObjectInventoryEntry, *, no_object_names: bool
         print(f"{entry.oid} {entry.path}")
 
 
-def _print_info_snapshot_entries(
+def _render_print_info_entries(
     entries: Sequence[PromisorObjectInventoryEntry],
     *,
     no_object_names: bool,
-) -> None:
-    """Render tree/object closure while excluding top-level selected commits.
+    emit_present: bool,
+    skip_top_level_commits: bool,
+) -> int:
+    """Render print-info entries and return the present-object count.
 
-    Boundary commit ids are rendered by the boundary presentation stream.  The
-    inventory still contains the selected commit records used to seed that
-    stream, so suppress only commit entries with no pathname.  Path-bearing
-    commit objects (for example gitlinks) remain ordinary snapshot objects.
+    ``--count`` in native Git's ``--missing=print`` framing still emits missing
+    records, then prints a final count of present objects only. ``print-info`` is
+    the same missing mode with richer metadata, so callers can suppress present
+    object lines while retaining ``?`` records and use the returned count.
+
+    Boundary presentation owns selected/boundary commit framing, so its snapshot
+    walk suppresses only top-level commit inventory records. Path-bearing commit
+    objects such as gitlinks remain ordinary snapshot objects and are counted.
     """
+    present_count = 0
     for entry in entries:
-        if entry.type_name == "commit" and entry.path is None:
+        if skip_top_level_commits and entry.type_name == "commit" and entry.path is None:
             continue
         if entry.missing:
             print(_missing_print_info(entry))
-        else:
+            continue
+        present_count += 1
+        if emit_present:
             _print_present(entry, no_object_names=no_object_names)
+    return present_count
 
 
 def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
@@ -323,7 +330,11 @@ def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
     Unprefixed present-object lines always carry repository-visible SHA-256 ids.
     Under ``print-info`` only, ``?`` lines are explicitly missing/native
     transport identities and may therefore carry upstream SHA-1 ids together
-    with containing-tree path/type metadata.  No surrogate SHA-256 is invented.
+    with containing-tree path/type metadata. No surrogate SHA-256 is invented.
+
+    With ``--count``, print-info preserves Git's missing-object framing: missing
+    records are still printed, while present object records are suppressed and a
+    final numeric count reports only the present objects that would be listed.
     """
 
     parsed = _parse_allow_promisor(argv)
@@ -369,19 +380,34 @@ def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
 
     if parsed["missing_action"] == "print-info":
         if parsed["boundary"]:
+            if parsed["count"]:
+                snapshot_present = _render_print_info_entries(
+                    entries,
+                    no_object_names=parsed["no_object_names"],
+                    emit_present=False,
+                    skip_top_level_commits=True,
+                )
+                print(len(boundary_commits) + snapshot_present)
+                return 0
+
             for oid, is_boundary in boundary_commits:
                 print(f"-{oid}" if is_boundary else oid)
-            _print_info_snapshot_entries(
+            _render_print_info_entries(
                 entries,
                 no_object_names=parsed["no_object_names"],
+                emit_present=True,
+                skip_top_level_commits=True,
             )
             return 0
 
-        for entry in entries:
-            if entry.missing:
-                print(_missing_print_info(entry))
-            else:
-                _print_present(entry, no_object_names=parsed["no_object_names"])
+        present_count = _render_print_info_entries(
+            entries,
+            no_object_names=parsed["no_object_names"],
+            emit_present=not parsed["count"],
+            skip_top_level_commits=False,
+        )
+        if parsed["count"]:
+            print(present_count)
         return 0
 
     present = [entry for entry in entries if entry.oid is not None]
