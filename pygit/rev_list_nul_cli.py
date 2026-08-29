@@ -116,10 +116,36 @@ def _emit_entries(
             _emit_present(entry, no_object_names=no_object_names)
 
 
+def _filter_entries_by_object_type(
+    entries: Sequence[PromisorObjectInventoryEntry],
+    *,
+    requested: str,
+    provided_oids: frozenset[str],
+) -> tuple[PromisorObjectInventoryEntry, ...]:
+    """Apply Git's ``object:type`` filter before NUL record emission.
+
+    Explicitly provided positive roots bypass object filters by default. Missing
+    promises are classified from inventory metadata and therefore never need to
+    be materialized just to decide whether they survive the filter.
+    """
+
+    kept: list[PromisorObjectInventoryEntry] = []
+    for entry in entries:
+        local_oid = (entry.oid or "").lower()
+        if entry.type_name == "commit" and entry.path is None and local_oid in provided_oids:
+            kept.append(entry)
+            continue
+        if entry.type_name == requested:
+            kept.append(entry)
+    return tuple(kept)
+
+
 def try_run_rev_list_nul(
     argv: Sequence[str],
     *,
     omit_blobs: bool = False,
+    object_type: Optional[str] = None,
+    provided_oids: frozenset[str] = frozenset(),
 ) -> Optional[int]:
     """Handle Git-style NUL-framed ``rev-list --objects`` traversal.
 
@@ -131,13 +157,19 @@ def try_run_rev_list_nul(
     so newlines are preserved instead of quoted/truncated.
 
     ``omit_blobs`` is a structured presentation filter used by Phase248's
-    ``--filter=blob:none`` adapter. Filtering happens on inventory type metadata
-    before any NUL record is emitted, so both present and promised blobs vanish
-    without parsing or rewriting the record protocol.
+    ``--filter=blob:none`` adapter. ``object_type`` composes the same structured
+    inventory with Git's ``object:type=(commit|tree|blob)`` semantics. Filtering
+    happens before any NUL record is emitted, so nonmatching promised objects
+    disappear without fetches and explicitly provided commit roots remain
+    visible even when their type differs from the requested filter.
     """
     parsed = _parse(argv)
     if parsed is None:
         return None
+    if omit_blobs and object_type is not None:
+        raise ValueError("rev-list NUL adapter accepts only one structured object filter")
+    if object_type is not None and object_type not in {"commit", "tree", "blob"}:
+        raise ValueError("rev-list NUL object:type filter supports commit, tree, or blob")
 
     repo = _promisor._find_repo()
     boundary_commits = ()
@@ -168,10 +200,21 @@ def try_run_rev_list_nul(
     )
     if omit_blobs:
         entries = tuple(entry for entry in entries if entry.type_name != "blob")
+    elif object_type is not None:
+        entries = _filter_entries_by_object_type(
+            entries,
+            requested=object_type,
+            provided_oids=provided_oids,
+        )
 
     mode = parsed["nul_missing_mode"]
     if parsed["boundary"]:
         for oid, is_boundary in boundary_commits:
+            if object_type is not None:
+                if is_boundary and object_type != "commit":
+                    continue
+                if not is_boundary and object_type != "commit" and oid.lower() not in provided_oids:
+                    continue
             if is_boundary:
                 _emit_fields(oid.lower(), "boundary=yes")
             else:
