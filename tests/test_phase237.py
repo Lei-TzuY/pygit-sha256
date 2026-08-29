@@ -159,10 +159,6 @@ def test_rev_list_print_info_ordinary_repo_stays_sha256_only(
     "args, message",
     [
         (
-            ["--objects", "--boundary", "--missing=print-info", "HEAD"],
-            "--boundary is not yet supported",
-        ),
-        (
             ["--objects-edge", "--missing=print-info", "HEAD"],
             "--objects-edge is not yet supported",
         ),
