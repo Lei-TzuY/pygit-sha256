@@ -1,15 +1,16 @@
 """Git-style ``rev-list --objects --in-commit-order`` traversal.
 
 The existing promisor object inventory deliberately emits all selected commits
-before walking their snapshots.  Git's ``--in-commit-order`` mode changes only
+before walking their snapshots. Git's ``--in-commit-order`` mode changes only
 that presentation order: each selected commit is emitted immediately before the
 first tree/blob objects reached from that commit, while object identity remains
 globally deduplicated across the walk.
 
-Phase259 keeps this mode independent from boundary, object-edge, NUL, filter,
-and disk-usage framing.  Ordinary repositories and the existing metadata-only
-promisor missing modes share the same ordered inventory and never materialize a
-promised object merely to establish traversal order.
+Phase260 composes that ordering with ``--boundary``. Selected and boundary commit
+frames come from the existing metadata-only boundary planner; each frame is
+followed immediately by the first tree/blob objects reached from its snapshot.
+Explicit negative-revision closure still subtracts snapshot objects, but never
+removes the top-level selected/boundary commit frame itself.
 """
 
 from __future__ import annotations
@@ -33,8 +34,6 @@ def _parse(argv: Sequence[str]):
 
     if "-z" in argv:
         raise ValueError("rev-list --in-commit-order with -z is not yet supported")
-    if "--boundary" in argv:
-        raise ValueError("rev-list --in-commit-order with --boundary is not yet supported")
     if "--objects-edge" in argv:
         raise ValueError("rev-list --in-commit-order with --objects-edge is not yet supported")
     if any(arg == "--disk-usage" or arg.startswith("--disk-usage=") for arg in argv):
@@ -83,8 +82,20 @@ def _parse(argv: Sequence[str]):
     return parsed
 
 
-def _ordered_inventory(repo, parsed) -> Tuple[PromisorObjectInventoryEntry, ...]:
-    """Build commit/snapshot-interleaved inventory with global object dedupe."""
+def _commit_frames(repo, parsed) -> Tuple[Tuple[str, bool], ...]:
+    """Return selected/boundary commit frames in final presentation order."""
+
+    if parsed["boundary"]:
+        return _promisor._promisor_boundary_commits(
+            repo,
+            parsed["revisions"],
+            all_refs=parsed["all_refs"],
+            first_parent=parsed["first_parent"],
+            topo_order=parsed["topo_order"],
+            reverse=parsed["reverse"],
+            skip=parsed["skip"],
+            max_count=parsed["max_count"],
+        )
 
     commits = rev_list(
         repo,
@@ -97,17 +108,36 @@ def _ordered_inventory(repo, parsed) -> Tuple[PromisorObjectInventoryEntry, ...]
         max_count=parsed["max_count"],
         left_right=False,
     )
-    if not commits:
-        return ()
+    return tuple((entry.oid.lower(), False) for entry in commits)
+
+
+def _ordered_inventory(
+    repo, parsed
+) -> Tuple[Tuple[PromisorObjectInventoryEntry, ...], frozenset[str]]:
+    """Build commit/snapshot-interleaved inventory with global object dedupe.
+
+    Boundary commit frames are presentation records and therefore survive
+    explicit negative-revision closure subtraction. Snapshot objects, including
+    path-bearing gitlink commits, remain subject to the normal exclusion closure.
+    """
+
+    frames = _commit_frames(repo, parsed)
+    if not frames:
+        return (), frozenset()
 
     output: list[PromisorObjectInventoryEntry] = []
     seen: set[tuple[str, str]] = set()
+    framed_oids: set[str] = set()
+    boundary_oids: set[str] = set()
 
-    for selected in commits:
-        oid = selected.oid.lower()
+    for oid, is_boundary in frames:
+        oid = oid.lower()
         obj = repo.store.read(oid)
         if not isinstance(obj, CommitObject):
             raise RuntimeError(f"Object {oid} in rev-list traversal is not a commit")
+        framed_oids.add(oid)
+        if is_boundary:
+            boundary_oids.add(oid)
         _inventory._append_unique(
             output,
             seen,
@@ -136,9 +166,19 @@ def _ordered_inventory(repo, parsed) -> Tuple[PromisorObjectInventoryEntry, ...]
                 first_parent=parsed["first_parent"],
             )
         }
-        output = [entry for entry in output if _inventory._key(entry) not in excluded]
+        output = [
+            entry
+            for entry in output
+            if (
+                entry.type_name == "commit"
+                and entry.path is None
+                and entry.oid is not None
+                and entry.oid.lower() in framed_oids
+            )
+            or _inventory._key(entry) not in excluded
+        ]
 
-    return tuple(output)
+    return tuple(output), frozenset(boundary_oids)
 
 
 def _plain_missing(entry: PromisorObjectInventoryEntry) -> str:
@@ -147,7 +187,28 @@ def _plain_missing(entry: PromisorObjectInventoryEntry) -> str:
     return f"?{entry.native_oid.lower()}"
 
 
-def _render(entries: Sequence[PromisorObjectInventoryEntry], *, parsed, mode: str) -> int:
+def _print_present_ordered(
+    entry: PromisorObjectInventoryEntry,
+    *,
+    parsed,
+    boundary_oids: frozenset[str],
+) -> None:
+    if entry.oid is None:
+        raise RuntimeError("present inventory entry has no local SHA-256 identity")
+    oid = entry.oid.lower()
+    if entry.type_name == "commit" and entry.path is None and oid in boundary_oids:
+        print(f"-{oid}")
+        return
+    _promisor._print_present(entry, no_object_names=parsed["no_object_names"])
+
+
+def _render(
+    entries: Sequence[PromisorObjectInventoryEntry],
+    *,
+    parsed,
+    mode: str,
+    boundary_oids: frozenset[str],
+) -> int:
     missing = tuple(entry for entry in entries if entry.missing)
     if mode == "ordinary" and missing:
         native = missing[0].native_oid or "unknown"
@@ -155,42 +216,25 @@ def _render(entries: Sequence[PromisorObjectInventoryEntry], *, parsed, mode: st
             f"missing object {native}; use --missing=allow-promisor, print, or print-info"
         )
 
-    if mode == "print-info":
-        present_count = _promisor._render_print_info_entries(
-            entries,
-            no_object_names=parsed["no_object_names"],
-            emit_present=not parsed["count"],
-            skip_top_level_commits=False,
-        )
-        if parsed["count"]:
-            print(present_count)
-        return 0
-
-    if mode == "print":
-        present_count = 0
-        for entry in entries:
-            if entry.missing:
+    present_count = 0
+    for entry in entries:
+        if entry.missing:
+            if mode == "print-info":
+                print(_promisor._missing_print_info(entry))
+            elif mode == "print":
                 print(_plain_missing(entry))
-                continue
-            present_count += 1
-            if not parsed["count"]:
-                _promisor._print_present(
-                    entry,
-                    no_object_names=parsed["no_object_names"],
-                )
-        if parsed["count"]:
-            print(present_count)
-        return 0
+            continue
 
-    present = tuple(entry for entry in entries if not entry.missing)
+        present_count += 1
+        if not parsed["count"]:
+            _print_present_ordered(
+                entry,
+                parsed=parsed,
+                boundary_oids=boundary_oids,
+            )
+
     if parsed["count"]:
-        print(len(present))
-        return 0
-    for entry in present:
-        _promisor._print_present(
-            entry,
-            no_object_names=parsed["no_object_names"],
-        )
+        print(present_count)
     return 0
 
 
@@ -202,9 +246,10 @@ def try_run_rev_list_in_commit_order(argv: Sequence[str]) -> Optional[int]:
         return None
 
     repo = _promisor._find_repo()
-    entries = _ordered_inventory(repo, parsed)
+    entries, boundary_oids = _ordered_inventory(repo, parsed)
     return _render(
         entries,
         parsed=parsed,
         mode=parsed["in_commit_order_missing_mode"],
+        boundary_oids=boundary_oids,
     )
