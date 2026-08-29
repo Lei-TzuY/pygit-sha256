@@ -88,7 +88,7 @@ def test_blob_none_objects_edge_count_keeps_edge_and_omissions_out_of_count(
 def test_object_type_objects_edge_preserves_edge_and_native_empty_omit_set(
     tmp_path, monkeypatch, capsys
 ):
-    repo, (c1, _c2, _c3), _blobs = _changing_three_commit_repo(tmp_path)
+    repo, (c1, _c2, c3), _blobs = _changing_three_commit_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
     capsys.readouterr()
 
@@ -106,5 +106,9 @@ def test_object_type_objects_edge_preserves_edge_and_native_empty_omit_set(
     assert f"-{c1}" in tokens
     assert not any(token.startswith("~") for token in tokens)
     kept = [token for token in tokens if not token.startswith(("-", "?", "~"))]
-    assert kept
-    assert all(repo.store.read(token).type_name == b"tree" for token in kept)
+    assert c3 in kept
+    for token in kept:
+        if token == c3:
+            assert repo.store.read(token).type_name == b"commit"
+        else:
+            assert repo.store.read(token).type_name == b"tree"
