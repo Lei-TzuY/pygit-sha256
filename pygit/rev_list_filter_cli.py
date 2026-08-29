@@ -1,17 +1,16 @@
 """Metadata-only ``rev-list --filter=blob:none`` adapter.
 
 The promisor-aware rev-list paths already know how to traverse partial-clone
-metadata without materializing promised blobs.  This adapter composes Git's
+metadata without materializing promised blobs. This adapter composes Git's
 ``blob:none`` object filter with those paths instead of falling back to the
 historical object walker, where touching a foreign tree entry could trigger a
 lazy fetch.
 
 Phase246 introduced line-oriented filtering for the missing-object traversal.
-Phase247 extends the same projection to ``--count``.  Count mode deliberately
-runs the established uncounted traversal first, filters that exact object
-stream, preserves advertised object-edge and missing records, then counts only
-the filtered present objects.  This mirrors native Git while keeping boundary
-and edge selection authoritative in the existing rev-list layers.
+Phase247 extends the same projection to ``--count`` without reimplementing
+boundary or object-edge semantics: the established count path remains
+canonical, while a second metadata-only inspection traversal determines how
+many already-present blobs must be subtracted from that authoritative count.
 """
 
 from __future__ import annotations
@@ -65,10 +64,26 @@ def _run_projected(argv: Sequence[str]) -> tuple[int, tuple[str, ...]]:
     return code, tuple(capture.getvalue().splitlines())
 
 
-def _without_count(argv: Sequence[str]) -> list[str]:
-    """Return the same traversal request with count presentation removed."""
+def _inspection_projection(argv: Sequence[str]) -> list[str]:
+    """Expose the complete selected/boundary object closure for blob counting.
 
-    return [arg for arg in argv if arg != "--count"]
+    The Phase240/243 ``--count`` implementations intentionally suppress normal
+    present-object records and may synthesize boundary counts directly from the
+    inventory.  Therefore filtered count cannot be reconstructed from the
+    textual count output alone.  For inspection only, remove ``--count`` and
+    project ``--objects-edge`` to ``--objects``.  Revision exclusions remain
+    unchanged, while Phase236's boundary snapshot-root planner stays active.
+    """
+
+    result: list[str] = []
+    for arg in argv:
+        if arg == "--count":
+            continue
+        if arg == "--objects-edge":
+            result.append("--objects")
+        else:
+            result.append(arg)
+    return result
 
 
 def _is_blob_line(repo, line: str) -> bool:
@@ -89,68 +104,46 @@ def _is_blob_line(repo, line: str) -> bool:
         return isinstance(repo.store.read(oid), BlobObject)
     except (FileNotFoundError, KeyError):
         # The metadata-only --missing paths should never expose a missing local
-        # SHA-256 as a present record.  Keep the line so the downstream
-        # integrity semantics remain visible instead of silently hiding damage.
+        # SHA-256 as a present record. Keep the line so downstream integrity
+        # semantics remain visible instead of silently hiding damage.
         return False
 
 
-def _explicit_object_edges(repo, argv: Sequence[str]) -> frozenset[str]:
-    """Return explicit ``--objects-edge`` commits for count classification.
+def _present_blob_count(repo, lines: Sequence[str]) -> int:
+    """Count already-local blobs which contribute to the unfiltered integer."""
 
-    A leading ``-`` record is not sufficient to identify an object edge: under
-    ``--reverse --boundary`` a genuine limit-induced boundary may itself be the
-    first output record and must still contribute to the object count.  Reuse
-    Phase234's metadata-only edge planner so only actual exclusion edges are
-    removed from the final count.
-    """
-
-    if "--objects-edge" not in argv:
-        return frozenset()
-
-    if "--missing=print" in argv:
-        parse_argv = _missing_print._objects_projection(argv, plain=True)
-    elif "--missing=print-info" in argv:
-        parse_argv = _missing_print._objects_projection(argv, plain=False)
-    else:
-        parse_argv = ["--objects" if arg == "--objects-edge" else arg for arg in argv]
-
-    parsed = _promisor._parse_allow_promisor(parse_argv)
-    if parsed is None:
-        raise RuntimeError("promisor parser declined blob:none object-edge projection")
-
-    return frozenset(
-        _promisor._promisor_object_edges(
-            repo,
-            parsed["revisions"],
-            all_refs=parsed["all_refs"],
-            first_parent=parsed["first_parent"],
-        )
+    return sum(
+        1
+        for line in lines
+        if not line.startswith("?") and _is_blob_line(repo, line)
     )
 
 
-def _render_filtered_count(lines: Sequence[str], *, edge_oids: frozenset[str]) -> None:
-    """Render non-count records and print the filtered present-object count."""
+def _render_adjusted_count(
+    repo,
+    count_lines: Sequence[str],
+    inspection_lines: Sequence[str],
+) -> None:
+    """Filter preserved count records and subtract present blobs from the tail."""
 
-    present_count = 0
-    for line in lines:
-        if line.startswith("?"):
-            # Git's missing=print family keeps missing records visible under
-            # --count, but missing objects do not contribute to the integer.
+    if not count_lines:
+        raise RuntimeError("rev-list count projection produced no output")
+    try:
+        raw_count = int(count_lines[-1])
+    except ValueError as exc:
+        raise RuntimeError("rev-list count projection did not end with an integer") from exc
+
+    adjusted = raw_count - _present_blob_count(repo, inspection_lines)
+    if adjusted < 0:
+        raise RuntimeError("blob:none subtraction exceeded the projected object count")
+
+    # Under --count, Git still advertises object edges and print-family missing
+    # records. Remove only blob promises from that framing; explicit edges and
+    # non-blob missing records remain authoritative from the existing renderer.
+    for line in count_lines[:-1]:
+        if not _is_blob_line(repo, line):
             print(line)
-            continue
-
-        token = line.split(None, 1)[0] if line else ""
-        if token.startswith("-") and token[1:].lower() in edge_oids:
-            # --objects-edge advertises excluded commits even under --count;
-            # the excluded edge itself is not part of the selected object set.
-            print(line)
-            continue
-
-        # Selected commits, trees, path-bearing commit objects, and genuine
-        # boundary commits are present objects after blob:none filtering.
-        present_count += 1
-
-    print(present_count)
+    print(adjusted)
 
 
 def try_run_rev_list_filter(argv: Sequence[str]) -> Optional[int]:
@@ -161,23 +154,33 @@ def try_run_rev_list_filter(argv: Sequence[str]) -> Optional[int]:
 
     projected = _project(argv)
     count = "--count" in projected
-    traversal_argv = _without_count(projected) if count else projected
-    code, lines = _run_projected(traversal_argv)
-    repo = _promisor._find_repo()
-    filtered = tuple(line for line in lines if not _is_blob_line(repo, line))
-
-    if code:
-        for line in filtered:
-            print(line)
-        return code
 
     if count:
-        _render_filtered_count(
-            filtered,
-            edge_oids=_explicit_object_edges(repo, traversal_argv),
+        # Keep Phase240/243's count implementation authoritative for selected
+        # commits, boundary commits, edge/boundary overlap, limits, and reverse
+        # ordering. A separate --objects inspection pass is used solely to find
+        # present blobs that blob:none removes from that numeric result.
+        code, count_lines = _run_projected(projected)
+        if code:
+            repo = _promisor._find_repo()
+            for line in count_lines:
+                if not _is_blob_line(repo, line):
+                    print(line)
+            return code
+
+        inspection_code, inspection_lines = _run_projected(
+            _inspection_projection(projected)
         )
+        if inspection_code:
+            raise RuntimeError("blob:none count inspection traversal failed")
+
+        repo = _promisor._find_repo()
+        _render_adjusted_count(repo, count_lines, inspection_lines)
         return code
 
-    for line in filtered:
-        print(line)
+    code, lines = _run_projected(projected)
+    repo = _promisor._find_repo()
+    for line in lines:
+        if not _is_blob_line(repo, line):
+            print(line)
     return code
