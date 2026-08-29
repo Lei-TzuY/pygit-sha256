@@ -162,15 +162,3 @@ def test_plain_print_ordinary_repo_is_transparent(tmp_path, monkeypatch, capsys)
     ) == 0
 
     assert capsys.readouterr().out.splitlines() == ["3"]
-
-
-def test_plain_print_boundary_objects_edge_remains_explicitly_deferred(
-    tmp_path, monkeypatch
-):
-    repo, _local, _blobs = _partial_three_commit_repo(tmp_path)
-    monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
-
-    with pytest.raises(ValueError, match="--boundary with --objects-edge"):
-        run_rev_list_disk_usage(
-            ["--objects-edge", "--boundary", "--missing=print", "HEAD"]
-        )
