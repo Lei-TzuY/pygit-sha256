@@ -137,7 +137,7 @@ def test_blob_none_count_filters_promised_blob_without_fetch(
     assert read_promisor_state(repo.pygit_dir) == before
 
 
-def test_blob_none_count_objects_edge_boundary_excludes_edge_and_counts_limit_boundary(
+def test_blob_none_count_objects_edge_boundary_dedupes_explicit_boundary(
     tmp_path, monkeypatch, capsys
 ):
     repo, (c1, _c2, c3) = _ordinary_three_commit_repo(tmp_path)
@@ -156,10 +156,11 @@ def test_blob_none_count_objects_edge_boundary_excludes_edge_and_counts_limit_bo
         ]
     ) == 0
 
-    # c1 is an explicit object edge and remains advertised but excluded from
-    # the integer.  max-count introduces c2 as a distinct boundary which is a
-    # present commit and therefore counts, along with c3 and both snapshot trees.
-    assert capsys.readouterr().out.splitlines() == [f"-{c1}", "4"]
+    # c1 is both the explicit object edge and the explicit boundary.  Phase243
+    # owns that overlap and emits it once.  The range/limit combination does not
+    # introduce a second c2 boundary here, so the filtered present set is c3 and
+    # c3's root tree only; blobs are omitted by blob:none.
+    assert capsys.readouterr().out.splitlines() == [f"-{c1}", "2"]
 
 
 def test_blob_none_count_reverse_front_boundary_is_not_misclassified_as_edge(
