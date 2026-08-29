@@ -68,6 +68,7 @@ def test_rev_list_allow_promisor_omits_promises_without_fetching(tmp_path, monke
     )
 
     before = read_promisor_state(repo.pygit_dir)
+    capsys.readouterr()
     assert run_rev_list_disk_usage(["--objects", "--missing=allow-promisor", "HEAD"]) == 0
     after = read_promisor_state(repo.pygit_dir)
 
@@ -84,6 +85,7 @@ def test_rev_list_allow_promisor_omits_promises_without_fetching(tmp_path, monke
 def test_rev_list_allow_promisor_no_object_names_is_sha256_only(tmp_path, monkeypatch, capsys):
     repo, _, _ = _partial_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
+    capsys.readouterr()
 
     assert run_rev_list_disk_usage(
         ["--objects", "--missing=allow-promisor", "--no-object-names", "HEAD"]
@@ -101,6 +103,7 @@ def test_rev_list_allow_promisor_ordinary_repo_matches_local_object_domain(tmp_p
     repo.add(["a.txt"])
     commit = repo.commit("ordinary", author_name="Test", author_email="test@example.com")
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
+    capsys.readouterr()
 
     assert run_rev_list_disk_usage(["--objects", "--missing=allow-promisor", "HEAD"]) == 0
 
