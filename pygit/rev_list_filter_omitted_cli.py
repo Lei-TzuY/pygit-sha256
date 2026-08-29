@@ -5,10 +5,10 @@ materializing promisor objects. This adapter adds the complementary ``~<oid>``
 omission channel for local SHA-256 objects while keeping unresolved foreign
 promises out of the repository-visible hash domain.
 
-Phase254 also composes the omission channel with ``--count``. Git emits normal
+Phase254 composes the omission channel with ``--count``. Git emits normal
 traversal records first, then omitted records, then missing-object diagnostics,
-and finally the count. We preserve that ordering instead of treating the count
-as ordinary filter output.
+and finally the count. Phase255 extends the same structured ordering to
+``--boundary`` and includes boundary snapshots when computing omitted objects.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from . import rev_list_promisor_cli as _promisor
 
 
 _FILTER_PRINT_OMITTED = "--filter-print-omitted"
-_DEFERRED_WITH_OMITTED = {"-z", "--boundary", "--objects-edge"}
+_DEFERRED_WITH_OMITTED = {"-z", "--objects-edge"}
 
 
 def _omitted_local_oids(repo, argv: Sequence[str], *, spec: str) -> tuple[str, ...]:
@@ -32,6 +32,10 @@ def _omitted_local_oids(repo, argv: Sequence[str], *, spec: str) -> tuple[str, .
     arbitrary transport-id channel. pygit therefore refuses a request when an
     unresolved promise itself would have to be reported as omitted: before
     materialization there is no genuine local SHA-256 object id to print.
+
+    Boundary traversal needs the same snapshot roots as the underlying filter
+    adapter. Otherwise objects that are visited only because ``--boundary``
+    exposes the boundary snapshot would be absent from the omission set.
     """
 
     if spec.startswith("object:type="):
@@ -42,6 +46,21 @@ def _omitted_local_oids(repo, argv: Sequence[str], *, spec: str) -> tuple[str, .
         requested = None
 
     parsed = _filter._parse_inventory_request(projected)
+
+    snapshot_commits = None
+    if parsed["boundary"]:
+        boundary_commits = _promisor._promisor_boundary_commits(
+            repo,
+            parsed["revisions"],
+            all_refs=parsed["all_refs"],
+            first_parent=parsed["first_parent"],
+            topo_order=parsed["topo_order"],
+            reverse=parsed["reverse"],
+            skip=parsed["skip"],
+            max_count=parsed["max_count"],
+        )
+        snapshot_commits = tuple(oid for oid, _is_boundary in boundary_commits)
+
     entries = _promisor.promisor_object_inventory(
         repo,
         parsed["revisions"],
@@ -51,6 +70,7 @@ def _omitted_local_oids(repo, argv: Sequence[str], *, spec: str) -> tuple[str, .
         reverse=parsed["reverse"],
         skip=parsed["skip"],
         max_count=parsed["max_count"],
+        snapshot_commits=snapshot_commits,
     )
 
     provided = frozenset()
@@ -97,9 +117,9 @@ def _partition_projected_lines(
 
     The underlying metadata-only filter path already computes the correct
     filtered integer. Git's rev-list source emits omitted objects after the
-    traversal but before missing-object diagnostics and the final ``--count``
-    line, so this helper only rearranges presentation; it does not recompute
-    selection or count semantics.
+    traversal (including boundary records) but before missing-object diagnostics
+    and the final ``--count`` line, so this helper only rearranges presentation;
+    it does not recompute selection or count semantics.
     """
 
     projected = list(lines)
