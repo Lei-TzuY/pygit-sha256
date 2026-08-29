@@ -29,6 +29,13 @@ def _ordinary_three_commit_repo(tmp_path):
     return repo, tuple(commits)
 
 
+def _tree_oid(repo: Repository, commit_sha: str) -> str:
+    """Return a commit's root tree without touching child entry resolvers."""
+    commit = repo.store.read(commit_sha)
+    assert isinstance(commit, CommitObject)
+    return commit.tree.lower()
+
+
 def _snapshot(repo: Repository, commit_sha: str) -> tuple[str, tuple[str, ...]]:
     commit = repo.store.read(commit_sha)
     assert isinstance(commit, CommitObject)
@@ -193,8 +200,8 @@ def test_in_commit_order_print_info_keeps_promises_at_first_snapshot_position(
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
     _disable_fetch(monkeypatch)
     before = read_promisor_state(repo.pygit_dir)
-    tip_tree, _ = _snapshot(repo, tip)
-    base_tree, _ = _snapshot(repo, base)
+    tip_tree = _tree_oid(repo, tip)
+    base_tree = _tree_oid(repo, base)
     capsys.readouterr()
 
     assert run_rev_list_disk_usage(
@@ -246,8 +253,8 @@ def test_in_commit_order_allow_promisor_omits_missing_without_fetch(tmp_path, mo
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
     _disable_fetch(monkeypatch)
     before = read_promisor_state(repo.pygit_dir)
-    tip_tree, _ = _snapshot(repo, tip)
-    base_tree, _ = _snapshot(repo, base)
+    tip_tree = _tree_oid(repo, tip)
+    base_tree = _tree_oid(repo, base)
     capsys.readouterr()
 
     assert run_rev_list_disk_usage(
