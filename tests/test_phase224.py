@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Optional
 
 import pytest
 
@@ -23,7 +24,7 @@ def _tree_data(entries):
     )
 
 
-def _commit_data(tree_oid: str, message: str, parent: str | None = None) -> bytes:
+def _commit_data(tree_oid: str, message: str, parent: Optional[str] = None) -> bytes:
     lines = [f"tree {tree_oid}\n"]
     if parent:
         lines.append(f"parent {parent}\n")
@@ -96,7 +97,7 @@ def _partial_divergence(tmp_path):
     theirs_local = importer.import_oid(theirs_commit_oid)
 
     # A realistic checked-out partial-clone HEAD already has the blobs needed by
-    # its current worktree.  Historical/base and other-branch blobs remain
+    # its current worktree. Historical/base and other-branch blobs remain
     # promised, which is exactly the three-way waterfall Phase224 addresses.
     ours_a_local = repo.store.write(BlobObject(blobs["ours_a"]))
     base_b_local = repo.store.write(BlobObject(blobs["base_b"]))
