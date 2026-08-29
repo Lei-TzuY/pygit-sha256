@@ -125,9 +125,6 @@ def test_rev_list_objects_boundary_count_includes_boundary_record(
         ]
     ) == 0
 
-    # The shared tree belongs to the excluded base closure, and the promised
-    # blob is silently omitted. Native --boundary --count counts the selected
-    # tip plus the boundary base as one aggregate object count.
     assert capsys.readouterr().out.splitlines() == ["2"]
 
 
@@ -151,9 +148,13 @@ def test_rev_list_objects_boundary_no_object_names_preserves_dash_framing(
     assert capsys.readouterr().out.splitlines() == [tip, f"-{base}"]
 
 
-@pytest.mark.parametrize("limit", ["--max-count=1", "--skip=1"])
-def test_rev_list_objects_boundary_rejects_limit_induced_closure_for_now(limit):
-    with pytest.raises(ValueError, match="--boundary with --skip/--max-count"):
+def test_rev_list_objects_boundary_still_rejects_objects_edge_combination():
+    with pytest.raises(ValueError, match="--boundary with --objects-edge"):
         run_rev_list_disk_usage(
-            ["--objects", "--boundary", limit, "--missing=allow-promisor", "HEAD"]
+            [
+                "--objects-edge",
+                "--boundary",
+                "--missing=allow-promisor",
+                "HEAD",
+            ]
         )
