@@ -144,15 +144,6 @@ def _parse_allow_promisor(argv: Sequence[str]):
         raise ValueError(
             "--boundary with --objects-edge is not yet supported with --missing=allow-promisor"
         )
-    if boundary and (skip or max_count):
-        # Native Git treats output-limit boundaries as part of the object walk:
-        # their tree closure can become reachable even though the boundary
-        # commit is not selected. The Phase232 inventory deliberately computes
-        # closure from selected commits only, so reject this combination rather
-        # than silently produce a plausible but incomplete object list.
-        raise ValueError(
-            "--boundary with --skip/--max-count is not yet supported with --missing=allow-promisor"
-        )
 
     return {
         "all_refs": all_refs,
@@ -179,9 +170,9 @@ def _promisor_object_edges(
     """Return Git-style excluded edge commits without reading promised blobs.
 
     ``--objects-edge`` reports commits just beyond the interesting revision set,
-    prefixed with ``-``.  Limits such as ``--max-count`` affect printed commits,
+    prefixed with ``-``. Limits such as ``--max-count`` affect printed commits,
     but not this revision boundary, so edge discovery deliberately walks the
-    unlimited commit selection.  Only commit metadata is read.
+    unlimited commit selection. Only commit metadata is read.
     """
 
     exclusion_roots = _object_exclusion_roots(
@@ -222,9 +213,6 @@ def _promisor_object_edges(
             if parent_oid in excluded:
                 edges.add(parent_oid)
 
-    # Native ``rev-list --objects-edge`` renders the excluded boundary before
-    # the selected commits. OID ordering is deterministic when several edges
-    # exist while preserving the exact single-edge representation.
     return tuple(sorted(edges))
 
 
@@ -236,6 +224,8 @@ def _promisor_boundary_commits(
     first_parent: bool,
     topo_order: bool,
     reverse: bool,
+    skip: int,
+    max_count: int,
 ) -> Tuple[Tuple[str, bool], ...]:
     """Return selected/boundary commit framing using commit metadata only."""
 
@@ -246,8 +236,8 @@ def _promisor_boundary_commits(
         first_parent=first_parent,
         topo_order=topo_order,
         reverse=reverse,
-        skip=0,
-        max_count=0,
+        skip=skip,
+        max_count=max_count,
         side_mode=False,
         left_only=False,
         right_only=False,
@@ -262,8 +252,8 @@ def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
     native SHA-1 promises without materializing either. Git's allow-promisor
     mode silently omits expected missing objects, so only entries with a real
     repository-visible ``oid`` are rendered here. ``--objects-edge`` and
-    revision-range ``--boundary`` add only local commit identities and therefore
-    remain metadata-only.
+    ``--boundary`` add only local commit identities and snapshot roots and
+    therefore remain metadata-only.
     """
 
     parsed = _parse_allow_promisor(argv)
@@ -280,6 +270,24 @@ def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
             first_parent=parsed["first_parent"],
         )
 
+    boundary_commits: Tuple[Tuple[str, bool], ...] = ()
+    snapshot_commits = None
+    if parsed["boundary"]:
+        boundary_commits = _promisor_boundary_commits(
+            repo,
+            parsed["revisions"],
+            all_refs=parsed["all_refs"],
+            first_parent=parsed["first_parent"],
+            topo_order=parsed["topo_order"],
+            reverse=parsed["reverse"],
+            skip=parsed["skip"],
+            max_count=parsed["max_count"],
+        )
+        # Native --objects --boundary traverses each boundary commit's own tree
+        # snapshot in commit-stream order, including boundaries introduced by
+        # --max-count. It does not recursively include the boundary's parents.
+        snapshot_commits = tuple(oid for oid, _is_boundary in boundary_commits)
+
     entries = promisor_object_inventory(
         repo,
         parsed["revisions"],
@@ -289,6 +297,7 @@ def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
         reverse=parsed["reverse"],
         skip=parsed["skip"],
         max_count=parsed["max_count"],
+        snapshot_commits=snapshot_commits,
     )
     present = [entry for entry in entries if entry.oid is not None]
 
@@ -296,21 +305,11 @@ def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
         print(f"-{oid}")
 
     if parsed["boundary"]:
-        commits = _promisor_boundary_commits(
-            repo,
-            parsed["revisions"],
-            all_refs=parsed["all_refs"],
-            first_parent=parsed["first_parent"],
-            topo_order=parsed["topo_order"],
-            reverse=parsed["reverse"],
-        )
         non_commits = [entry for entry in present if entry.type_name != "commit"]
         if parsed["count"]:
-            # Unlike --objects-edge, native --boundary --count emits one total
-            # object count: boundary commit records are included in that count.
-            print(len(commits) + len(non_commits))
+            print(len(boundary_commits) + len(non_commits))
             return 0
-        for oid, is_boundary in commits:
+        for oid, is_boundary in boundary_commits:
             print(f"-{oid}" if is_boundary else oid)
         for entry in non_commits:
             assert entry.oid is not None
@@ -321,8 +320,6 @@ def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
         return 0
 
     if parsed["count"]:
-        # Native Git prints edge lines separately and does not include them in
-        # the following object count.
         print(len(present))
         return 0
 
