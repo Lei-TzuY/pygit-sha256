@@ -7,10 +7,9 @@ walker, where touching a foreign tree entry could trigger a lazy fetch.
 
 Phase246 introduced ``blob:none`` line filtering, Phase247 added structured
 counting, and Phase248 composed the filter with NUL records. Phase249 adds the
-line-oriented ``object:type=(commit|tree|blob)`` filter. Selected commits and
-explicit object edges retain Git's provided/presentation exemptions, while
-ordinary snapshot objects, boundary commits, and promised objects are filtered
-by their known type without materialization.
+line-oriented ``object:type=(commit|tree|blob)`` filter. Phase250 corrects the
+provided-object exemption to positive traversal roots and adds structured count
+framing for the same object:type subset.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from . import rev_list_nul_cli as _nul
 from . import rev_list_promisor_cli as _promisor
 from .objects import BlobObject
 from .promisor import promised_kind
+from .rev_list import _all_ref_tips, _normal_revisions, _resolve_commitish, _split_range
 
 
 _SUPPORTED_MISSING = {
@@ -85,8 +85,6 @@ def _project_object_type(argv: Sequence[str]) -> list[str]:
     projected = [arg for arg in argv if not arg.startswith("--filter=")]
     if "-z" in projected:
         raise ValueError("--filter=object:type with -z is not yet supported")
-    if "--count" in projected:
-        raise ValueError("--filter=object:type with --count is not yet supported")
     missing = [arg for arg in projected if arg.startswith("--missing=")]
     if len(missing) != 1 or missing[0] not in _SUPPORTED_MISSING:
         raise ValueError(
@@ -174,23 +172,38 @@ def _local_type(repo, oid: str) -> Optional[str]:
     return bytes(value).decode("ascii")
 
 
+def _provided_commit_roots(repo, parsed) -> frozenset[str]:
+    """Return Git-style provided positive commit roots before output limiting.
+
+    Object filters do not apply to explicitly provided objects unless Git is
+    asked to filter provided objects too. For commit-rooted rev-list traversal,
+    those exemptions are the positive revision tips plus ``--all`` ref tips (or
+    the implicit HEAD tip when no explicit revision/all-ref root was supplied),
+    not every commit subsequently reached from those roots.
+    """
+
+    revisions = tuple(parsed["revisions"])
+    roots: list[str] = []
+    symmetric = [token for token in revisions if "..." in token]
+    if symmetric:
+        if len(revisions) != 1:
+            raise ValueError("a symmetric A...B range cannot be mixed with other revisions")
+        left, right = _split_range(symmetric[0], "...")
+        roots.extend((_resolve_commitish(repo, left), _resolve_commitish(repo, right)))
+    else:
+        positive, _negative = _normal_revisions(repo, revisions)
+        roots.extend(positive)
+        if parsed["all_refs"]:
+            roots.extend(_all_ref_tips(repo))
+        if not revisions and not parsed["all_refs"]:
+            roots.append(_resolve_commitish(repo, "HEAD"))
+    return frozenset(oid.lower() for oid in roots)
+
+
 def _object_type_context(repo, argv: Sequence[str]):
-    """Return parsed selection plus Git-style selected/edge exemptions."""
+    """Return parsed selection plus Git-style provided-root/edge exemptions."""
     parsed = _parse_inventory_request(argv)
-    selected = {
-        entry.oid.lower()
-        for entry in _promisor.rev_list(
-            repo,
-            parsed["revisions"],
-            all_refs=parsed["all_refs"],
-            first_parent=parsed["first_parent"],
-            topo_order=parsed["topo_order"],
-            reverse=parsed["reverse"],
-            skip=parsed["skip"],
-            max_count=parsed["max_count"],
-            left_right=False,
-        )
-    }
+    provided = _provided_commit_roots(repo, parsed)
     edges = frozenset()
     if "--objects-edge" in argv:
         edges = frozenset(
@@ -201,7 +214,7 @@ def _object_type_context(repo, argv: Sequence[str]):
                 first_parent=parsed["first_parent"],
             )
         )
-    return parsed, selected, edges
+    return parsed, provided, edges
 
 
 def _keep_object_type_line(
@@ -209,18 +222,19 @@ def _keep_object_type_line(
     line: str,
     *,
     requested: str,
-    selected: set[str],
+    provided: frozenset[str],
     edges: frozenset[str],
 ) -> bool:
-    """Apply Git's object:type filter without hiding explicit commit framing."""
+    """Apply Git's object:type filter without hiding provided/edge framing."""
     if not line:
         return False
     prefix, oid = _line_oid(line)
 
-    # Commits selected by the revision walk are explicit traversal records and
-    # remain visible for tree/blob filters. Likewise --objects-edge advertises
-    # explicit exclusion edges independently of the object filter.
-    if prefix == "" and oid in selected:
+    # Only positive traversal roots bypass object filters. Older commits reached
+    # from those roots are ordinary traversed objects and survive only when the
+    # requested type is commit. Explicit --objects-edge records are a separate
+    # presentation channel and remain advertised independently of the filter.
+    if prefix == "" and oid in provided:
         return True
     if prefix == "-" and oid in edges:
         return True
@@ -239,17 +253,122 @@ def _keep_object_type_line(
     return kind == requested
 
 
+def _object_type_present_count(
+    repo,
+    argv: Sequence[str],
+    *,
+    requested: str,
+    parsed,
+    provided: frozenset[str],
+    edges: frozenset[str],
+) -> int:
+    """Return native-style present-object count after ``object:type`` filtering."""
+
+    boundary_commits = ()
+    snapshot_commits = None
+    if parsed["boundary"]:
+        boundary_commits = _promisor._promisor_boundary_commits(
+            repo,
+            parsed["revisions"],
+            all_refs=parsed["all_refs"],
+            first_parent=parsed["first_parent"],
+            topo_order=parsed["topo_order"],
+            reverse=parsed["reverse"],
+            skip=parsed["skip"],
+            max_count=parsed["max_count"],
+        )
+        snapshot_commits = tuple(oid for oid, _is_boundary in boundary_commits)
+
+    entries = _promisor.promisor_object_inventory(
+        repo,
+        parsed["revisions"],
+        all_refs=parsed["all_refs"],
+        first_parent=parsed["first_parent"],
+        topo_order=parsed["topo_order"],
+        reverse=parsed["reverse"],
+        skip=parsed["skip"],
+        max_count=parsed["max_count"],
+        snapshot_commits=snapshot_commits,
+    )
+
+    if not parsed["boundary"]:
+        count = 0
+        for entry in entries:
+            if entry.missing:
+                continue
+            if entry.type_name == "commit" and entry.path is None:
+                if requested == "commit" or (entry.oid or "").lower() in provided:
+                    count += 1
+                continue
+            if entry.type_name == requested:
+                count += 1
+        return count
+
+    overlap = frozenset()
+    if edges:
+        overlap = _missing_print._edge_boundary_overlap(repo, parsed, tuple(edges))
+
+    count = 0
+    for oid, is_boundary in boundary_commits:
+        if is_boundary:
+            if requested == "commit" and oid not in overlap:
+                count += 1
+        elif requested == "commit" or oid in provided:
+            count += 1
+
+    for entry in entries:
+        if entry.missing:
+            continue
+        if entry.type_name == "commit" and entry.path is None:
+            continue
+        if entry.type_name == requested:
+            count += 1
+    return count
+
+
 def _run_object_type_filter(argv: Sequence[str], *, requested: str) -> int:
     projected = _project_object_type(argv)
     code, lines = _run_projected(projected)
     repo = _promisor._find_repo()
-    _parsed, selected, edges = _object_type_context(repo, projected)
+    parsed, provided, edges = _object_type_context(repo, projected)
+    count_mode = "--count" in projected
+
+    if count_mode:
+        if not lines:
+            raise RuntimeError("rev-list object:type count projection produced no output")
+        try:
+            int(lines[-1])
+        except ValueError as exc:
+            raise RuntimeError(
+                "rev-list object:type count projection did not end with an integer"
+            ) from exc
+        for line in lines[:-1]:
+            if _keep_object_type_line(
+                repo,
+                line,
+                requested=requested,
+                provided=provided,
+                edges=edges,
+            ):
+                print(line)
+        print(
+            _object_type_present_count(
+                repo,
+                projected,
+                requested=requested,
+                parsed=parsed,
+                provided=provided,
+                edges=edges,
+            )
+        )
+        return code
+
     for line in lines:
         if _keep_object_type_line(
             repo,
             line,
             requested=requested,
-            selected=selected,
+            provided=provided,
             edges=edges,
         ):
             print(line)
@@ -305,13 +424,13 @@ def _filtered_present_count(repo, argv: Sequence[str]) -> int:
 
     overlap = frozenset()
     if "--objects-edge" in argv:
-        edges = _promisor._promisor_object_edges(
+        edge_values = _promisor._promisor_object_edges(
             repo,
             parsed["revisions"],
             all_refs=parsed["all_refs"],
             first_parent=parsed["first_parent"],
         )
-        overlap = _missing_print._edge_boundary_overlap(repo, parsed, edges)
+        overlap = _missing_print._edge_boundary_overlap(repo, parsed, edge_values)
 
     return len(boundary_commits) - len(overlap) + snapshot_present
 
