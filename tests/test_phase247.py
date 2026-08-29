@@ -59,10 +59,10 @@ def _partial_single_commit_repo(tmp_path):
 def _ordinary_three_commit_repo(tmp_path):
     repo = Repository.init(str(tmp_path / "ordinary"))
     commits = []
-    # Add a different pathname on every commit instead of rewriting one file in
-    # rapid succession.  That guarantees distinct root trees independently of
-    # index/stat-cache timestamp resolution, which is essential for testing
-    # limit-boundary snapshot counting rather than shared-tree exclusion.
+    # Add a different pathname on every commit so every root tree is distinct,
+    # and assign strictly increasing commit dates so rev-list ordering never
+    # falls back to OID tie-breaking.  The boundary/count regression depends on
+    # c3 -> c2 -> c1 being the deterministic history order on every runner.
     for index, text in enumerate(("one\n", "two\n", "three\n"), start=1):
         path = f"f{index}.txt"
         (repo.worktree / path).write_text(text, encoding="utf-8")
@@ -72,6 +72,7 @@ def _ordinary_three_commit_repo(tmp_path):
                 f"c{index}",
                 author_name="Test",
                 author_email="test@example.com",
+                commit_date=str(index),
             )
         )
     return repo, tuple(commits)
@@ -137,7 +138,7 @@ def test_blob_none_count_filters_promised_blob_without_fetch(
     assert read_promisor_state(repo.pygit_dir) == before
 
 
-def test_blob_none_count_objects_edge_boundary_dedupes_explicit_boundary(
+def test_blob_none_count_objects_edge_boundary_excludes_edge_and_counts_limit_boundary(
     tmp_path, monkeypatch, capsys
 ):
     repo, (c1, _c2, c3) = _ordinary_three_commit_repo(tmp_path)
@@ -156,11 +157,11 @@ def test_blob_none_count_objects_edge_boundary_dedupes_explicit_boundary(
         ]
     ) == 0
 
-    # c1 is both the explicit object edge and the explicit boundary.  Phase243
-    # owns that overlap and emits it once.  The range/limit combination does not
-    # introduce a second c2 boundary here, so the filtered present set is c3 and
-    # c3's root tree only; blobs are omitted by blob:none.
-    assert capsys.readouterr().out.splitlines() == [f"-{c1}", "2"]
+    # c1 is an explicit object edge and remains advertised but excluded from
+    # the integer.  With deterministic c3 -> c2 -> c1 ordering, max-count
+    # introduces c2 as a distinct boundary which counts together with c3 and
+    # both non-blob root-tree snapshots.
+    assert capsys.readouterr().out.splitlines() == [f"-{c1}", "4"]
 
 
 def test_blob_none_count_reverse_front_boundary_is_not_misclassified_as_edge(
