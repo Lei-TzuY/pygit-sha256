@@ -236,17 +236,23 @@ def _ordinary_divergence(tmp_path):
     (repo.worktree / "b.txt").write_text("base b\n", encoding="utf-8")
     repo.add(["a.txt", "b.txt"])
     base = repo.commit("base", author_name="Test", author_email="test@example.com")
-    repo.branch("feature")
 
+    # Build the two children explicitly instead of relying on checkout semantics
+    # inside this fixture. This guarantees a true base -> {ours, theirs} DAG.
     (repo.worktree / "a.txt").write_text("ours a\n", encoding="utf-8")
     repo.add(["a.txt"])
     ours = repo.commit("ours", author_name="Test", author_email="test@example.com")
 
-    repo.checkout("feature")
+    repo.refs.set_branch("feature", base, message="test: branch feature from base")
+    repo.refs.set_head_symbolic("feature", message="test: feature")
+    repo._replace_worktree_from_commit(base)
     (repo.worktree / "b.txt").write_text("theirs b\n", encoding="utf-8")
     repo.add(["b.txt"])
     theirs = repo.commit("theirs", author_name="Test", author_email="test@example.com")
-    repo.checkout("main")
+
+    repo.refs.set_head_symbolic("main", message="test: main")
+    repo._replace_worktree_from_commit(ours)
+    assert repo._find_merge_base(ours, theirs) == base
     return repo, base, ours, theirs
 
 
