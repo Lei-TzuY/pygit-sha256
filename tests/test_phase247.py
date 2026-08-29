@@ -59,9 +59,14 @@ def _partial_single_commit_repo(tmp_path):
 def _ordinary_three_commit_repo(tmp_path):
     repo = Repository.init(str(tmp_path / "ordinary"))
     commits = []
+    # Add a different pathname on every commit instead of rewriting one file in
+    # rapid succession.  That guarantees distinct root trees independently of
+    # index/stat-cache timestamp resolution, which is essential for testing
+    # limit-boundary snapshot counting rather than shared-tree exclusion.
     for index, text in enumerate(("one\n", "two\n", "three\n"), start=1):
-        (repo.worktree / "f.txt").write_text(text, encoding="utf-8")
-        repo.add(["f.txt"])
+        path = f"f{index}.txt"
+        (repo.worktree / path).write_text(text, encoding="utf-8")
+        repo.add([path])
         commits.append(
             repo.commit(
                 f"c{index}",
