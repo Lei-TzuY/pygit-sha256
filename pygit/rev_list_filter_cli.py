@@ -9,7 +9,8 @@ Phase246 introduced ``blob:none`` line filtering, Phase247 added structured
 counting, and Phase248 composed the filter with NUL records. Phase249 adds the
 line-oriented ``object:type=(commit|tree|blob)`` filter. Phase250 corrects the
 provided-object exemption to positive traversal roots and adds structured count
-framing for the same object:type subset.
+framing for the same object:type subset. Phase251 composes that object:type
+filter with Git's NUL-delimited object metadata protocol.
 """
 
 from __future__ import annotations
@@ -81,11 +82,22 @@ def _project(argv: Sequence[str]) -> list[str]:
 
 
 def _project_object_type(argv: Sequence[str]) -> list[str]:
-    """Project one line-oriented ``object:type`` request onto missing traversal."""
+    """Project one ``object:type`` request onto metadata-only object traversal."""
     projected = [arg for arg in argv if not arg.startswith("--filter=")]
-    if "-z" in projected:
-        raise ValueError("--filter=object:type with -z is not yet supported")
     missing = [arg for arg in projected if arg.startswith("--missing=")]
+
+    # Structured -z mode supports ordinary repositories without an explicit
+    # missing policy. Partial-clone callers may choose one of the three existing
+    # metadata-only promisor policies; filtering happens before NUL emission.
+    if "-z" in projected:
+        if len(missing) > 1:
+            raise ValueError("rev-list accepts exactly one --missing action")
+        if missing and missing[0] not in _SUPPORTED_MISSING:
+            raise ValueError(
+                "--filter=object:type with -z supports --missing=allow-promisor, print, or print-info"
+            )
+        return projected
+
     if len(missing) != 1 or missing[0] not in _SUPPORTED_MISSING:
         raise ValueError(
             "--filter=object:type currently requires --missing=allow-promisor, print, or print-info"
@@ -110,7 +122,8 @@ def _parse_inventory_request(argv: Sequence[str]):
     Plain ``print`` is projected to ``print-info`` because both modes share the
     same traversal, and ``--objects-edge`` is projected to ``--objects`` because
     edge records are a separate presentation channel. Negative revisions remain
-    unchanged, so inventory exclusion closure stays authoritative.
+    unchanged, so inventory exclusion closure stays authoritative. NUL framing
+    is removed before delegating to the underlying inventory parser.
     """
 
     parse_argv: list[str] = []
@@ -119,8 +132,13 @@ def _parse_inventory_request(argv: Sequence[str]):
             parse_argv.append("--objects")
         elif arg == "--missing=print":
             parse_argv.append("--missing=print-info")
+        elif arg == "-z":
+            continue
         else:
             parse_argv.append(arg)
+
+    if not any(arg.startswith("--missing=") for arg in parse_argv):
+        parse_argv.append("--missing=allow-promisor")
 
     parsed = _promisor._parse_allow_promisor(parse_argv)
     if parsed is None:
@@ -328,9 +346,29 @@ def _object_type_present_count(
 
 def _run_object_type_filter(argv: Sequence[str], *, requested: str) -> int:
     projected = _project_object_type(argv)
-    code, lines = _run_projected(projected)
     repo = _promisor._find_repo()
     parsed, provided, edges = _object_type_context(repo, projected)
+
+    if "-z" in projected:
+        if edges:
+            # Keep the compatibility error owned by the NUL adapter rather than
+            # inventing an object-edge encoding that Git does not define for -z.
+            code = _nul.try_run_rev_list_nul(
+                projected,
+                object_type=requested,
+                provided_oids=provided,
+            )
+        else:
+            code = _nul.try_run_rev_list_nul(
+                projected,
+                object_type=requested,
+                provided_oids=provided,
+            )
+        if code is None:
+            raise RuntimeError("NUL rev-list adapter declined object:type projection")
+        return code
+
+    code, lines = _run_projected(projected)
     count_mode = "--count" in projected
 
     if count_mode:
