@@ -18,8 +18,8 @@ def _changing_three_commit_repo(tmp_path):
             commit_date=str(index),
         )
         commits.append(commit)
-        tree = repo.store.read(repo.store.read(commit).tree)
-        blobs.append(tree.entries[0].oid)
+        blob_oid, _mode = repo._commit_tree_entries(commit)["f.txt"]
+        blobs.append(blob_oid)
     return repo, tuple(commits), tuple(blobs)
 
 
@@ -49,7 +49,7 @@ def test_blob_none_objects_edge_keeps_edge_before_selected_omissions(
     omitted = [token[1:] for token in tokens if token.startswith("~")]
 
     assert edge in tokens
-    assert omitted == [b3, b2] or omitted == [b2, b3]
+    assert set(omitted) == {b2, b3}
     assert b1 not in omitted
     assert all(len(oid) == 64 for oid in omitted)
     assert all(repo.store.read(oid).type_name == b"blob" for oid in omitted)
