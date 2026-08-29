@@ -27,17 +27,26 @@ rather than infer semantics from textual `-` records.
 
 ## Native Git baseline
 
-A native SHA-256 repository was exercised directly. The observed contract is:
+A native SHA-256 repository was exercised directly for the basic filtered
+object-count behavior. The project contract retained by this stacked path is:
 
 - `rev-list --objects --filter=blob:none --count HEAD` reports the number of
-  present records in the *filtered* object stream.
-- local blobs omitted by `blob:none` do not contribute to the integer.
-- `--objects-edge --count` still prints explicit `-edge` records, but those
-  excluded commits do not contribute to the integer.
-- `--boundary --count` counts boundary commits as present objects.
-- with `--objects-edge --boundary --max-count`, an explicit exclusion edge is
-  still excluded from the count while a distinct limit-induced boundary is
-  counted.
+  present records in the filtered object stream used by the existing
+  promisor-aware count adapter;
+- local blobs omitted by `blob:none` do not contribute to the integer;
+- `--objects-edge --count` may keep explicit `-edge` records in the established
+  adapter framing, but those excluded commits do not contribute to the integer;
+- `--boundary --count` counts boundary commits which remain in the structured
+  boundary stream;
+- when the same explicit exclusion is both an object edge and a boundary,
+  Phase243 deduplicates that record before the filtered count is derived.
+
+The exact `--objects-edge --boundary --max-count` result must therefore be based
+on the structured boundary planner, not on an assumption that the parent just
+outside `--max-count` is always an additional boundary. In the regression range
+used here (`c1..c3`, `--max-count=1`), `c1` is the explicit edge/boundary and no
+separate `c2` boundary record is produced; after `blob:none`, the counted present
+records are the selected `c3` commit and its root tree.
 
 ## Implementation
 
@@ -121,11 +130,23 @@ Focused tests cover:
   numeric count;
 - `allow-promisor`, plain `print`, and `print-info` over a real foreign
   `blob:none` promise with zero fetches and unchanged promisor state;
-- `--objects-edge --boundary --max-count --count`, proving explicit edges are
-  excluded while a distinct limit-induced boundary and its snapshot are counted;
+- `--objects-edge --boundary --max-count --count`, proving an explicit
+  edge/boundary overlap is emitted once and is excluded from the filtered count;
 - `--reverse` with `--objects-edge` but no explicit exclusion edge, proving a
-  boundary remains part of the structured count regardless of textual order;
+  genuine limit-induced boundary remains part of the structured count regardless
+  of textual order;
 - continued rejection of `-z + --filter=blob:none`.
+
+## CI correction
+
+The first full Phase247 matrix exposed one regression-test assumption rather
+than a traversal defect. The test expected `c2` to appear as a second
+limit-induced boundary in `c1..c3 --max-count=1`, but the established boundary
+planner returns the explicit `c1` boundary, which overlaps the object edge and
+is deduplicated. The observed adapter output was therefore correctly
+`-c1` followed by the filtered count `2`. The regression and this document were
+updated to describe the planner-owned result instead of forcing an invented
+boundary into production traversal.
 
 Phase247 changes no object format, tree serialization, pack format, wire
 protocol, ref/index/worktree format, or promisor identity representation.
