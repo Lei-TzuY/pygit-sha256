@@ -1,10 +1,85 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
+from pygit.fetch_importer import PromisorFilteredNativeImporter
+from pygit.objects import CommitObject
 from pygit.promisor import read_promisor_state
+from pygit.remote import NativeObject
+from pygit.repo import Repository
 from pygit.rev_list_disk_usage_cli import run_rev_list_disk_usage
-from tests.test_phase242 import _disable_fetch, _partial_range_repo, _tree
+
+
+def _native_oid(type_name: str, data: bytes) -> str:
+    return hashlib.sha1(f"{type_name} {len(data)}\0".encode() + data).hexdigest()
+
+
+def _tree_data(blob_oid: str) -> bytes:
+    return b"100644 f.txt\x00" + bytes.fromhex(blob_oid)
+
+
+def _commit_data(tree_oid: str, *, message: str, parent: str | None = None) -> bytes:
+    parent_line = f"parent {parent}\n" if parent is not None else ""
+    return (
+        f"tree {tree_oid}\n"
+        f"{parent_line}"
+        "author Test <test@example.com> 1 +0000\n"
+        "committer Test <test@example.com> 1 +0000\n"
+        f"\n{message}"
+    ).encode()
+
+
+def _partial_range_repo(tmp_path):
+    repo = Repository.init(str(tmp_path / "repo"))
+    repo.add_remote("origin", "https://example.test/repo.git")
+
+    base_blob = _native_oid("blob", b"base\n")
+    base_tree_data = _tree_data(base_blob)
+    base_tree = _native_oid("tree", base_tree_data)
+    base_data = _commit_data(base_tree, message="base")
+    base_commit = _native_oid("commit", base_data)
+
+    tip_blob = _native_oid("blob", b"tip\n")
+    tip_tree_data = _tree_data(tip_blob)
+    tip_tree = _native_oid("tree", tip_tree_data)
+    tip_data = _commit_data(tip_tree, message="tip", parent=base_commit)
+    tip_commit = _native_oid("commit", tip_data)
+
+    importer = PromisorFilteredNativeImporter(
+        repo.store,
+        {
+            base_tree: NativeObject("tree", base_tree_data, base_tree),
+            base_commit: NativeObject("commit", base_data, base_commit),
+            tip_tree: NativeObject("tree", tip_tree_data, tip_tree),
+            tip_commit: NativeObject("commit", tip_data, tip_commit),
+        },
+        remote="origin",
+        filter_spec="blob:none",
+    )
+    local_base = importer.import_oid(base_commit)
+    local_tip = importer.import_oid(tip_commit)
+    repo.refs.set_branch("main", local_tip, message="test: partial tip")
+    repo.refs.set_head_symbolic("main", message="test: partial tip")
+    return repo, local_base, local_tip, base_blob, tip_blob
+
+
+def _tree(repo: Repository, commit_sha: str) -> str:
+    commit = repo.store.read(commit_sha)
+    assert isinstance(commit, CommitObject)
+    return commit.tree
+
+
+def _disable_fetch(monkeypatch):
+    monkeypatch.setattr(
+        "pygit.promisor_materialize._fetch_native_object",
+        lambda *args, **kwargs: pytest.fail("edge-boundary traversal must not single-fetch"),
+    )
+    monkeypatch.setattr(
+        "pygit.promisor_materialize._fetch_native_objects",
+        lambda *args, **kwargs: pytest.fail("edge-boundary traversal must not batch-fetch"),
+    )
 
 
 @pytest.mark.parametrize("missing_mode", ["print", "print-info"])
