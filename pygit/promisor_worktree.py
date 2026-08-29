@@ -18,6 +18,7 @@ from functools import wraps
 from typing import Optional, Set, Type
 
 from .promisor import read_promisor_state
+from .promisor_blame import install_promisor_blame_support
 from .promisor_checkout import collect_checkout_promises
 from .promisor_commit import install_promisor_commit_support
 from .promisor_diff import install_promisor_diff_support
@@ -71,4 +72,5 @@ def install_promisor_worktree_support(repository_cls: Type) -> None:
     install_promisor_three_way_support(repository_cls)
     install_promisor_diff_support(repository_cls)
     install_promisor_history_support(repository_cls)
+    install_promisor_blame_support(repository_cls)
     _INSTALLED = True
