@@ -162,6 +162,6 @@ def test_rev_list_print_info_rejects_objects_edge_until_modelled():
         )
 
 
-def test_rev_list_missing_print_remains_explicitly_unsupported():
+def test_rev_list_allow_any_remains_explicitly_unsupported():
     with pytest.raises(ValueError, match="currently supports"):
-        run_rev_list_disk_usage(["--objects", "--missing=print", "HEAD"])
+        run_rev_list_disk_usage(["--objects", "--missing=allow-any", "HEAD"])
