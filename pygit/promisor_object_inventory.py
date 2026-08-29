@@ -127,8 +127,6 @@ def _walk_tree(
                         path=child_path,
                     ),
                 )
-                # A missing promised tree cannot be descended without fetching
-                # it. Missing blobs/commits are leaves for this tree walk.
                 continue
 
         child_oid = item.sha.lower()
@@ -221,14 +219,20 @@ def promisor_object_inventory(
     reverse: bool = False,
     skip: int = 0,
     max_count: int = 0,
+    snapshot_commits: Optional[Sequence[str]] = None,
 ) -> Tuple[PromisorObjectInventoryEntry, ...]:
     """Return selected commits plus reachable present and promised objects.
 
     Commit selection follows :func:`pygit.rev_list.rev_list`, including shallow
-    boundaries and revision exclusions.  Selected commits are emitted first in
-    normal rev-list order, followed by the first stable tree/path occurrence of
-    each remaining object.  Explicit negative revisions (and common ancestry in
-    a symmetric range) subtract their complete object closure.
+    boundaries and revision exclusions. Selected commit ids are emitted first.
+    Tree/blob closure normally follows those selected commits in the same order.
+    ``snapshot_commits`` can override only that snapshot traversal order; this is
+    used by boundary-aware object presentation where an excluded boundary commit
+    contributes its own tree snapshot without becoming a selected commit or
+    recursively pulling older history into the object walk.
+
+    Explicit negative revisions (and common ancestry in a symmetric range)
+    still subtract their complete object closure after snapshot traversal.
 
     Crucially, unresolved promised entries are *reported*, not materialized.
     Their native SHA-1 is kept in ``native_oid`` while ``oid`` remains ``None``;
@@ -252,10 +256,10 @@ def promisor_object_inventory(
     output: List[PromisorObjectInventoryEntry] = []
     seen: Set[tuple[str, str]] = set()
 
-    # Match rev-list's presentation invariant: selected commit ids precede
-    # tree/blob closure, even when multiple commits share the same snapshots.
+    selected_oids: List[str] = []
     for selected in commits:
         oid = selected.oid.lower()
+        selected_oids.append(oid)
         obj = repo.store.read(oid)
         if not isinstance(obj, CommitObject):
             raise RuntimeError(f"Object {oid} in rev-list traversal is not a commit")
@@ -265,10 +269,17 @@ def promisor_object_inventory(
             PromisorObjectInventoryEntry(type_name="commit", oid=oid),
         )
 
-    for selected in commits:
-        commit = repo.store.read(selected.oid)
+    snapshot_roots = (
+        selected_oids
+        if snapshot_commits is None
+        else [oid.lower() for oid in snapshot_commits]
+    )
+    for snapshot_oid in snapshot_roots:
+        commit = repo.store.read(snapshot_oid)
         if not isinstance(commit, CommitObject):
-            raise RuntimeError(f"Object {selected.oid} in rev-list traversal is not a commit")
+            raise RuntimeError(
+                f"Object {snapshot_oid} in snapshot traversal is not a commit"
+            )
         _walk_tree(
             repo,
             commit.tree.lower(),
