@@ -117,5 +117,5 @@ def test_rev_list_allow_promisor_ordinary_repo_matches_local_object_domain(tmp_p
 def test_rev_list_allow_promisor_rejects_modes_not_yet_inventory_backed():
     with pytest.raises(ValueError, match="not yet supported"):
         run_rev_list_disk_usage(
-            ["--objects", "--boundary", "--missing=allow-promisor", "HEAD"]
+            ["--objects", "--parents", "--missing=allow-promisor", "HEAD"]
         )
