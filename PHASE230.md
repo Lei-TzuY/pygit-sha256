@@ -31,8 +31,11 @@ The planner deliberately declines to prefetch when:
 - an explicit peel selector cannot succeed for a blob
 - an intermediate tree itself is unresolved
 
-Those cases remain authoritative in the existing revision/cat-file resolver and
-therefore do not gain speculative network side effects.
+Those cases remain authoritative in the existing revision/cat-file resolver, so
+Phase230 itself adds no speculative prefetch for them.  The historical resolver
+may still perform its established lazy materialization while resolving the base
+object before a later peel/type check; Phase230 intentionally does not redefine
+that resolver ordering.
 
 ## Flush boundaries
 
@@ -68,7 +71,8 @@ Focused tests cover:
 - separate flush groups preserving their demand boundary
 - Phase213 single-object behavior for a one-object group
 - duplicate-expression deduplication
-- invalid blob peel selectors failing without speculative prefetch
+- incompatible blob peel selectors being excluded from Phase230 prefetch while
+  preserving the historical resolver's lazy-fetch/type-check ordering
 - ordinary non-buffered cat-file remaining on the historical path
 
 The complete existing test matrix must remain green on Python 3.9 and 3.13.
