@@ -229,14 +229,14 @@ def test_in_commit_order_objects_edge_ordinary_partial_fails_before_edge_output(
     assert read_promisor_state(repo.pygit_dir) == before
 
 
-def test_in_commit_order_objects_edge_boundary_combination_remains_explicitly_deferred(
+def test_in_commit_order_objects_edge_nul_remains_explicitly_deferred(
     tmp_path, monkeypatch, capsys
 ):
     repo, (_c1, _c2, _c3) = _ordinary_three_commit_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
     capsys.readouterr()
 
-    with pytest.raises(ValueError, match="objects-edge and --boundary"):
+    with pytest.raises(ValueError, match="with -z"):
         run_rev_list_disk_usage(
-            ["--objects-edge", "--in-commit-order", "--boundary", "HEAD"]
+            ["--objects-edge", "--in-commit-order", "-z", "HEAD"]
         )
