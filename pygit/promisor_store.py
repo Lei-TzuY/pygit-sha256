@@ -50,3 +50,10 @@ def install_promisor_store_support() -> None:
 
     ObjectStore.read = read
     _INSTALLED = True
+
+    # Integrity checks must be installed after the lazy native-tree reader so
+    # they can distinguish a resolved local SHA-256 from an intentionally
+    # absent native promisor identity without triggering that resolver.
+    from .promisor_fsck import install_promisor_fsck_support
+
+    install_promisor_fsck_support()
