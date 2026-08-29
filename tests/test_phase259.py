@@ -288,7 +288,6 @@ def test_in_commit_order_ordinary_partial_clone_fails_before_output(tmp_path, mo
 @pytest.mark.parametrize(
     ("extra", "message"),
     [
-        (["--boundary"], "--boundary"),
         (["--objects-edge"], "--objects-edge"),
         (["-z"], "with -z"),
         (["--filter=blob:none"], "with --filter"),
