@@ -141,6 +141,9 @@ def test_blob_limit_count_counts_only_surviving_present_objects(
 ):
     repo, head = _ordinary_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
+    # Repository setup can emit initialization output.  Keep the comparison
+    # scoped to rev-list records, just like the existing phase regressions.
+    capsys.readouterr()
 
     args = ["--objects", "--filter=blob:limit=8", "--missing=print-info", head]
     assert run_rev_list_disk_usage(args) == 0
