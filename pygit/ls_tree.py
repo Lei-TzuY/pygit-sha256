@@ -168,22 +168,22 @@ def _collect_ls_tree_promises(
     Foreign partial-clone trees retain native SHA-1 entry identities until a
     promised blob is materialized. ``ls_tree`` ultimately reports repository
     visible SHA-256 object names, so every selected unresolved blob must be
-    materialized before the normal formatter can validate its object id.  This
+    materialized before the normal formatter can validate its object id. This
     planner mirrors the existing pathspec/descent rules without touching
     ``TreeEntry.sha`` for blobs, allowing the selected set to be fetched once.
     """
     promised: Set[str] = set()
-    pending: List[Tuple[str, str]] = [(root_oid, "")]
-    active: Set[str] = set()
+    pending: List[Tuple[str, str, Set[str]]] = [(root_oid, "", set())]
 
     while pending:
-        tree_oid, prefix = pending.pop()
+        tree_oid, prefix, active = pending.pop()
         if tree_oid in active:
             raise RuntimeError("tree cycle while planning ls-tree promisor objects")
         tree = repo.store.read(tree_oid)
         if not isinstance(tree, TreeObject):
             raise RuntimeError(f"tree entry {tree_oid} does not reference a tree")
-        active.add(tree_oid)
+        next_active = set(active)
+        next_active.add(tree_oid)
 
         for item in tree.entries:
             _validate_name(item.name)
@@ -197,7 +197,7 @@ def _collect_ls_tree_promises(
                 else:
                     descend = _needs_nonrecursive_descent(path, patterns)
                 if descend:
-                    pending.append((item.sha, path))
+                    pending.append((item.sha, path, next_active))
                 continue
 
             if directories_only or not matched or item.is_resolved or not item.native_oid:
@@ -223,8 +223,8 @@ def ls_tree(
     expression, annotated tag, tree object, or ``REV:path`` expression accepted
     by :func:`pygit.revision.resolve_revision`.
 
-    Without ``recursive``, direct children are reported.  A nested pathspec may
-    still cause the minimum subtree traversal needed to reach that path.  With
+    Without ``recursive``, direct children are reported. A nested pathspec may
+    still cause the minimum subtree traversal needed to reach that path. With
     recursion enabled, tree entries are omitted unless ``show_trees`` or
     ``directories_only`` is requested.
     """
@@ -258,18 +258,22 @@ def ls_tree(
         for item in sorted(tree.entries, key=lambda entry: entry.name):
             _validate_name(item.name)
             kind = _entry_type(item.mode)
-            oid = _validate_oid(item.sha)
             path = f"{prefix}/{item.name}" if prefix else item.name
             matched = _matches(path, selected_patterns)
 
             if kind == "tree":
-                if matched and (not recursive or show_trees or directories_only):
-                    records.append(LsTreeEntry(item.mode, kind, oid, path))
-
+                include_tree = matched and (not recursive or show_trees or directories_only)
                 if recursive:
                     descend = _may_descend(path, selected_patterns)
                 else:
                     descend = _needs_nonrecursive_descent(path, selected_patterns)
+                if not include_tree and not descend:
+                    continue
+
+                oid = _validate_oid(item.sha)
+                if include_tree:
+                    records.append(LsTreeEntry(item.mode, kind, oid, path))
+
                 if descend:
                     child = repo.store.read(oid)
                     if not isinstance(child, TreeObject):
@@ -280,6 +284,7 @@ def ls_tree(
                 continue
 
             if not directories_only and matched:
+                oid = _validate_oid(item.sha)
                 records.append(LsTreeEntry(item.mode, kind, oid, path))
 
     walk(root_oid, "", set())
