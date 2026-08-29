@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 
 import pytest
 
@@ -129,8 +130,10 @@ def test_ls_tree_ordinary_repository_never_prefetches(tmp_path, monkeypatch):
     repo.add(["local.txt"])
     repo.commit("local", author_name="Test", author_email="test@example.com")
 
+    ls_tree_module = importlib.import_module("pygit.ls_tree")
     monkeypatch.setattr(
-        "pygit.ls_tree.materialize_promised_objects",
+        ls_tree_module,
+        "materialize_promised_objects",
         lambda *args, **kwargs: pytest.fail("ordinary ls-tree must not prefetch"),
     )
 
