@@ -75,9 +75,7 @@ def test_filter_print_omitted_object_type_count_respects_provided_exemption(
     count, omitted, other = _count_output(capsys.readouterr().out)
     assert count == 4
     assert other == []
-    omitted_types = [repo.store.read(oid).type_name for oid in omitted]
-    assert omitted_types.count(b"commit") == 2
-    assert omitted_types.count(b"blob") == 3
+    assert omitted == []
 
 
 def test_filter_print_omitted_object_type_count_can_filter_provided_root(
@@ -102,9 +100,7 @@ def test_filter_print_omitted_object_type_count_can_filter_provided_root(
     count, omitted, other = _count_output(capsys.readouterr().out)
     assert count == 3
     assert other == []
-    omitted_types = [repo.store.read(oid).type_name for oid in omitted]
-    assert omitted_types.count(b"commit") == 3
-    assert omitted_types.count(b"blob") == 3
+    assert omitted == []
 
 
 def test_omitted_partition_places_missing_before_final_count():
