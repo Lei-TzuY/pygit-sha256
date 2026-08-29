@@ -20,9 +20,10 @@ confused with selected present objects:
   missing objects.
 
 Boundary commits are different: a genuine `--boundary` commit is a present
-traversal object and does contribute to the count. In particular, under
-`--reverse` a limit-induced boundary may be the first textual `-<oid>` record,
-so classifying every leading dash record as an object edge would be incorrect.
+traversal object and does contribute to the count. Phase240/243 already model
+that distinction, including edge/boundary overlap and limit-induced boundary
+snapshot roots, so the filter layer must not reconstruct those semantics from
+textual `-` records.
 
 ## Native Git baseline
 
@@ -41,23 +42,30 @@ A native SHA-256 repository was exercised directly. The observed contract is:
 ## Implementation
 
 Phase247 does not change `promisor_object_inventory` or revision selection.
-Instead, count mode deliberately reuses the established uncounted traversal:
+Count mode keeps the existing Phase240/243 count implementation authoritative:
 
-1. remove only `--filter=blob:none` and `--count` from the projection;
-2. run the existing Phase237-243 metadata-only missing/object-edge/boundary
-   presentation;
-3. remove present blobs by reading only already-local SHA-256 objects;
-4. remove promised blobs through persistent promisor kind metadata without
-   fetching them;
-5. retain non-blob `?missing` records but do not count them;
-6. retain explicit object-edge records but do not count them;
-7. count every remaining present record, including genuine boundary commits;
-8. emit the final integer.
+1. remove only `--filter=blob:none` and run the existing projected request **with
+   `--count` still present**;
+2. retain that output's already-correct edge/boundary/missing framing and final
+   unfiltered present-object integer;
+3. run a second metadata-only inspection traversal with `--count` removed;
+4. for inspection only, project `--objects-edge` to `--objects` so Phase236's
+   boundary snapshot-root planner exposes the complete selected/boundary object
+   closure while the original negative revisions remain authoritative;
+5. count only already-present local `BlobObject` records in that inspection;
+6. subtract that present-blob count from the authoritative numeric result;
+7. remove promised blob `?missing` records from the retained count framing;
+8. leave explicit object-edge records and non-blob missing records unchanged.
 
-Explicit object edges are identified by reusing Phase234's
-`_promisor_object_edges()` planner. This intentionally avoids a textual
-"leading dash means edge" heuristic, which would misclassify a reverse-ordered
-boundary when there is no explicit exclusion edge.
+This split is intentional. The line-oriented uncounted Phase243 presentation is
+not itself a sufficient source for reconstructing count semantics in every
+edge/boundary combination; the established count path may compute boundary
+snapshot contributions directly from inventory. Phase247 therefore performs
+filter subtraction instead of reimplementing that logic.
+
+Promised blobs require no numeric subtraction because existing missing-object
+count modes never count them in the first place. Persistent promisor kind
+metadata is used only to suppress their `?missing` records, without fetching.
 
 ## Supported composition
 
@@ -89,7 +97,7 @@ Phase247 preserves the existing dual-domain rule:
 
 ## Network and mutation guarantees
 
-The count path remains metadata-only:
+Both the authoritative count pass and the inspection pass remain metadata-only:
 
 - no single-object promisor fetch;
 - no batch promisor fetch;
@@ -101,14 +109,14 @@ The count path remains metadata-only:
 
 Focused tests cover:
 
-- an ordinary repository where a present local blob must be removed from the
+- an ordinary repository where a present local blob must be subtracted from the
   numeric count;
 - `allow-promisor`, plain `print`, and `print-info` over a real foreign
   `blob:none` promise with zero fetches and unchanged promisor state;
 - `--objects-edge --boundary --max-count --count`, proving explicit edges are
-  excluded while a distinct limit-induced boundary is counted;
+  excluded while a distinct limit-induced boundary and its snapshot are counted;
 - `--reverse` with `--objects-edge` but no explicit exclusion edge, proving a
-  front-positioned boundary is still counted;
+  boundary remains part of the authoritative count regardless of textual order;
 - continued rejection of `-z + --filter=blob:none`.
 
 Phase247 changes no object format, tree serialization, pack format, wire
