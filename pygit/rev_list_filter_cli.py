@@ -1,17 +1,16 @@
-"""Metadata-only ``rev-list --filter=blob:none`` adapter.
+"""Metadata-only ``rev-list --filter`` adapters.
 
 The promisor-aware rev-list paths already know how to traverse partial-clone
-metadata without materializing promised blobs. This adapter composes Git's
-``blob:none`` object filter with those paths instead of falling back to the
-historical object walker, where touching a foreign tree entry could trigger a
-lazy fetch.
+metadata without materializing promised blobs. These adapters compose Git object
+filters with that traversal instead of falling back to the historical object
+walker, where touching a foreign tree entry could trigger a lazy fetch.
 
-Phase246 introduced line-oriented filtering for the missing-object traversal.
-Phase247 extends the same projection to ``--count`` by mirroring the established
-Phase240/243 structured count formula on the Phase232 object inventory, while
-excluding blobs before counting. Phase248 composes the same filter with the
-Phase244/245 NUL object-record protocol by filtering inventory entries before
-NUL presentation instead of parsing emitted bytes.
+Phase246 introduced ``blob:none`` line filtering, Phase247 added structured
+counting, and Phase248 composed the filter with NUL records. Phase249 adds the
+line-oriented ``object:type=(commit|tree|blob)`` filter. Selected commits and
+explicit object edges retain Git's provided/presentation exemptions, while
+ordinary snapshot objects, boundary commits, and promised objects are filtered
+by their known type without materialization.
 """
 
 from __future__ import annotations
@@ -32,6 +31,7 @@ _SUPPORTED_MISSING = {
     "--missing=print",
     "--missing=print-info",
 }
+_SUPPORTED_OBJECT_TYPES = {"commit", "tree", "blob"}
 
 
 def _filter_spec(argv: Sequence[str]) -> Optional[str]:
@@ -41,12 +41,23 @@ def _filter_spec(argv: Sequence[str]) -> Optional[str]:
     if len(filters) != 1:
         raise ValueError("rev-list accepts exactly one --filter action in this phase")
     spec = filters[0].split("=", 1)[1]
-    if spec != "blob:none":
-        raise ValueError("pygit currently supports --filter=blob:none with --missing")
-    return spec
+    if spec == "blob:none":
+        return spec
+    if spec.startswith("object:type="):
+        requested = spec.split("=", 1)[1]
+        if requested in _SUPPORTED_OBJECT_TYPES:
+            return spec
+        if requested == "tag":
+            raise ValueError(
+                "--filter=object:type=tag is not yet supported; annotated-tag traversal is not modelled"
+            )
+    raise ValueError(
+        "pygit currently supports --filter=blob:none and object:type=commit|tree|blob"
+    )
 
 
 def _project(argv: Sequence[str]) -> list[str]:
+    """Project ``blob:none`` onto an already-supported underlying traversal."""
     projected = [arg for arg in argv if not arg.startswith("--filter=")]
     missing = [arg for arg in projected if arg.startswith("--missing=")]
 
@@ -69,6 +80,21 @@ def _project(argv: Sequence[str]) -> list[str]:
     return projected
 
 
+def _project_object_type(argv: Sequence[str]) -> list[str]:
+    """Project one line-oriented ``object:type`` request onto missing traversal."""
+    projected = [arg for arg in argv if not arg.startswith("--filter=")]
+    if "-z" in projected:
+        raise ValueError("--filter=object:type with -z is not yet supported")
+    if "--count" in projected:
+        raise ValueError("--filter=object:type with --count is not yet supported")
+    missing = [arg for arg in projected if arg.startswith("--missing=")]
+    if len(missing) != 1 or missing[0] not in _SUPPORTED_MISSING:
+        raise ValueError(
+            "--filter=object:type currently requires --missing=allow-promisor, print, or print-info"
+        )
+    return projected
+
+
 def _run_projected(argv: Sequence[str]) -> tuple[int, tuple[str, ...]]:
     capture = io.StringIO()
     with redirect_stdout(capture):
@@ -76,12 +102,12 @@ def _run_projected(argv: Sequence[str]) -> tuple[int, tuple[str, ...]]:
         if code is None:
             code = _promisor.try_run_rev_list_allow_promisor(argv)
     if code is None:
-        raise RuntimeError("promisor rev-list adapter declined blob:none projection")
+        raise RuntimeError("promisor rev-list adapter declined filter projection")
     return code, tuple(capture.getvalue().splitlines())
 
 
 def _parse_inventory_request(argv: Sequence[str]):
-    """Parse count selection through the core ``--objects`` missing adapter.
+    """Parse selection through the core ``--objects`` missing adapter.
 
     Plain ``print`` is projected to ``print-info`` because both modes share the
     same traversal, and ``--objects-edge`` is projected to ``--objects`` because
@@ -100,7 +126,7 @@ def _parse_inventory_request(argv: Sequence[str]):
 
     parsed = _promisor._parse_allow_promisor(parse_argv)
     if parsed is None:
-        raise RuntimeError("promisor parser declined blob:none count projection")
+        raise RuntimeError("promisor parser declined filter projection")
     return parsed
 
 
@@ -125,6 +151,109 @@ def _is_blob_line(repo, line: str) -> bool:
         # SHA-256 as a present record. Keep the line so downstream integrity
         # semantics remain visible instead of silently hiding damage.
         return False
+
+
+def _line_oid(line: str) -> tuple[str, str]:
+    """Return (prefix, oid) for one line-oriented object record."""
+    token = line.split(None, 1)[0] if line else ""
+    prefix = token[:1] if token[:1] in {"?", "-"} else ""
+    oid = token[1:] if prefix else token
+    return prefix, oid.lower()
+
+
+def _local_type(repo, oid: str) -> Optional[str]:
+    if len(oid) != 64 or any(ch not in "0123456789abcdef" for ch in oid):
+        return None
+    try:
+        obj = repo.store.read(oid)
+    except (FileNotFoundError, KeyError):
+        return None
+    value = getattr(obj, "type_name", None)
+    if not isinstance(value, (bytes, bytearray)):
+        return None
+    return bytes(value).decode("ascii")
+
+
+def _object_type_context(repo, argv: Sequence[str]):
+    """Return parsed selection plus Git-style selected/edge exemptions."""
+    parsed = _parse_inventory_request(argv)
+    selected = {
+        entry.oid.lower()
+        for entry in _promisor.rev_list(
+            repo,
+            parsed["revisions"],
+            all_refs=parsed["all_refs"],
+            first_parent=parsed["first_parent"],
+            topo_order=parsed["topo_order"],
+            reverse=parsed["reverse"],
+            skip=parsed["skip"],
+            max_count=parsed["max_count"],
+            left_right=False,
+        )
+    }
+    edges = frozenset()
+    if "--objects-edge" in argv:
+        edges = frozenset(
+            _promisor._promisor_object_edges(
+                repo,
+                parsed["revisions"],
+                all_refs=parsed["all_refs"],
+                first_parent=parsed["first_parent"],
+            )
+        )
+    return parsed, selected, edges
+
+
+def _keep_object_type_line(
+    repo,
+    line: str,
+    *,
+    requested: str,
+    selected: set[str],
+    edges: frozenset[str],
+) -> bool:
+    """Apply Git's object:type filter without hiding explicit commit framing."""
+    if not line:
+        return False
+    prefix, oid = _line_oid(line)
+
+    # Commits selected by the revision walk are explicit traversal records and
+    # remain visible for tree/blob filters. Likewise --objects-edge advertises
+    # explicit exclusion edges independently of the object filter.
+    if prefix == "" and oid in selected:
+        return True
+    if prefix == "-" and oid in edges:
+        return True
+
+    if prefix == "?":
+        kind = promised_kind(repo.pygit_dir, oid)
+        if kind is None:
+            raise RuntimeError(f"missing object {oid} has no promisor type metadata")
+        return kind == requested
+
+    kind = _local_type(repo, oid)
+    if kind is None:
+        # Preserve malformed/unrecognised records instead of silently masking
+        # integrity problems behind a filter decision we cannot make.
+        return True
+    return kind == requested
+
+
+def _run_object_type_filter(argv: Sequence[str], *, requested: str) -> int:
+    projected = _project_object_type(argv)
+    code, lines = _run_projected(projected)
+    repo = _promisor._find_repo()
+    _parsed, selected, edges = _object_type_context(repo, projected)
+    for line in lines:
+        if _keep_object_type_line(
+            repo,
+            line,
+            requested=requested,
+            selected=selected,
+            edges=edges,
+        ):
+            print(line)
+    return code
 
 
 def _filtered_present_count(repo, argv: Sequence[str]) -> int:
@@ -166,10 +295,6 @@ def _filtered_present_count(repo, argv: Sequence[str]) -> int:
             if not entry.missing and entry.type_name != "blob"
         )
 
-    # Boundary presentation owns the selected/boundary commit records. The
-    # inventory still contains top-level selected commit entries, so count only
-    # present non-blob snapshot objects below that presentation layer. Path-
-    # bearing commit objects (gitlinks) remain legitimate snapshot objects.
     snapshot_present = sum(
         1
         for entry in entries
@@ -201,9 +326,6 @@ def _render_filtered_count(repo, argv: Sequence[str], lines: Sequence[str]) -> N
     except ValueError as exc:
         raise RuntimeError("rev-list count projection did not end with an integer") from exc
 
-    # Existing count adapters already own object-edge ordering, edge/boundary
-    # deduplication, and print-family missing framing. Keep those records, except
-    # for promised blobs which blob:none removes from the output entirely.
     for line in lines[:-1]:
         if not _is_blob_line(repo, line):
             print(line)
@@ -211,10 +333,14 @@ def _render_filtered_count(repo, argv: Sequence[str], lines: Sequence[str]) -> N
 
 
 def try_run_rev_list_filter(argv: Sequence[str]) -> Optional[int]:
-    """Handle ``--filter=blob:none`` for metadata-only object traversal."""
+    """Handle supported metadata-only ``rev-list --filter`` modes."""
 
-    if _filter_spec(argv) is None:
+    spec = _filter_spec(argv)
+    if spec is None:
         return None
+
+    if spec.startswith("object:type="):
+        return _run_object_type_filter(argv, requested=spec.split("=", 1)[1])
 
     projected = _project(argv)
 
