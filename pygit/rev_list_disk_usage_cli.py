@@ -16,6 +16,7 @@ from .cat_file import object_disk_size
 from .count_objects_cli import _human_size
 from .entrypoint import _find_repo
 from .rev_list_header_cli import run_rev_list_header
+from .rev_list_missing_print_cli import try_run_rev_list_missing_print
 from .rev_list_promisor_cli import try_run_rev_list_allow_promisor
 
 
@@ -132,6 +133,10 @@ def _selected_oids(output: str, *, object_edge: bool) -> tuple[tuple[str, ...], 
 
 def run_rev_list_disk_usage(argv: Sequence[str]) -> int:
     """Run rev-list with Git-style ``--disk-usage[=human]`` accounting."""
+
+    missing_print_code = try_run_rev_list_missing_print(argv)
+    if missing_print_code is not None:
+        return missing_print_code
 
     promisor_code = try_run_rev_list_allow_promisor(argv)
     if promisor_code is not None:
