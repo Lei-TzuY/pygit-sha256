@@ -9,9 +9,9 @@ lazy fetch.
 Phase246 introduced line-oriented filtering for the missing-object traversal.
 Phase247 extends the same projection to ``--count`` by mirroring the established
 Phase240/243 structured count formula on the Phase232 object inventory, while
-excluding blobs before counting. Boundary roots, edge overlap, revision limits,
-and explicit exclusion subtraction therefore remain owned by their existing
-planners rather than being reconstructed from presentation text.
+excluding blobs before counting. Phase248 composes the same filter with the
+Phase244/245 NUL object-record protocol by filtering inventory entries before
+NUL presentation instead of parsing emitted bytes.
 """
 
 from __future__ import annotations
@@ -21,9 +21,17 @@ from contextlib import redirect_stdout
 from typing import Optional, Sequence
 
 from . import rev_list_missing_print_cli as _missing_print
+from . import rev_list_nul_cli as _nul
 from . import rev_list_promisor_cli as _promisor
 from .objects import BlobObject
 from .promisor import promised_kind
+
+
+_SUPPORTED_MISSING = {
+    "--missing=allow-promisor",
+    "--missing=print",
+    "--missing=print-info",
+}
 
 
 def _filter_spec(argv: Sequence[str]) -> Optional[str]:
@@ -40,14 +48,21 @@ def _filter_spec(argv: Sequence[str]) -> Optional[str]:
 
 def _project(argv: Sequence[str]) -> list[str]:
     projected = [arg for arg in argv if not arg.startswith("--filter=")]
-    if "-z" in projected:
-        raise ValueError("--filter=blob:none with -z is not yet supported")
     missing = [arg for arg in projected if arg.startswith("--missing=")]
-    if len(missing) != 1 or missing[0] not in {
-        "--missing=allow-promisor",
-        "--missing=print",
-        "--missing=print-info",
-    }:
+
+    # NUL framing already has a structured ordinary-repository mode, so an
+    # explicit missing policy is optional there. If supplied, keep the same
+    # three metadata-only promisor modes supported by the line-oriented path.
+    if "-z" in projected:
+        if len(missing) > 1:
+            raise ValueError("rev-list accepts exactly one --missing action")
+        if missing and missing[0] not in _SUPPORTED_MISSING:
+            raise ValueError(
+                "--filter=blob:none with -z supports --missing=allow-promisor, print, or print-info"
+            )
+        return projected
+
+    if len(missing) != 1 or missing[0] not in _SUPPORTED_MISSING:
         raise ValueError(
             "--filter=blob:none currently requires --missing=allow-promisor, print, or print-info"
         )
@@ -196,12 +211,19 @@ def _render_filtered_count(repo, argv: Sequence[str], lines: Sequence[str]) -> N
 
 
 def try_run_rev_list_filter(argv: Sequence[str]) -> Optional[int]:
-    """Handle ``--filter=blob:none`` for metadata-only missing-object traversal."""
+    """Handle ``--filter=blob:none`` for metadata-only object traversal."""
 
     if _filter_spec(argv) is None:
         return None
 
     projected = _project(argv)
+
+    if "-z" in projected:
+        code = _nul.try_run_rev_list_nul(projected, omit_blobs=True)
+        if code is None:
+            raise RuntimeError("NUL rev-list adapter declined blob:none projection")
+        return code
+
     count = "--count" in projected
     code, lines = _run_projected(projected)
     repo = _promisor._find_repo()
