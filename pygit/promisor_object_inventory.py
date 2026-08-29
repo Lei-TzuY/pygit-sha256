@@ -19,7 +19,7 @@ from typing import Iterable, List, Optional, Sequence, Set, Tuple
 from .objects import CommitObject, TagObject, TreeObject
 from .promisor import promised_kind
 from .repo import Repository
-from .rev_list import _object_exclusion_roots, rev_list
+from .rev_list import _object_exclusion_roots, _shallow_boundaries, rev_list
 
 
 _MODE_TYPE = {
@@ -164,6 +164,7 @@ def _walk_commit_closure(
     output: List[PromisorObjectInventoryEntry] = []
     seen: Set[tuple[str, str]] = set()
     visited_commits: Set[str] = set()
+    shallow = _shallow_boundaries(repo)
     pending = [oid.lower() for oid in roots]
 
     while pending:
@@ -202,6 +203,8 @@ def _walk_commit_closure(
             seen=seen,
             active=set(),
         )
+        if oid in shallow:
+            continue
         parents = obj.parents[:1] if first_parent else obj.parents
         pending.extend(parent.lower() for parent in parents)
 
