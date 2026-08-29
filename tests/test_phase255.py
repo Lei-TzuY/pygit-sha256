@@ -63,7 +63,7 @@ def test_blob_none_boundary_includes_boundary_snapshot_blob_and_orders_after_tra
     assert f"~{c2}" not in tokens
 
 
-def test_object_type_tree_boundary_moves_filtered_boundary_commit_to_omitted(
+def test_object_type_tree_boundary_matches_native_empty_omit_set(
     tmp_path, monkeypatch, capsys
 ):
     repo, (_c1, c2, c3) = _changing_three_commit_repo(tmp_path)
@@ -83,20 +83,15 @@ def test_object_type_tree_boundary_moves_filtered_boundary_commit_to_omitted(
     ) == 0
 
     tokens = _tokens(capsys.readouterr().out)
-    omitted = _omitted(tokens)
     assert c3 in tokens
     assert f"-{c2}" not in tokens
-    assert c2 in omitted
-    assert sum(repo.store.read(oid).type_name == b"commit" for oid in omitted) == 1
-    assert sum(repo.store.read(oid).type_name == b"blob" for oid in omitted) == 2
-    kept_local = [token for token in tokens if not token.startswith(("~", "-", "?")) and token != c3]
+    assert _omitted(tokens) == []
+    kept_local = [token for token in tokens if not token.startswith(("-", "?")) and token != c3]
     assert kept_local
     assert all(repo.store.read(token).type_name == b"tree" for token in kept_local)
-    first_omitted = min(i for i, token in enumerate(tokens) if token.startswith("~"))
-    assert all(not token.startswith("~") for token in tokens[:first_omitted])
 
 
-def test_filter_provided_objects_boundary_omits_positive_root_and_boundary_commit(
+def test_filter_provided_objects_boundary_still_has_empty_object_type_omit_set(
     tmp_path, monkeypatch, capsys
 ):
     repo, (_c1, c2, c3) = _changing_three_commit_repo(tmp_path)
@@ -117,13 +112,10 @@ def test_filter_provided_objects_boundary_omits_positive_root_and_boundary_commi
     ) == 0
 
     tokens = _tokens(capsys.readouterr().out)
-    omitted = _omitted(tokens)
     assert c3 not in tokens
     assert f"-{c2}" not in tokens
-    assert c3 in omitted
-    assert c2 in omitted
-    assert sum(repo.store.read(oid).type_name == b"commit" for oid in omitted) == 2
-    kept_local = [token for token in tokens if not token.startswith(("~", "-", "?"))]
+    assert _omitted(tokens) == []
+    kept_local = [token for token in tokens if not token.startswith(("-", "?"))]
     assert kept_local
     assert all(repo.store.read(token).type_name == b"tree" for token in kept_local)
 
