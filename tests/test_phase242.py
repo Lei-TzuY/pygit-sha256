@@ -154,17 +154,17 @@ def test_missing_objects_edge_count_excludes_edges_and_promises(
 
 
 @pytest.mark.parametrize("missing_mode", ["print", "print-info"])
-def test_missing_objects_edge_boundary_combination_remains_deferred(
+def test_missing_objects_edge_still_rejects_duplicate_object_modes(
     tmp_path, monkeypatch, missing_mode
 ):
     repo, _base, _tip, _base_blob, _tip_blob = _partial_range_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
 
-    with pytest.raises(ValueError, match="--boundary with --objects-edge"):
+    with pytest.raises(ValueError, match="requires exactly one of --objects or --objects-edge"):
         run_rev_list_disk_usage(
             [
+                "--objects",
                 "--objects-edge",
-                "--boundary",
                 f"--missing={missing_mode}",
                 "HEAD",
             ]
