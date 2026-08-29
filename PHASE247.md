@@ -27,26 +27,25 @@ rather than infer semantics from textual `-` records.
 
 ## Native Git baseline
 
-A native SHA-256 repository was exercised directly for the basic filtered
-object-count behavior. The project contract retained by this stacked path is:
+A native SHA-256 repository was exercised directly. The observed project
+contract is:
 
-- `rev-list --objects --filter=blob:none --count HEAD` reports the number of
-  present records in the filtered object stream used by the existing
-  promisor-aware count adapter;
+- `rev-list --objects --filter=blob:none --count HEAD` reports the filtered
+  present-object count used by the existing promisor-aware object traversal;
 - local blobs omitted by `blob:none` do not contribute to the integer;
-- `--objects-edge --count` may keep explicit `-edge` records in the established
-  adapter framing, but those excluded commits do not contribute to the integer;
-- `--boundary --count` counts boundary commits which remain in the structured
-  boundary stream;
-- when the same explicit exclusion is both an object edge and a boundary,
-  Phase243 deduplicates that record before the filtered count is derived.
+- `--objects-edge --count` keeps explicit `-edge` records in the established
+  adapter framing, but excluded edges do not contribute to the integer;
+- genuine `--boundary` commits that remain in the structured boundary stream do
+  contribute to the count;
+- explicit edge/boundary overlap is deduplicated by Phase243 before the filtered
+  count is derived.
 
-The exact `--objects-edge --boundary --max-count` result must therefore be based
-on the structured boundary planner, not on an assumption that the parent just
-outside `--max-count` is always an additional boundary. In the regression range
-used here (`c1..c3`, `--max-count=1`), `c1` is the explicit edge/boundary and no
-separate `c2` boundary record is produced; after `blob:none`, the counted present
-records are the selected `c3` commit and its root tree.
+Revision ordering matters when a test uses `--max-count` to create a distinct
+limit boundary. Phase247 therefore gives its synthetic three-commit history
+strictly increasing commit timestamps. With deterministic `c3 -> c2 -> c1`
+ordering, `c1..c3 --max-count=1` keeps `c1` as the explicit edge and introduces
+`c2` as the distinct limit boundary; after `blob:none`, the counted present set
+is `c3`, `c2`, and their two distinct root trees.
 
 ## Implementation
 
@@ -74,7 +73,7 @@ inventory:
    old numeric tail, suppress promised blob missing records, and emit the newly
    computed filtered integer.
 
-This deliberately avoids both failed shortcuts discovered during CI:
+This deliberately avoids both failed shortcuts discovered during development:
 
 - counting lines from the uncounted Phase243 presentation can miss snapshot
   contributions which Phase240 computes structurally;
@@ -130,8 +129,9 @@ Focused tests cover:
   numeric count;
 - `allow-promisor`, plain `print`, and `print-info` over a real foreign
   `blob:none` promise with zero fetches and unchanged promisor state;
-- `--objects-edge --boundary --max-count --count`, proving an explicit
-  edge/boundary overlap is emitted once and is excluded from the filtered count;
+- deterministic `--objects-edge --boundary --max-count --count`, proving an
+  explicit edge is excluded while a distinct limit-induced boundary and its
+  non-blob snapshot remain counted;
 - `--reverse` with `--objects-edge` but no explicit exclusion edge, proving a
   genuine limit-induced boundary remains part of the structured count regardless
   of textual order;
@@ -139,14 +139,18 @@ Focused tests cover:
 
 ## CI correction
 
-The first full Phase247 matrix exposed one regression-test assumption rather
-than a traversal defect. The test expected `c2` to appear as a second
-limit-induced boundary in `c1..c3 --max-count=1`, but the established boundary
-planner returns the explicit `c1` boundary, which overlaps the object edge and
-is deduplicated. The observed adapter output was therefore correctly
-`-c1` followed by the filtered count `2`. The regression and this document were
-updated to describe the planner-owned result instead of forcing an invented
-boundary into production traversal.
+The first two full matrix runs exposed a test-fixture ordering bug. The synthetic
+ordinary commits were created within the same wall-clock second, so their commit
+timestamps tied and rev-list was allowed to fall back to OID ordering. Depending
+on the generated OIDs, the same range test could legitimately exercise a
+different selected/boundary ordering: one run produced a filtered count of `2`,
+and the next produced `4` after only the expected assertion changed.
+
+The fix is to make the fixture deterministic rather than teach production code
+a false ordering rule. `_ordinary_three_commit_repo()` now passes explicit,
+strictly increasing `commit_date` values (`1`, `2`, `3`) to `Repository.commit()`.
+The regression can therefore assert the intended `c3 -> c2 -> c1` history and a
+stable filtered count of `4` on every runner.
 
 Phase247 changes no object format, tree serialization, pack format, wire
 protocol, ref/index/worktree format, or promisor identity representation.
