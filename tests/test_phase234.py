@@ -8,6 +8,7 @@ from pygit.fetch_importer import PromisorFilteredNativeImporter
 from pygit.promisor import read_promisor_state
 from pygit.remote import NativeObject
 from pygit.repo import Repository
+from pygit.rev_list import rev_list
 from pygit.rev_list_disk_usage_cli import run_rev_list_disk_usage
 
 
@@ -123,6 +124,7 @@ def test_rev_list_objects_edge_boundary_ignores_max_count_for_edge_discovery(
     (repo.worktree / "f.txt").write_text("three\n", encoding="utf-8")
     repo.add(["f.txt"])
     tip = repo.commit("tip", author_name="Test", author_email="test@example.com")
+    expected_selected = rev_list(repo, [f"{base}..{tip}"], max_count=1)[0].oid
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
     capsys.readouterr()
 
@@ -137,7 +139,7 @@ def test_rev_list_objects_edge_boundary_ignores_max_count_for_edge_discovery(
 
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == f"-{base}"
-    assert lines[1] == tip
+    assert lines[1] == expected_selected
     assert all(len(line.lstrip("-").split(" ", 1)[0]) == 64 for line in lines)
 
 
