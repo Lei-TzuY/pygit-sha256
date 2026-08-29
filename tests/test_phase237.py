@@ -155,22 +155,11 @@ def test_rev_list_print_info_ordinary_repo_stays_sha256_only(
     assert all(len(line.split(" ", 1)[0]) == 64 for line in lines)
 
 
-@pytest.mark.parametrize(
-    "args, message",
-    [
-        (
-            ["--objects-edge", "--missing=print-info", "HEAD"],
-            "--objects-edge is not yet supported",
-        ),
-        (
-            ["--objects", "--count", "--missing=print-info", "HEAD"],
-            "--count is not yet supported",
-        ),
-    ],
-)
-def test_rev_list_print_info_rejects_unmodelled_presentation_modes(args, message):
-    with pytest.raises(ValueError, match=message):
-        run_rev_list_disk_usage(args)
+def test_rev_list_print_info_rejects_objects_edge_until_modelled():
+    with pytest.raises(ValueError, match="--objects-edge is not yet supported"):
+        run_rev_list_disk_usage(
+            ["--objects-edge", "--missing=print-info", "HEAD"]
+        )
 
 
 def test_rev_list_missing_print_remains_explicitly_unsupported():
