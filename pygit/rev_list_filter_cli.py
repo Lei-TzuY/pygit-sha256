@@ -10,7 +10,9 @@ counting, and Phase248 composed the filter with NUL records. Phase249 adds the
 line-oriented ``object:type=(commit|tree|blob)`` filter. Phase250 corrects the
 provided-object exemption to positive traversal roots and adds structured count
 framing for the same object:type subset. Phase251 composes that object:type
-filter with Git's NUL-delimited object metadata protocol.
+filter with Git's NUL-delimited object metadata protocol. Phase252 adds
+``--filter-provided-objects`` so explicitly provided positive roots can opt into
+the same object filter instead of always bypassing it.
 """
 
 from __future__ import annotations
@@ -33,11 +35,14 @@ _SUPPORTED_MISSING = {
     "--missing=print-info",
 }
 _SUPPORTED_OBJECT_TYPES = {"commit", "tree", "blob"}
+_FILTER_PROVIDED = "--filter-provided-objects"
 
 
 def _filter_spec(argv: Sequence[str]) -> Optional[str]:
     filters = [arg for arg in argv if arg.startswith("--filter=")]
     if not filters:
+        if _FILTER_PROVIDED in argv:
+            raise ValueError("--filter-provided-objects requires --filter")
         return None
     if len(filters) != 1:
         raise ValueError("rev-list accepts exactly one --filter action in this phase")
@@ -59,7 +64,11 @@ def _filter_spec(argv: Sequence[str]) -> Optional[str]:
 
 def _project(argv: Sequence[str]) -> list[str]:
     """Project ``blob:none`` onto an already-supported underlying traversal."""
-    projected = [arg for arg in argv if not arg.startswith("--filter=")]
+    projected = [
+        arg
+        for arg in argv
+        if not arg.startswith("--filter=") and arg != _FILTER_PROVIDED
+    ]
     missing = [arg for arg in projected if arg.startswith("--missing=")]
 
     # NUL framing already has a structured ordinary-repository mode, so an
@@ -83,7 +92,11 @@ def _project(argv: Sequence[str]) -> list[str]:
 
 def _project_object_type(argv: Sequence[str]) -> list[str]:
     """Project one ``object:type`` request onto metadata-only object traversal."""
-    projected = [arg for arg in argv if not arg.startswith("--filter=")]
+    projected = [
+        arg
+        for arg in argv
+        if not arg.startswith("--filter=") and arg != _FILTER_PROVIDED
+    ]
     missing = [arg for arg in projected if arg.startswith("--missing=")]
 
     # Structured -z mode supports ordinary repositories without an explicit
@@ -218,10 +231,19 @@ def _provided_commit_roots(repo, parsed) -> frozenset[str]:
     return frozenset(oid.lower() for oid in roots)
 
 
-def _object_type_context(repo, argv: Sequence[str]):
+def _object_type_context(
+    repo,
+    argv: Sequence[str],
+    *,
+    filter_provided_objects: bool = False,
+):
     """Return parsed selection plus Git-style provided-root/edge exemptions."""
     parsed = _parse_inventory_request(argv)
-    provided = _provided_commit_roots(repo, parsed)
+    provided = (
+        frozenset()
+        if filter_provided_objects
+        else _provided_commit_roots(repo, parsed)
+    )
     edges = frozenset()
     if "--objects-edge" in argv:
         edges = frozenset(
@@ -345,25 +367,21 @@ def _object_type_present_count(
 
 
 def _run_object_type_filter(argv: Sequence[str], *, requested: str) -> int:
+    filter_provided_objects = _FILTER_PROVIDED in argv
     projected = _project_object_type(argv)
     repo = _promisor._find_repo()
-    parsed, provided, edges = _object_type_context(repo, projected)
+    parsed, provided, edges = _object_type_context(
+        repo,
+        projected,
+        filter_provided_objects=filter_provided_objects,
+    )
 
     if "-z" in projected:
-        if edges:
-            # Keep the compatibility error owned by the NUL adapter rather than
-            # inventing an object-edge encoding that Git does not define for -z.
-            code = _nul.try_run_rev_list_nul(
-                projected,
-                object_type=requested,
-                provided_oids=provided,
-            )
-        else:
-            code = _nul.try_run_rev_list_nul(
-                projected,
-                object_type=requested,
-                provided_oids=provided,
-            )
+        code = _nul.try_run_rev_list_nul(
+            projected,
+            object_type=requested,
+            provided_oids=provided,
+        )
         if code is None:
             raise RuntimeError("NUL rev-list adapter declined object:type projection")
         return code
