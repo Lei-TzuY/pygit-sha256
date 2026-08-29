@@ -99,18 +99,21 @@ def test_filter_print_omitted_requires_filter(tmp_path, monkeypatch):
         )
 
 
-def test_filter_print_omitted_still_defers_nul_framing(tmp_path, monkeypatch):
+def test_filter_print_omitted_accepts_nul_framing(tmp_path, monkeypatch, capsys):
     repo = _ordinary_three_commit_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
+    capsys.readouterr()
 
-    with pytest.raises(ValueError, match="not yet supported"):
-        run_rev_list_disk_usage(
-            [
-                "--objects",
-                "-z",
-                "--filter=blob:none",
-                "--filter-print-omitted",
-                "--missing=allow-promisor",
-                "HEAD",
-            ]
-        )
+    assert run_rev_list_disk_usage(
+        [
+            "--objects",
+            "-z",
+            "--filter=blob:none",
+            "--filter-print-omitted",
+            "--missing=allow-promisor",
+            "HEAD",
+        ]
+    ) == 0
+    output = capsys.readouterr().out
+    assert "\0" in output
+    assert "~" in output
