@@ -20,6 +20,7 @@ from typing import Optional, Set, Type
 from .promisor import read_promisor_state
 from .promisor_checkout import collect_checkout_promises
 from .promisor_commit import install_promisor_commit_support
+from .promisor_diff import install_promisor_diff_support
 from .promisor_materialize import materialize_promised_objects
 from .promisor_three_way import install_promisor_three_way_support
 
@@ -67,4 +68,5 @@ def install_promisor_worktree_support(repository_cls: Type) -> None:
     # batching around existing Repository primitives.
     install_promisor_commit_support(repository_cls)
     install_promisor_three_way_support(repository_cls)
+    install_promisor_diff_support(repository_cls)
     _INSTALLED = True
