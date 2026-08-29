@@ -2,13 +2,17 @@
 
 The object-filter adapter already performs metadata-only filtering without
 materializing promisor objects. This adapter adds the complementary ``~<oid>``
-omission channel for local SHA-256 objects while keeping unresolved foreign
-promises out of the repository-visible hash domain.
+omission channel for filters that actually collect omitted objects in native
+Git while keeping unresolved foreign promises out of the repository-visible
+hash domain.
 
 Phase254 composes the omission channel with ``--count``. Git emits normal
 traversal records first, then omitted records, then missing-object diagnostics,
 and finally the count. Phase255 extends the same structured ordering to
-``--boundary`` and includes boundary snapshots when computing omitted objects.
+``--boundary`` and includes boundary snapshots when computing blob omissions.
+It also corrects an earlier compatibility assumption: Git 2.55's
+``object:type`` filter does not populate the omitted-object set, so pygit must
+not invent ``~`` records for objects merely hidden by that filter.
 """
 
 from __future__ import annotations
@@ -26,25 +30,32 @@ _DEFERRED_WITH_OMITTED = {"-z", "--objects-edge"}
 
 
 def _omitted_local_oids(repo, argv: Sequence[str], *, spec: str) -> tuple[str, ...]:
-    """Return local SHA-256 objects omitted by one supported object filter.
+    """Return genuine local SHA-256 ids collected by the active Git filter.
 
-    Git's textual omitted-object channel is an object-id channel, not an
-    arbitrary transport-id channel. pygit therefore refuses a request when an
-    unresolved promise itself would have to be reported as omitted: before
-    materialization there is no genuine local SHA-256 object id to print.
+    Git 2.55's ``filter_blobs_none()`` records filtered blobs in the omission
+    set, while ``filter_object_type()`` explicitly leaves its ``omits`` argument
+    unused. Therefore ``object:type`` may suppress traversal output but produces
+    no ``~`` records under ``--filter-print-omitted``. Matching that distinction
+    is important: reporting every filtered object would look plausible but would
+    diverge from native Git.
 
-    Boundary traversal needs the same snapshot roots as the underlying filter
-    adapter. Otherwise objects that are visited only because ``--boundary``
-    exposes the boundary snapshot would be absent from the omission set.
+    For ``blob:none``, boundary traversal needs the same snapshot roots as the
+    underlying filter adapter. Otherwise blobs that are visited only because
+    ``--boundary`` exposes an older boundary snapshot would be silently absent
+    from the omission set.
+
+    The textual omitted-object channel is a repository object-id channel. If an
+    unresolved promise itself would have to be reported as omitted, pygit fails
+    rather than substituting its foreign/native transport identity for a local
+    SHA-256 object id.
     """
 
     if spec.startswith("object:type="):
-        projected = _filter._project_object_type(argv)
-        requested = spec.split("=", 1)[1]
-    else:
-        projected = _filter._project(argv)
-        requested = None
+        return ()
+    if spec != "blob:none":
+        raise RuntimeError(f"unsupported omitted-object filter projection: {spec}")
 
+    projected = _filter._project(argv)
     parsed = _filter._parse_inventory_request(projected)
 
     snapshot_commits = None
@@ -73,27 +84,9 @@ def _omitted_local_oids(repo, argv: Sequence[str], *, spec: str) -> tuple[str, .
         snapshot_commits=snapshot_commits,
     )
 
-    provided = frozenset()
-    if spec.startswith("object:type=") and "--filter-provided-objects" not in argv:
-        provided = _filter._provided_commit_roots(repo, parsed)
-
     omitted: list[str] = []
     for entry in entries:
-        if spec == "blob:none":
-            should_omit = entry.type_name == "blob"
-        else:
-            assert requested is not None
-            should_omit = entry.type_name != requested
-            if (
-                should_omit
-                and entry.type_name == "commit"
-                and entry.path is None
-                and entry.oid is not None
-                and entry.oid.lower() in provided
-            ):
-                should_omit = False
-
-        if not should_omit:
+        if entry.type_name != "blob":
             continue
         if entry.oid is None:
             native = entry.native_oid or "<unknown>"
