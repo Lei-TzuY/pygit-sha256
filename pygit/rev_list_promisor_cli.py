@@ -168,8 +168,6 @@ def _parse_allow_promisor(argv: Sequence[str]):
             raise ValueError(
                 "--objects-edge is not yet supported with --missing=print-info"
             )
-        if boundary:
-            raise ValueError("--boundary is not yet supported with --missing=print-info")
         if count:
             raise ValueError("--count is not yet supported with --missing=print-info")
 
@@ -298,6 +296,27 @@ def _print_present(entry: PromisorObjectInventoryEntry, *, no_object_names: bool
         print(f"{entry.oid} {entry.path}")
 
 
+def _print_info_snapshot_entries(
+    entries: Sequence[PromisorObjectInventoryEntry],
+    *,
+    no_object_names: bool,
+) -> None:
+    """Render tree/object closure while excluding top-level selected commits.
+
+    Boundary commit ids are rendered by the boundary presentation stream.  The
+    inventory still contains the selected commit records used to seed that
+    stream, so suppress only commit entries with no pathname.  Path-bearing
+    commit objects (for example gitlinks) remain ordinary snapshot objects.
+    """
+    for entry in entries:
+        if entry.type_name == "commit" and entry.path is None:
+            continue
+        if entry.missing:
+            print(_missing_print_info(entry))
+        else:
+            _print_present(entry, no_object_names=no_object_names)
+
+
 def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
     """Handle inventory-backed ``--missing`` modes without materialization.
 
@@ -349,6 +368,15 @@ def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
     )
 
     if parsed["missing_action"] == "print-info":
+        if parsed["boundary"]:
+            for oid, is_boundary in boundary_commits:
+                print(f"-{oid}" if is_boundary else oid)
+            _print_info_snapshot_entries(
+                entries,
+                no_object_names=parsed["no_object_names"],
+            )
+            return 0
+
         for entry in entries:
             if entry.missing:
                 print(_missing_print_info(entry))
