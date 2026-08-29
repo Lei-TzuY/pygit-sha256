@@ -8,7 +8,9 @@ missing state therefore move out of textual ``-``/``?`` prefixes and into
 
 The inventory substrate is safe for both ordinary SHA-256 repositories and the
 metadata-only partial-clone traversal. Ordinary ``-z`` never accepts an
-unresolved promise implicitly: only an explicit ``--missing`` policy may do so.
+unresolved promise implicitly unless an enclosing object filter removes that
+entry before presentation; otherwise only an explicit ``--missing`` policy may
+handle it.
 """
 
 from __future__ import annotations
@@ -114,14 +116,24 @@ def _emit_entries(
             _emit_present(entry, no_object_names=no_object_names)
 
 
-def try_run_rev_list_nul(argv: Sequence[str]) -> Optional[int]:
+def try_run_rev_list_nul(
+    argv: Sequence[str],
+    *,
+    omit_blobs: bool = False,
+) -> Optional[int]:
     """Handle Git-style NUL-framed ``rev-list --objects`` traversal.
 
     Present object records always start with a genuine local 64-hex SHA-256.
-    Ordinary traversal treats any unresolved promise as an error. An explicit
-    missing-object mode may instead omit it or expose its native SHA-1 only in a
-    record that also contains ``missing=yes``. Paths are emitted verbatim as
-    ``path=`` metadata, so newlines are preserved instead of quoted/truncated.
+    Ordinary traversal treats any unresolved promise as an error unless the
+    caller's object filter removes it first. An explicit missing-object mode may
+    instead omit it or expose its native SHA-1 only in a record that also
+    contains ``missing=yes``. Paths are emitted verbatim as ``path=`` metadata,
+    so newlines are preserved instead of quoted/truncated.
+
+    ``omit_blobs`` is a structured presentation filter used by Phase248's
+    ``--filter=blob:none`` adapter. Filtering happens on inventory type metadata
+    before any NUL record is emitted, so both present and promised blobs vanish
+    without parsing or rewriting the record protocol.
     """
     parsed = _parse(argv)
     if parsed is None:
@@ -154,6 +166,8 @@ def try_run_rev_list_nul(argv: Sequence[str]) -> Optional[int]:
         max_count=parsed["max_count"],
         snapshot_commits=snapshot_commits,
     )
+    if omit_blobs:
+        entries = tuple(entry for entry in entries if entry.type_name != "blob")
 
     mode = parsed["nul_missing_mode"]
     if parsed["boundary"]:
