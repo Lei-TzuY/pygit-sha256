@@ -22,8 +22,8 @@ confused with selected present objects:
 Boundary commits are different: a genuine `--boundary` commit is a present
 traversal object and does contribute to the count. Phase240/243 already model
 that distinction, including edge/boundary overlap and limit-induced boundary
-snapshot roots, so the filter layer must not reconstruct those semantics from
-textual `-` records.
+snapshot roots, so the filter layer must use those same structured planners
+rather than infer semantics from textual `-` records.
 
 ## Native Git baseline
 
@@ -42,30 +42,38 @@ A native SHA-256 repository was exercised directly. The observed contract is:
 ## Implementation
 
 Phase247 does not change `promisor_object_inventory` or revision selection.
-Count mode keeps the existing Phase240/243 count implementation authoritative:
+The final count formula mirrors Phase240 directly on the structured Phase232
+inventory:
 
-1. remove only `--filter=blob:none` and run the existing projected request **with
-   `--count` still present**;
-2. retain that output's already-correct edge/boundary/missing framing and final
-   unfiltered present-object integer;
-3. run a second metadata-only inspection traversal with `--count` removed;
-4. for inspection only, project `--objects-edge` to `--objects` so Phase236's
-   boundary snapshot-root planner exposes the complete selected/boundary object
-   closure while the original negative revisions remain authoritative;
-5. count only already-present local `BlobObject` records in that inspection;
-6. subtract that present-blob count from the authoritative numeric result;
-7. remove promised blob `?missing` records from the retained count framing;
-8. leave explicit object-edge records and non-blob missing records unchanged.
+1. remove only `--filter=blob:none` for the existing count presentation pass;
+   this preserves established object-edge ordering and `?missing` framing;
+2. parse plain `print` as the same traversal as `print-info`, and project
+   `--objects-edge` to `--objects` only for structured inventory selection;
+3. when `--boundary` is active, obtain the exact selected/boundary commit stream
+   from Phase236's `_promisor_boundary_commits()` and use those commit ids as
+   `snapshot_commits` for `promisor_object_inventory()`;
+4. let the inventory perform object deduplication and explicit negative/common-
+   ancestry closure subtraction exactly as in Phase236/240;
+5. without `--boundary`, count every present inventory entry whose type is not
+   `blob`;
+6. with `--boundary`, count boundary/selected commit records plus present,
+   non-blob snapshot entries, suppressing only top-level selected commit entries
+   already owned by boundary presentation;
+7. if `--objects-edge` is active, subtract only explicit edge/boundary overlap
+   using Phase243's established overlap planner;
+8. keep the existing count pass's edge and non-blob missing records, discard its
+   old numeric tail, suppress promised blob missing records, and emit the newly
+   computed filtered integer.
 
-This split is intentional. The line-oriented uncounted Phase243 presentation is
-not itself a sufficient source for reconstructing count semantics in every
-edge/boundary combination; the established count path may compute boundary
-snapshot contributions directly from inventory. Phase247 therefore performs
-filter subtraction instead of reimplementing that logic.
+This deliberately avoids both failed shortcuts discovered during CI:
 
-Promised blobs require no numeric subtraction because existing missing-object
-count modes never count them in the first place. Persistent promisor kind
-metadata is used only to suppress their `?missing` records, without fetching.
+- counting lines from the uncounted Phase243 presentation can miss snapshot
+  contributions which Phase240 computes structurally;
+- subtracting blobs from an opaque underlying count can double-apply assumptions
+  about which snapshot objects that count already includes.
+
+Instead, Phase247 asks the same boundary and inventory layers which already own
+the object set and applies only one new predicate: `type_name != "blob"`.
 
 ## Supported composition
 
@@ -97,7 +105,7 @@ Phase247 preserves the existing dual-domain rule:
 
 ## Network and mutation guarantees
 
-Both the authoritative count pass and the inspection pass remain metadata-only:
+Both presentation and structured counting remain metadata-only:
 
 - no single-object promisor fetch;
 - no batch promisor fetch;
@@ -109,14 +117,14 @@ Both the authoritative count pass and the inspection pass remain metadata-only:
 
 Focused tests cover:
 
-- an ordinary repository where a present local blob must be subtracted from the
+- an ordinary repository where a present local blob must be absent from the
   numeric count;
 - `allow-promisor`, plain `print`, and `print-info` over a real foreign
   `blob:none` promise with zero fetches and unchanged promisor state;
 - `--objects-edge --boundary --max-count --count`, proving explicit edges are
   excluded while a distinct limit-induced boundary and its snapshot are counted;
 - `--reverse` with `--objects-edge` but no explicit exclusion edge, proving a
-  boundary remains part of the authoritative count regardless of textual order;
+  boundary remains part of the structured count regardless of textual order;
 - continued rejection of `-z + --filter=blob:none`.
 
 Phase247 changes no object format, tree serialization, pack format, wire
