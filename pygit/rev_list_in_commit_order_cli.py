@@ -9,8 +9,11 @@ globally deduplicated across the walk.
 Phase260 composes that ordering with ``--boundary``. Phase261 additionally
 composes it with ``--objects-edge``: excluded edge commits are emitted first,
 then selected commits and their first-seen snapshot objects remain interleaved.
-Explicit negative-revision closure still subtracts snapshot objects, but never
-removes top-level selected/boundary presentation frames.
+Phase262 composes all three modes together. If an explicit exclusion is both an
+object edge and a boundary frame, the leading edge owns presentation and the
+later boundary frame is suppressed; limit-induced boundaries remain in their
+commit/snapshot position. Explicit negative-revision closure still subtracts
+snapshot objects without removing unrelated top-level presentation frames.
 """
 
 from __future__ import annotations
@@ -49,10 +52,6 @@ def _parse(argv: Sequence[str]):
             "rev-list --in-commit-order currently requires exactly one of --objects or --objects-edge"
         )
     objects_edge = object_modes[0] == "--objects-edge"
-    if objects_edge and "--boundary" in argv:
-        raise ValueError(
-            "rev-list --in-commit-order with --objects-edge and --boundary is not yet supported"
-        )
 
     missing = [arg for arg in argv if arg.startswith("--missing=")]
     if len(missing) > 1:
@@ -193,6 +192,38 @@ def _ordered_inventory(
     return tuple(output), frozenset(boundary_oids)
 
 
+def _dedupe_edge_boundary_overlap(
+    entries: Sequence[PromisorObjectInventoryEntry],
+    *,
+    boundary_oids: frozenset[str],
+    edges: Sequence[str],
+) -> Tuple[Tuple[PromisorObjectInventoryEntry, ...], frozenset[str]]:
+    """Let a leading object-edge record own any overlapping boundary frame.
+
+    Native Git prints an explicit excluded commit only once when it is both an
+    ``--objects-edge`` record and a ``--boundary`` commit. The edge appears at
+    the front of the output; the later top-level boundary frame is suppressed.
+    Snapshot entries are left untouched so non-overlapping limit boundaries keep
+    their normal commit/snapshot interleaving.
+    """
+
+    overlap = frozenset(oid.lower() for oid in edges) & boundary_oids
+    if not overlap:
+        return tuple(entries), boundary_oids
+
+    filtered = tuple(
+        entry
+        for entry in entries
+        if not (
+            entry.type_name == "commit"
+            and entry.path is None
+            and entry.oid is not None
+            and entry.oid.lower() in overlap
+        )
+    )
+    return filtered, frozenset(oid for oid in boundary_oids if oid not in overlap)
+
+
 def _plain_missing(entry: PromisorObjectInventoryEntry) -> str:
     if entry.native_oid is None:
         raise RuntimeError("missing inventory entry has no native object identity")
@@ -273,6 +304,12 @@ def try_run_rev_list_in_commit_order(argv: Sequence[str]) -> Optional[int]:
             parsed["revisions"],
             all_refs=parsed["all_refs"],
             first_parent=parsed["first_parent"],
+        )
+    if edges and boundary_oids:
+        entries, boundary_oids = _dedupe_edge_boundary_overlap(
+            entries,
+            boundary_oids=boundary_oids,
+            edges=edges,
         )
     return _render(
         entries,
