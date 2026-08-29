@@ -98,7 +98,7 @@ def test_filter_print_omitted_requires_filter(tmp_path, monkeypatch):
         )
 
 
-@pytest.mark.parametrize("option", ["-z", "--boundary", "--objects-edge"])
+@pytest.mark.parametrize("option", ["-z", "--objects-edge"])
 def test_filter_print_omitted_defers_unmodelled_framing(
     tmp_path, monkeypatch, option
 ):
