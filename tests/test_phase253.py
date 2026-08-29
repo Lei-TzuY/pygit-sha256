@@ -99,24 +99,18 @@ def test_filter_print_omitted_requires_filter(tmp_path, monkeypatch):
         )
 
 
-@pytest.mark.parametrize("option", ["-z", "--objects-edge"])
-def test_filter_print_omitted_defers_unmodelled_framing(
-    tmp_path, monkeypatch, option
-):
+def test_filter_print_omitted_still_defers_nul_framing(tmp_path, monkeypatch):
     repo = _ordinary_three_commit_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
 
-    args = [
-        "--objects",
-        "--filter=blob:none",
-        "--filter-print-omitted",
-        "--missing=allow-promisor",
-        "HEAD",
-    ]
-    if option == "--objects-edge":
-        args[0] = "--objects-edge"
-    else:
-        args.insert(1, option)
-
     with pytest.raises(ValueError, match="not yet supported"):
-        run_rev_list_disk_usage(args)
+        run_rev_list_disk_usage(
+            [
+                "--objects",
+                "-z",
+                "--filter=blob:none",
+                "--filter-print-omitted",
+                "--missing=allow-promisor",
+                "HEAD",
+            ]
+        )
