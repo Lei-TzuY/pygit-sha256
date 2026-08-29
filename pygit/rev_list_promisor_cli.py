@@ -203,8 +203,8 @@ def _promisor_object_edges(
                 edges.add(parent_oid)
 
     # Native ``rev-list --objects-edge`` renders the excluded boundary before
-    # the selected commits.  OID ordering gives deterministic output when more
-    # than one boundary commit exists while preserving the single-edge case.
+    # the selected commits. OID ordering is deterministic when several edges
+    # exist while preserving the exact single-edge representation.
     return tuple(sorted(edges))
 
 
@@ -212,7 +212,7 @@ def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
     """Handle inventory-backed ``--missing=allow-promisor`` modes.
 
     The Phase232 inventory distinguishes present SHA-256 objects from unresolved
-    native SHA-1 promises without materializing either.  Git's allow-promisor
+    native SHA-1 promises without materializing either. Git's allow-promisor
     mode silently omits expected missing objects, so only entries with a real
     repository-visible ``oid`` are rendered here. ``--objects-edge`` adds only
     local excluded commit identities and therefore remains metadata-only.
@@ -244,12 +244,14 @@ def try_run_rev_list_allow_promisor(argv: Sequence[str]) -> Optional[int]:
     )
     present = [entry for entry in entries if entry.oid is not None]
 
-    if parsed["count"]:
-        print(len(edges) + len(present))
-        return 0
-
     for oid in edges:
         print(f"-{oid}")
+
+    if parsed["count"]:
+        # Native Git prints edge lines separately and does not include them in
+        # the following object count.
+        print(len(present))
+        return 0
 
     for entry in present:
         assert entry.oid is not None
