@@ -20,13 +20,19 @@ def _tree_data(blob_oid: str) -> bytes:
     return b"100644 f.txt\x00" + bytes.fromhex(blob_oid)
 
 
-def _commit_data(tree_oid: str, *, message: str, parent: str | None = None) -> bytes:
+def _commit_data(
+    tree_oid: str,
+    *,
+    message: str,
+    parent: str | None = None,
+    timestamp: int = 1,
+) -> bytes:
     parent_line = f"parent {parent}\n" if parent is not None else ""
     return (
         f"tree {tree_oid}\n"
         f"{parent_line}"
-        "author Test <test@example.com> 1 +0000\n"
-        "committer Test <test@example.com> 1 +0000\n"
+        f"author Test <test@example.com> {timestamp} +0000\n"
+        f"committer Test <test@example.com> {timestamp} +0000\n"
         f"\n{message}"
     ).encode()
 
@@ -38,13 +44,13 @@ def _partial_range_repo(tmp_path):
     base_blob = _native_oid("blob", b"base\n")
     base_tree_data = _tree_data(base_blob)
     base_tree = _native_oid("tree", base_tree_data)
-    base_data = _commit_data(base_tree, message="base")
+    base_data = _commit_data(base_tree, message="base", timestamp=1)
     base_commit = _native_oid("commit", base_data)
 
     tip_blob = _native_oid("blob", b"tip\n")
     tip_tree_data = _tree_data(tip_blob)
     tip_tree = _native_oid("tree", tip_tree_data)
-    tip_data = _commit_data(tip_tree, message="tip", parent=base_commit)
+    tip_data = _commit_data(tip_tree, message="tip", parent=base_commit, timestamp=2)
     tip_commit = _native_oid("commit", tip_data)
 
     importer = PromisorFilteredNativeImporter(
@@ -63,6 +69,49 @@ def _partial_range_repo(tmp_path):
     repo.refs.set_branch("main", local_tip, message="test: partial tip")
     repo.refs.set_head_symbolic("main", message="test: partial tip")
     return repo, local_base, local_tip, base_blob, tip_blob
+
+
+def _partial_three_commit_repo(tmp_path):
+    repo = Repository.init(str(tmp_path / "repo-three"))
+    repo.add_remote("origin", "https://example.test/repo.git")
+    objects: dict[str, NativeObject] = {}
+    parent = None
+    local_commits: list[str] = []
+    native_commits: list[str] = []
+    native_blobs: list[str] = []
+
+    commit_specs = []
+    for timestamp, label in enumerate(("base", "middle", "tip"), start=1):
+        blob_data = f"{label}\n".encode()
+        blob_oid = _native_oid("blob", blob_data)
+        tree_data = _tree_data(blob_oid)
+        tree_oid = _native_oid("tree", tree_data)
+        commit_data = _commit_data(
+            tree_oid,
+            message=label,
+            parent=parent,
+            timestamp=timestamp,
+        )
+        commit_oid = _native_oid("commit", commit_data)
+        objects[tree_oid] = NativeObject("tree", tree_data, tree_oid)
+        objects[commit_oid] = NativeObject("commit", commit_data, commit_oid)
+        commit_specs.append((commit_oid, blob_oid))
+        parent = commit_oid
+
+    importer = PromisorFilteredNativeImporter(
+        repo.store,
+        objects,
+        remote="origin",
+        filter_spec="blob:none",
+    )
+    for commit_oid, blob_oid in commit_specs:
+        local_commits.append(importer.import_oid(commit_oid))
+        native_commits.append(commit_oid)
+        native_blobs.append(blob_oid)
+
+    repo.refs.set_branch("main", local_commits[-1], message="test: partial tip")
+    repo.refs.set_head_symbolic("main", message="test: partial tip")
+    return repo, tuple(local_commits), tuple(native_commits), tuple(native_blobs)
 
 
 def _tree(repo: Repository, commit_sha: str) -> str:
@@ -138,6 +187,33 @@ def test_missing_objects_edge_boundary_count_does_not_count_duplicate_edge(
     # final object count. The missing promise is likewise reported but not
     # counted; only the selected commit and selected tree remain present.
     assert capsys.readouterr().out.splitlines() == [f"-{base}", missing, "2"]
+
+
+def test_missing_objects_edge_boundary_keeps_distinct_limit_boundary(
+    tmp_path, monkeypatch, capsys
+):
+    repo, commits, _native_commits, _native_blobs = _partial_three_commit_repo(tmp_path)
+    base, middle, tip = commits
+    monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
+    _disable_fetch(monkeypatch)
+    capsys.readouterr()
+
+    assert run_rev_list_disk_usage(
+        [
+            "--objects-edge",
+            "--boundary",
+            "--missing=print-info",
+            "--topo-order",
+            "--max-count=1",
+            f"{base}..{tip}",
+        ]
+    ) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"-{base}"
+    assert lines.count(f"-{base}") == 1
+    assert f"-{middle}" in lines
+    assert tip in lines
 
 
 def test_missing_objects_edge_boundary_no_overlap_keeps_boundary_stream(
