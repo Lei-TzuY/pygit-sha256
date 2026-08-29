@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Match, Optional, Sequence, Set, Tuple
 
 from .objects import CommitObject, TagObject, TreeObject
+from .promisor import promised_kind, read_promisor_state
+from .promisor_materialize import materialize_promised_objects
 from .repo import Repository
 from .revision import abbreviate_oid, resolve_revision
 
@@ -153,6 +155,59 @@ def _needs_nonrecursive_descent(path: str, patterns: Tuple[str, ...]) -> bool:
     return False
 
 
+def _collect_ls_tree_promises(
+    repo: Repository,
+    root_oid: str,
+    *,
+    recursive: bool,
+    directories_only: bool,
+    patterns: Tuple[str, ...],
+) -> Set[str]:
+    """Collect unresolved blobs that the historical traversal will report.
+
+    Foreign partial-clone trees retain native SHA-1 entry identities until a
+    promised blob is materialized. ``ls_tree`` ultimately reports repository
+    visible SHA-256 object names, so every selected unresolved blob must be
+    materialized before the normal formatter can validate its object id.  This
+    planner mirrors the existing pathspec/descent rules without touching
+    ``TreeEntry.sha`` for blobs, allowing the selected set to be fetched once.
+    """
+    promised: Set[str] = set()
+    pending: List[Tuple[str, str]] = [(root_oid, "")]
+    active: Set[str] = set()
+
+    while pending:
+        tree_oid, prefix = pending.pop()
+        if tree_oid in active:
+            raise RuntimeError("tree cycle while planning ls-tree promisor objects")
+        tree = repo.store.read(tree_oid)
+        if not isinstance(tree, TreeObject):
+            raise RuntimeError(f"tree entry {tree_oid} does not reference a tree")
+        active.add(tree_oid)
+
+        for item in tree.entries:
+            _validate_name(item.name)
+            kind = _entry_type(item.mode)
+            path = f"{prefix}/{item.name}" if prefix else item.name
+            matched = _matches(path, patterns)
+
+            if kind == "tree":
+                if recursive:
+                    descend = _may_descend(path, patterns)
+                else:
+                    descend = _needs_nonrecursive_descent(path, patterns)
+                if descend:
+                    pending.append((item.sha, path))
+                continue
+
+            if directories_only or not matched or item.is_resolved or not item.native_oid:
+                continue
+            if promised_kind(repo.pygit_dir, item.native_oid):
+                promised.add(item.native_oid)
+
+    return promised
+
+
 def ls_tree(
     repo: Repository,
     treeish: str = "HEAD",
@@ -176,6 +231,19 @@ def ls_tree(
 
     selected_patterns = _normalize_patterns(patterns)
     root_oid = _treeish_oid(repo, treeish)
+
+    state = read_promisor_state(repo.pygit_dir)
+    if state.get("promised"):
+        promises = _collect_ls_tree_promises(
+            repo,
+            root_oid,
+            recursive=recursive,
+            directories_only=directories_only,
+            patterns=selected_patterns,
+        )
+        if promises:
+            materialize_promised_objects(repo.pygit_dir, sorted(promises))
+
     records: List[LsTreeEntry] = []
 
     def walk(tree_oid: str, prefix: str, active: Set[str]) -> None:
