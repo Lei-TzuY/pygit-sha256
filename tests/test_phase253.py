@@ -63,7 +63,7 @@ def test_filter_print_omitted_reports_local_blob_none_objects(
     assert len(omitted) == 3
 
 
-def test_filter_print_omitted_object_type_respects_filter_provided_objects(
+def test_filter_print_omitted_object_type_matches_native_empty_omit_set(
     tmp_path, monkeypatch, capsys
 ):
     repo = _ordinary_three_commit_repo(tmp_path)
@@ -84,8 +84,9 @@ def test_filter_print_omitted_object_type_respects_filter_provided_objects(
     kept, omitted = _split_output(repo, capsys.readouterr().out)
     assert kept
     assert all(kind == "tree" for kind, _oid in kept)
-    omitted_types = {repo.store.read(oid).type_name for oid in omitted}
-    assert omitted_types == {b"commit", b"blob"}
+    # Git 2.55 filter_object_type() leaves its omits argument unused: filtered
+    # commits/blobs disappear from traversal but are not printed as ~<oid>.
+    assert omitted == []
 
 
 def test_filter_print_omitted_requires_filter(tmp_path, monkeypatch):
