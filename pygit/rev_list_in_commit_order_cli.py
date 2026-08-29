@@ -12,8 +12,10 @@ then selected commits and their first-seen snapshot objects remain interleaved.
 Phase262 composes all three modes together. If an explicit exclusion is both an
 object edge and a boundary frame, the leading edge owns presentation and the
 later boundary frame is suppressed; limit-induced boundaries remain in their
-commit/snapshot position. Explicit negative-revision closure still subtracts
-snapshot objects without removing unrelated top-level presentation frames.
+commit/snapshot position. Phase263 adds Git's structured ``-z`` object metadata
+protocol for the ``--objects`` path without changing traversal or SHA domains.
+Explicit negative-revision closure still subtracts snapshot objects without
+removing unrelated top-level presentation frames.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from __future__ import annotations
 from typing import Optional, Sequence, Tuple
 
 from . import promisor_object_inventory as _inventory
+from . import rev_list_nul_cli as _nul
 from . import rev_list_promisor_cli as _promisor
 from .objects import CommitObject
 from .promisor_object_inventory import PromisorObjectInventoryEntry
@@ -35,8 +38,7 @@ def _parse(argv: Sequence[str]):
     if _IN_COMMIT_ORDER not in argv:
         return None
 
-    if "-z" in argv:
-        raise ValueError("rev-list --in-commit-order with -z is not yet supported")
+    nul = "-z" in argv
     if any(arg == "--disk-usage" or arg.startswith("--disk-usage=") for arg in argv):
         raise ValueError("rev-list --in-commit-order with --disk-usage is not yet supported")
     if any(
@@ -52,6 +54,10 @@ def _parse(argv: Sequence[str]):
             "rev-list --in-commit-order currently requires exactly one of --objects or --objects-edge"
         )
     objects_edge = object_modes[0] == "--objects-edge"
+    if nul and objects_edge:
+        raise ValueError("rev-list -z is only compatible with --objects, --boundary, and --missing")
+    if nul and "--count" in argv:
+        raise ValueError("rev-list -z is not compatible with --count")
 
     missing = [arg for arg in argv if arg.startswith("--missing=")]
     if len(missing) > 1:
@@ -68,12 +74,12 @@ def _parse(argv: Sequence[str]):
         mode = "ordinary"
 
     # Reuse the mature inventory parser with an --objects projection, then keep
-    # objects-edge presentation local to this adapter. This avoids inheriting
-    # older generic parser guards for print-info + objects-edge while preserving
-    # exactly the same revision-selection controls.
+    # ordering/presentation local to this adapter. ``-z`` is stripped before
+    # projection because it is handled structurally below, not by the generic
+    # promisor line renderer.
     projected: list[str] = []
     for arg in argv:
-        if arg == _IN_COMMIT_ORDER:
+        if arg in {_IN_COMMIT_ORDER, "-z"}:
             continue
         if arg == "--objects-edge":
             projected.append("--objects")
@@ -90,6 +96,7 @@ def _parse(argv: Sequence[str]):
     parsed = dict(parsed)
     parsed["in_commit_order_missing_mode"] = mode
     parsed["in_commit_order_objects_edge"] = objects_edge
+    parsed["in_commit_order_nul"] = nul
     return parsed
 
 
@@ -245,6 +252,37 @@ def _print_present_ordered(
     _promisor._print_present(entry, no_object_names=parsed["no_object_names"])
 
 
+def _render_nul(
+    entries: Sequence[PromisorObjectInventoryEntry],
+    *,
+    parsed,
+    mode: str,
+    boundary_oids: frozenset[str],
+) -> int:
+    """Render ordered inventory using Git's structured NUL object protocol."""
+
+    missing = tuple(entry for entry in entries if entry.missing)
+    if mode == "ordinary" and missing:
+        native = missing[0].native_oid or "unknown"
+        raise RuntimeError(
+            f"missing object {native}; use --missing=allow-promisor, print, or print-info"
+        )
+
+    for entry in entries:
+        if entry.missing:
+            _nul._emit_missing(entry, mode=mode)
+            continue
+
+        if entry.oid is None:
+            raise RuntimeError("present inventory entry has no local SHA-256 identity")
+        oid = entry.oid.lower()
+        if entry.type_name == "commit" and entry.path is None and oid in boundary_oids:
+            _nul._emit_fields(oid, "boundary=yes")
+            continue
+        _nul._emit_present(entry, no_object_names=parsed["no_object_names"])
+    return 0
+
+
 def _render(
     entries: Sequence[PromisorObjectInventoryEntry],
     *,
@@ -253,6 +291,16 @@ def _render(
     boundary_oids: frozenset[str],
     edges: Sequence[str] = (),
 ) -> int:
+    if parsed["in_commit_order_nul"]:
+        if edges:
+            raise RuntimeError("internal error: NUL in-commit-order traversal received object edges")
+        return _render_nul(
+            entries,
+            parsed=parsed,
+            mode=mode,
+            boundary_oids=boundary_oids,
+        )
+
     missing = tuple(entry for entry in entries if entry.missing)
     if mode == "ordinary" and missing:
         native = missing[0].native_oid or "unknown"
