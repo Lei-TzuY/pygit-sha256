@@ -170,6 +170,7 @@ def test_blob_limit_refuses_unresolved_promised_blob_without_fetch(
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
     _disable_fetch(monkeypatch)
     before = read_promisor_state(repo.pygit_dir)
+    assert native_blob in before["promised"]
     capsys.readouterr()
 
     with pytest.raises(RuntimeError, match="persistent promisor size metadata is unavailable"):
@@ -182,7 +183,6 @@ def test_blob_limit_refuses_unresolved_promised_blob_without_fetch(
             ]
         )
 
-    assert native_blob in read_promisor_state(repo.pygit_dir).objects
     assert read_promisor_state(repo.pygit_dir) == before
 
 
