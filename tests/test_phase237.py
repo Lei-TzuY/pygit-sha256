@@ -155,10 +155,10 @@ def test_rev_list_print_info_ordinary_repo_stays_sha256_only(
     assert all(len(line.split(" ", 1)[0]) == 64 for line in lines)
 
 
-def test_rev_list_print_info_rejects_objects_edge_until_modelled():
-    with pytest.raises(ValueError, match="--objects-edge is not yet supported"):
+def test_rev_list_print_info_boundary_objects_edge_remains_deferred():
+    with pytest.raises(ValueError, match="--boundary with --objects-edge"):
         run_rev_list_disk_usage(
-            ["--objects-edge", "--missing=print-info", "HEAD"]
+            ["--objects-edge", "--boundary", "--missing=print-info", "HEAD"]
         )
 
 
