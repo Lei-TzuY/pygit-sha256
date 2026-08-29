@@ -6,6 +6,12 @@ selection, boundary framing, counting, and SHA-domain separation. Plain
 metadata from ``?`` records. Phase242 also composes the same traversal with
 ``--objects-edge`` by projecting the object mode to ``--objects`` and
 prepending Phase234's metadata-only excluded-edge commit records.
+
+Phase243 completes that composition for ``--boundary``. Git treats an explicit
+excluded commit which is both an object edge and a boundary as one leading
+``-<oid>`` record, not two records. The adapter therefore removes the duplicate
+boundary presentation (or its contribution to ``--count``) after projecting to
+the already-tested ``--objects --boundary`` traversal.
 """
 
 from __future__ import annotations
@@ -78,14 +84,60 @@ def _run_print_info_captured(argv: Sequence[str]) -> tuple[int, tuple[str, ...]]
     return code, tuple(capture.getvalue().splitlines())
 
 
+def _edge_boundary_overlap(repo, parsed, edges: Sequence[str]) -> frozenset[str]:
+    """Return explicit object edges also rendered by ``--boundary``.
+
+    Native Git emits such commits once, using the leading object-edge framing.
+    Limit-induced boundaries which are not explicit exclusion edges remain in
+    the projected boundary stream.
+    """
+
+    if not parsed["boundary"] or not edges:
+        return frozenset()
+    boundary_commits = _promisor._promisor_boundary_commits(
+        repo,
+        parsed["revisions"],
+        all_refs=parsed["all_refs"],
+        first_parent=parsed["first_parent"],
+        topo_order=parsed["topo_order"],
+        reverse=parsed["reverse"],
+        skip=parsed["skip"],
+        max_count=parsed["max_count"],
+    )
+    boundary_oids = {oid for oid, is_boundary in boundary_commits if is_boundary}
+    return frozenset(oid for oid in edges if oid in boundary_oids)
+
+
+def _dedupe_edge_boundaries(
+    lines: Sequence[str],
+    *,
+    overlap: frozenset[str],
+    count: bool,
+) -> tuple[str, ...]:
+    """Remove duplicate edge/boundary framing from projected output."""
+
+    if not overlap:
+        return tuple(lines)
+
+    if count:
+        if not lines:
+            raise RuntimeError("boundary count projection produced no output")
+        tail = lines[-1]
+        try:
+            value = int(tail)
+        except ValueError as exc:
+            raise RuntimeError("boundary count projection did not end with a count") from exc
+        value -= len(overlap)
+        if value < 0:
+            raise RuntimeError("boundary/object-edge count overlap exceeded projected count")
+        return tuple(lines[:-1]) + (str(value),)
+
+    duplicate_lines = {f"-{oid}" for oid in overlap}
+    return tuple(line for line in lines if line not in duplicate_lines)
+
+
 def _run_objects_edge(argv: Sequence[str], *, plain: bool) -> int:
     """Compose missing-object rendering with Phase234 excluded-edge framing."""
-
-    missing_name = "print" if plain else "print-info"
-    if "--boundary" in argv:
-        raise ValueError(
-            f"--boundary with --objects-edge is not yet supported with --missing={missing_name}"
-        )
 
     projected = _objects_projection(argv, plain=plain)
     parsed = _promisor._parse_allow_promisor(projected)
@@ -99,7 +151,9 @@ def _run_objects_edge(argv: Sequence[str], *, plain: bool) -> int:
         all_refs=parsed["all_refs"],
         first_parent=parsed["first_parent"],
     )
+    overlap = _edge_boundary_overlap(repo, parsed, edges)
     code, lines = _run_print_info_captured(projected)
+    lines = _dedupe_edge_boundaries(lines, overlap=overlap, count=parsed["count"])
 
     for oid in edges:
         print(f"-{oid}")
@@ -117,9 +171,11 @@ def try_run_rev_list_missing_print(argv: Sequence[str]) -> Optional[int]:
     SHA-256 object name is invented.
 
     Phase242 lets both ``print`` and ``print-info`` inherit Phase234's
-    ``--objects-edge`` framing without duplicating inventory traversal. Edge
-    commits stay local SHA-256 records and remain outside the final ``--count``
-    value. ``--boundary + --objects-edge`` remains deliberately deferred.
+    ``--objects-edge`` framing without duplicating inventory traversal. Phase243
+    additionally composes ``--boundary``: explicit exclusion edges remain one
+    leading ``-<local SHA-256>`` record, while distinct limit-induced boundary
+    commits keep their normal boundary framing. Under ``--count`` the duplicate
+    edge/boundary record is removed from the projected present-object count.
     """
 
     mode = _print_missing_mode(argv)
