@@ -3,9 +3,12 @@
 Local blobs are classified from already-materialized payloads. Unresolved
 promised blobs may also be classified when the promisor sidecar contains a
 trusted uncompressed size learned from metadata-only remote object-info.
-When that metadata is absent, Phase284 performs one best-effort metadata-only
+When that metadata is absent, Phase284 performs a best-effort metadata-only
 refresh against configured promisor remotes before retaining the existing hard
-error. Content is never materialized merely to decide filter membership.
+error. Phase285 batches all missing promised-blob identities from the inventory
+into one refresh preflight so a large partial clone does not issue one metadata
+round-trip per object. Content is never materialized merely to decide filter
+membership.
 
 Phase282 routes plain non-ordered ``-z`` requests through the shared structured
 NUL renderer after applying the same metadata-only membership predicate to its
@@ -139,10 +142,35 @@ def _missing_size_error(native_oid: Optional[str]) -> RuntimeError:
 
 
 def _ensure_missing_blobs_are_classifiable(repo, entries) -> None:
+    """Preflight every unresolved blob before any output is emitted.
+
+    Phase285 deliberately batches missing size metadata into one
+    ``refresh_promisor_sizes`` call.  The refresh helper already fans that batch
+    across configured promisor remotes as needed, so callers avoid N metadata
+    round-trips while retaining the same strict all-or-error presentation rule.
+    """
+
+    missing_native_oids = []
+    seen = set()
     for entry in entries:
         if not (entry.missing and entry.type_name == "blob"):
             continue
-        if _promised_blob_size(repo, entry.native_oid) is None:
+        native_oid = entry.native_oid
+        if not native_oid:
+            raise _missing_size_error(native_oid)
+        lowered = native_oid.lower()
+        if promised_size(repo.pygit_dir, lowered) is not None or lowered in seen:
+            continue
+        seen.add(lowered)
+        missing_native_oids.append(lowered)
+
+    if missing_native_oids:
+        refresh_promisor_sizes(repo, tuple(missing_native_oids))
+
+    for entry in entries:
+        if not (entry.missing and entry.type_name == "blob"):
+            continue
+        if not entry.native_oid or promised_size(repo.pygit_dir, entry.native_oid) is None:
             raise _missing_size_error(entry.native_oid)
 
 
