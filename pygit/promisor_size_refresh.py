@@ -95,6 +95,31 @@ def _object_info_client(repo, remote: str, url: str, server_options: tuple[str, 
         return client
 
 
+def _prune_stale_object_info_clients(repo, active_keys) -> None:
+    """Retain only clients matching the repository's current promisor config.
+
+    Phase288 keys clients by effective remote configuration so a changed URL or
+    server option never reuses stale capability state. Without pruning, though,
+    every historical key stays attached to a long-lived Repository until that
+    Repository itself is collected. Phase292's per-repository refresh lock makes
+    refresh-time pruning safe; this helper additionally takes the short cache
+    guard so cache bookkeeping remains coherent for direct helper callers.
+    """
+
+    with _OBJECT_INFO_CACHE_GUARD:
+        cache = _OBJECT_INFO_CLIENTS.get(repo)
+        if not cache:
+            return
+        for key in tuple(cache):
+            if key not in active_keys:
+                cache.pop(key, None)
+        if not cache:
+            try:
+                del _OBJECT_INFO_CLIENTS[repo]
+            except KeyError:
+                pass
+
+
 def _evict_object_info_client(
     repo,
     remote: str,
@@ -105,8 +130,8 @@ def _evict_object_info_client(
     """Discard one failed cached client without disturbing sibling remotes.
 
     Phase288 deliberately reuses a client (and its capability advertisement)
-    across refresh calls.  A transport/protocol failure means that particular
-    session object is no longer a safe thing to retain indefinitely.  Eviction
+    across refresh calls. A transport/protocol failure means that particular
+    session object is no longer a safe thing to retain indefinitely. Eviction
     is identity-guarded so an older failing reference cannot remove a newer
     replacement installed under the same effective remote configuration.
     """
@@ -129,26 +154,28 @@ def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
     """Best-effort refresh of missing promised-object sizes.
 
     Only unresolved promises that do not already have trusted size metadata are
-    queried.  Promisor remotes are tried in deterministic name order; configured
-    protocol-v2 server options are preserved for each remote.  Large pending sets
+    queried. Promisor remotes are tried in deterministic name order; configured
+    protocol-v2 server options are preserved for each remote. Large pending sets
     are split into bounded deterministic ``object-info size`` requests so one
-    partial clone cannot create an unbounded protocol request.  Clients are
+    partial clone cannot create an unbounded protocol request. Clients are
     reused while the same Repository object and effective remote configuration
     remain alive, allowing Phase287's capability cache to span repeated refresh
-    calls without persisting negotiation state on disk.
+    calls without persisting negotiation state on disk. Cached clients whose
+    remote has been removed or whose effective URL/server-option configuration
+    has changed are pruned during the next non-empty refresh invocation.
 
     A client that raises a transport/protocol/query exception is evicted before
     trying the next remote, so a later refresh can create a fresh session instead
-    of inheriting a failed cached client.  A protocol-v2 server that explicitly
+    of inheriting a failed cached client. A protocol-v2 server that explicitly
     lacks the ``object-info`` capability is different: its successful capability
     advertisement is retained, so later refreshes can reuse that stable negative
     result without another discovery request.
 
     Concurrent refreshes for the same Repository are serialized around state
-    inspection, object-info queries, failed-client handling, trusted-size
-    persistence, and result collection. Refreshes for different Repository
-    objects remain independent. Query failures are intentionally soft because
-    the caller owns the final strictness policy.
+    inspection, effective-configuration pruning, object-info queries,
+    failed-client handling, trusted-size persistence, and result collection.
+    Refreshes for different Repository objects remain independent. Query failures
+    are intentionally soft because the caller owns the final strictness policy.
 
     The returned mapping contains every requested OID whose trusted size is
     available after the refresh, whether it was already persisted or learned by
@@ -169,15 +196,24 @@ def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
         }
 
         configured = repo.list_remotes()
-        promisor_remotes = tuple(
-            sorted(name for name in state["remotes"] if name in configured)
+        remote_configs = tuple(
+            (
+                remote,
+                configured[remote],
+                tuple(configured_server_options(repo, remote)),
+            )
+            for remote in sorted(state["remotes"])
+            if remote in configured
         )
+        active_keys = frozenset(
+            _client_cache_key(remote, url, server_options)
+            for remote, url, server_options in remote_configs
+        )
+        _prune_stale_object_info_clients(repo, active_keys)
 
-        for remote in promisor_remotes:
+        for remote, url, server_options in remote_configs:
             if not pending:
                 break
-            server_options = tuple(configured_server_options(repo, remote))
-            url = configured[remote]
             client = _object_info_client(repo, remote, url, server_options)
             remote_failed = False
             for batch in _chunked_oids(tuple(sorted(pending))):
