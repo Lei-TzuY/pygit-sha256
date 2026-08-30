@@ -5,6 +5,10 @@ promised blobs may also be classified when the promisor sidecar contains a
 trusted uncompressed size learned from metadata-only remote object-info.
 Missing size metadata remains a hard error: this filter never materializes
 content merely to decide membership.
+
+Phase282 routes plain non-ordered ``-z`` requests through the shared structured
+NUL renderer after applying the same metadata-only membership predicate to its
+inventory. ``--filter-print-omitted`` remains a separate composition.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from typing import Optional, Sequence
 
 from . import rev_list_filter_cli as _filter
 from . import rev_list_missing_print_cli as _missing_print
+from . import rev_list_nul_cli as _nul
 from . import rev_list_promisor_cli as _promisor
 from .objects import BlobObject
 from .promisor import promised_kind, promised_size
@@ -25,6 +30,11 @@ _UNIT_MULTIPLIER = {
     "k": 1024,
     "m": 1024 * 1024,
     "g": 1024 * 1024 * 1024,
+}
+_SUPPORTED_MISSING = {
+    "--missing=allow-promisor",
+    "--missing=print",
+    "--missing=print-info",
 }
 
 
@@ -46,8 +56,6 @@ def _blob_limit(argv: Sequence[str]) -> Optional[int]:
 
 
 def _project(argv: Sequence[str]) -> list[str]:
-    if "-z" in argv:
-        raise ValueError("--filter=blob:limit with -z is not yet supported")
     if "--filter-print-omitted" in argv:
         raise ValueError(
             "--filter=blob:limit with --filter-print-omitted is not yet supported"
@@ -59,11 +67,20 @@ def _project(argv: Sequence[str]) -> list[str]:
         if not arg.startswith("--filter=") and arg != "--filter-provided-objects"
     ]
     missing = [arg for arg in projected if arg.startswith("--missing=")]
-    if len(missing) != 1 or missing[0] not in {
-        "--missing=allow-promisor",
-        "--missing=print",
-        "--missing=print-info",
-    }:
+
+    # Structured NUL traversal has an ordinary-repository mode, so an explicit
+    # missing policy is optional there. Partial-clone callers may select the
+    # same three metadata-only policies supported by the line path.
+    if "-z" in projected:
+        if len(missing) > 1:
+            raise ValueError("rev-list accepts exactly one --missing action")
+        if missing and missing[0] not in _SUPPORTED_MISSING:
+            raise ValueError(
+                "--filter=blob:limit with -z supports --missing=allow-promisor, print, or print-info"
+            )
+        return projected
+
+    if len(missing) != 1 or missing[0] not in _SUPPORTED_MISSING:
         raise ValueError(
             "--filter=blob:limit currently requires --missing=allow-promisor, print, or print-info"
         )
@@ -170,6 +187,17 @@ def _entry_is_kept(repo, entry, *, limit: int) -> bool:
     return size < limit
 
 
+def _filter_inventory(repo, entries, *, limit: int):
+    """Apply blob-size membership before any structured record is emitted."""
+
+    _ensure_missing_blobs_are_classifiable(repo, entries)
+    return tuple(
+        entry
+        for entry in entries
+        if _entry_is_kept(repo, entry, limit=limit)
+    )
+
+
 def _filtered_present_count(repo, argv: Sequence[str], *, limit: int) -> int:
     parsed, boundary_commits, entries = _inventory_context(repo, argv)
     _ensure_missing_blobs_are_classifiable(repo, entries)
@@ -203,13 +231,25 @@ def _filtered_present_count(repo, argv: Sequence[str], *, limit: int) -> int:
 
 
 def try_run_rev_list_blob_limit(argv: Sequence[str]) -> Optional[int]:
-    """Handle line/count ``blob:limit`` filtering without promisor fetches."""
+    """Handle line/count/NUL ``blob:limit`` filtering without promisor fetches."""
 
     limit = _blob_limit(argv)
     if limit is None:
         return None
 
     projected = _project(argv)
+
+    if "-z" in projected:
+        code = _nul.try_run_rev_list_nul(
+            projected,
+            entry_filter=lambda repo, entries: _filter_inventory(
+                repo, entries, limit=limit
+            ),
+        )
+        if code is None:
+            raise RuntimeError("NUL rev-list adapter declined blob:limit projection")
+        return code
+
     repo = _promisor._find_repo()
     _parsed, _boundary_commits, entries = _inventory_context(repo, projected)
     _ensure_missing_blobs_are_classifiable(repo, entries)
