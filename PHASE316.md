@@ -61,7 +61,9 @@ One request containing `deepen-since`, `deepen-not`, `want-ref`, `filter blob:no
 - `shallow-info` reporting the cutoff boundary;
 - `packfile` containing the selected non-blob objects.
 
-The Phase316 CI test repeats this against the runner's Git 2.55.0 and feeds the full response through pygit's existing strict parser before validating the requested ref set, shallow boundary, and filtered pack object types.
+The first Phase316 GitHub Actions run against Git 2.55.0 exposed an interoperability detail that differs from the published protocol-v2 grammar. The documentation lists optional fetch sections as `shallow-info` followed by `wanted-refs`, but native Git 2.55.0 emitted `wanted-refs` followed by `shallow-info` for this combined request.
+
+The parser now models these two optional metadata sections as one ordering tier: either relative order is accepted, while acknowledgments must still precede metadata, `packfile-uris` (when supported) must still precede the packfile, the packfile remains terminal, duplicate sections remain forbidden, delimiters remain mandatory between sections, and the final flush remains mandatory. This is a narrow native-compatibility correction rather than a general ordering relaxation.
 
 ## SHA-256-native / promisor invariants
 
@@ -91,5 +93,12 @@ No hash-domain shortcut is introduced.
 - no-`ls-refs` Smart HTTP behavior;
 - exact wanted-ref response validation through the combined client;
 - native Git direct named-ref + shallow cutoff + `blob:none` semantics, including wanted ref resolution, shallow boundary, and commit/tree-only pack contents.
+
+`tests/test_phase316_section_order.py` additionally locks down:
+
+- the documented `shallow-info -> wanted-refs -> packfile` order;
+- native Git 2.55.0 `wanted-refs -> shallow-info -> packfile` behavior;
+- continued rejection of acknowledgments after metadata;
+- continued rejection of metadata after the packfile.
 
 The full Python 3.9 / 3.13 GitHub Actions matrix must pass before Phase316 is exact-green.
