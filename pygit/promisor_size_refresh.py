@@ -1,0 +1,96 @@
+"""Lazy metadata-only refresh for unresolved promisor object sizes.
+
+A filtered fetch normally enriches newly discovered promises through protocol-v2
+``object-info size``.  That capability is optional, though, and an earlier
+fetch may therefore leave some unresolved blobs without persisted size metadata.
+
+This module gives later metadata-only consumers one safe retry path.  It queries
+configured promisor remotes for sizes only, persists trustworthy answers, and
+never falls back to content fetches.  Callers remain strict: if every candidate
+remote is unavailable, lacks ``object-info``, returns malformed metadata, or
+reports the object as unknown, the requested size simply remains absent.
+"""
+
+from __future__ import annotations
+
+from typing import Dict, Sequence
+
+from .fetch_server_option_config import configured_server_options
+from .promisor import promised_size, read_promisor_state, update_promisor_state
+from .protocol_v2_object_info import SmartHttpV2ObjectInfoClient
+
+
+def _normalize_native_oids(native_oids: Sequence[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in native_oids:
+        oid = raw.lower()
+        if len(oid) != 40 or any(ch not in "0123456789abcdef" for ch in oid):
+            raise ValueError("promisor size refresh requires full native SHA-1 object ids")
+        if oid in seen:
+            continue
+        seen.add(oid)
+        normalized.append(oid)
+    return tuple(normalized)
+
+
+def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
+    """Best-effort refresh of missing promised-object sizes.
+
+    Only unresolved promises that do not already have trusted size metadata are
+    queried.  Promisor remotes are tried in deterministic name order; configured
+    protocol-v2 server options are preserved for each remote.  Query failures are
+    intentionally soft because the caller owns the final strictness policy.
+
+    The returned mapping contains every requested OID whose trusted size is
+    available after the refresh, whether it was already persisted or learned by
+    this call.
+    """
+
+    requested = _normalize_native_oids(native_oids)
+    if not requested:
+        return {}
+
+    state = read_promisor_state(repo.pygit_dir)
+    promised = state["promised"]
+    pending = {
+        oid
+        for oid in requested
+        if oid in promised and promised_size(repo.pygit_dir, oid) is None
+    }
+
+    configured = repo.list_remotes()
+    promisor_remotes = tuple(
+        sorted(name for name in state["remotes"] if name in configured)
+    )
+
+    for remote in promisor_remotes:
+        if not pending:
+            break
+        client = SmartHttpV2ObjectInfoClient(
+            configured[remote],
+            server_options=tuple(configured_server_options(repo, remote)),
+        )
+        try:
+            sizes = client.query_sizes(tuple(sorted(pending)))
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if not sizes:
+            continue
+
+        trusted = {
+            oid: size
+            for oid, size in sizes.items()
+            if oid in pending and size is not None
+        }
+        if not trusted:
+            continue
+        update_promisor_state(repo.pygit_dir, sizes=trusted)
+        pending.difference_update(trusted)
+
+    result: Dict[str, int] = {}
+    for oid in requested:
+        size = promised_size(repo.pygit_dir, oid)
+        if size is not None:
+            result[oid] = size
+    return result
