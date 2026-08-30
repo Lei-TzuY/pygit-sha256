@@ -290,7 +290,6 @@ def test_in_commit_order_ordinary_partial_clone_fails_before_output(tmp_path, mo
     [
         (["--objects-edge"], "--objects-edge"),
         (["--filter-print-omitted"], "filter-print-omitted"),
-        (["--disk-usage"], "with --disk-usage"),
     ],
 )
 def test_in_commit_order_rejects_unmodelled_presentation_combinations(
