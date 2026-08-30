@@ -95,6 +95,31 @@ def _object_info_client(repo, remote: str, url: str, server_options: tuple[str, 
         return client
 
 
+def _prune_stale_object_info_clients(repo, active_keys) -> None:
+    """Retain only clients matching the repository's current promisor config.
+
+    Phase288 keys clients by effective remote configuration so a changed URL or
+    server option never reuses stale capability state.  Without pruning, though,
+    every historical key stays attached to a long-lived Repository until that
+    Repository itself is collected.  Phase292's per-repository refresh lock makes
+    refresh-time pruning safe; this helper additionally takes the short cache
+    guard so cache bookkeeping remains coherent for direct helper callers.
+    """
+
+    with _OBJECT_INFO_CACHE_GUARD:
+        cache = _OBJECT_INFO_CLIENTS.get(repo)
+        if not cache:
+            return
+        for key in tuple(cache):
+            if key not in active_keys:
+                cache.pop(key, None)
+        if not cache:
+            try:
+                del _OBJECT_INFO_CLIENTS[repo]
+            except KeyError:
+                pass
+
+
 def _evict_object_info_client(
     repo,
     remote: str,
@@ -135,7 +160,9 @@ def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
     partial clone cannot create an unbounded protocol request.  Clients are
     reused while the same Repository object and effective remote configuration
     remain alive, allowing Phase287's capability cache to span repeated refresh
-    calls without persisting negotiation state on disk.
+    calls without persisting negotiation state on disk. Cached clients whose
+    remote has been removed or whose effective URL/server-option configuration
+    has changed are pruned during the next non-empty refresh invocation.
 
     A client that raises a transport/protocol/query exception is evicted before
     trying the next remote, so a later refresh can create a fresh session instead
@@ -145,10 +172,10 @@ def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
     result without another discovery request.
 
     Concurrent refreshes for the same Repository are serialized around state
-    inspection, object-info queries, failed-client handling, trusted-size
-    persistence, and result collection. Refreshes for different Repository
-    objects remain independent. Query failures are intentionally soft because
-    the caller owns the final strictness policy.
+    inspection, effective-configuration pruning, object-info queries,
+    failed-client handling, trusted-size persistence, and result collection.
+    Refreshes for different Repository objects remain independent. Query failures
+    are intentionally soft because the caller owns the final strictness policy.
 
     The returned mapping contains every requested OID whose trusted size is
     available after the refresh, whether it was already persisted or learned by
@@ -169,15 +196,24 @@ def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
         }
 
         configured = repo.list_remotes()
-        promisor_remotes = tuple(
-            sorted(name for name in state["remotes"] if name in configured)
+        remote_configs = tuple(
+            (
+                remote,
+                configured[remote],
+                tuple(configured_server_options(repo, remote)),
+            )
+            for remote in sorted(state["remotes"])
+            if remote in configured
         )
+        active_keys = frozenset(
+            _client_cache_key(remote, url, server_options)
+            for remote, url, server_options in remote_configs
+        )
+        _prune_stale_object_info_clients(repo, active_keys)
 
-        for remote in promisor_remotes:
+        for remote, url, server_options in remote_configs:
             if not pending:
                 break
-            server_options = tuple(configured_server_options(repo, remote))
-            url = configured[remote]
             client = _object_info_client(repo, remote, url, server_options)
             remote_failed = False
             for batch in _chunked_oids(tuple(sorted(pending))):
