@@ -43,6 +43,14 @@ def _filtered_fixture(tmp_path):
     return repo, blob_oid, commit_oid, objects, len(blob_data)
 
 
+def _advertisement(commit_oid: str) -> Advertisement:
+    return Advertisement(
+        refs={"refs/heads/main": commit_oid},
+        capabilities=set(),
+        symrefs={},
+    )
+
+
 def test_legacy_version_one_promisor_state_reads_with_empty_sizes(tmp_path):
     repo = Repository.init(str(tmp_path / "repo"))
     native = "a" * 40
@@ -160,7 +168,6 @@ def test_filtered_import_enriches_size_without_content_materialization(
         def fetch(self, haves=None, advertisement=None):
             return SimpleNamespace(objects=objects)
 
-    advertisement = Advertisement(refs={"refs/heads/main": commit_oid})
     native_map = {}
     known_by_native = {}
     previous = fetch_partial._ACTIVE_FILTER
@@ -173,7 +180,7 @@ def test_filtered_import_enriches_size_without_content_materialization(
         imported, count = fetch_partial._fetch_import_sources_filtered(
             repo,
             FakeClient(),
-            advertisement,
+            _advertisement(commit_oid),
             {"refs/heads/main": commit_oid},
             native_map,
             known_by_native,
@@ -221,7 +228,7 @@ def test_optional_object_info_failure_does_not_fail_filtered_fetch(tmp_path, mon
         imported, count = fetch_partial._fetch_import_sources_filtered(
             repo,
             FakeClient(),
-            Advertisement(refs={"refs/heads/main": commit_oid}),
+            _advertisement(commit_oid),
             {"refs/heads/main": commit_oid},
             {},
             {},
