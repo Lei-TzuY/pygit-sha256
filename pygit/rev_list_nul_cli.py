@@ -16,12 +16,17 @@ Phase270 reconciles the historical pygit ``-z + --count`` guard with native Git:
 count suppresses normal object records and is printed afterward as a regular
 newline-terminated integer. Missing records remain structured NUL records and
 are emitted before that integer, matching ``builtin/rev-list.c``.
+
+Phase282 exposes one narrow inventory-filter seam so size-aware filters can
+reuse this renderer without parsing/reassembling NUL output. The callback runs
+before missing preflight or any record emission and therefore preserves the
+same fail-before-output guarantees as the built-in structured filters.
 """
 
 from __future__ import annotations
 
 import sys
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 from . import rev_list_promisor_cli as _promisor
 from .promisor_object_inventory import PromisorObjectInventoryEntry, promisor_object_inventory
@@ -224,6 +229,12 @@ def try_run_rev_list_nul(
     omit_blobs: bool = False,
     object_type: Optional[str] = None,
     provided_oids: frozenset[str] = frozenset(),
+    entry_filter: Optional[
+        Callable[
+            [object, Sequence[PromisorObjectInventoryEntry]],
+            Sequence[PromisorObjectInventoryEntry],
+        ]
+    ] = None,
 ) -> Optional[int]:
     """Handle Git-style NUL-framed ``rev-list --objects`` traversal.
 
@@ -236,10 +247,12 @@ def try_run_rev_list_nul(
 
     ``omit_blobs`` is a structured presentation filter used by Phase248's
     ``--filter=blob:none`` adapter. ``object_type`` composes the same structured
-    inventory with Git's ``object:type=(commit|tree|blob)`` semantics. Filtering
-    happens before any NUL record is emitted, so nonmatching promised objects
-    disappear without fetches and explicitly provided commit roots remain
-    visible even when their type differs from the requested filter.
+    inventory with Git's ``object:type=(commit|tree|blob)`` semantics.
+    ``entry_filter`` is the mutually-exclusive Phase282 seam for filters whose
+    membership depends on repository metadata such as trusted blob sizes.
+    Filtering happens before any NUL record is emitted, so nonmatching promised
+    objects disappear without fetches and fail-fast classification errors cannot
+    leave a partial structured stream.
 
     When ``--count`` is present, normal object records are suppressed and only
     structured missing diagnostics plus the final newline count are emitted.
@@ -247,7 +260,15 @@ def try_run_rev_list_nul(
     parsed = _parse(argv)
     if parsed is None:
         return None
-    if omit_blobs and object_type is not None:
+
+    active_filters = sum(
+        (
+            1 if omit_blobs else 0,
+            1 if object_type is not None else 0,
+            1 if entry_filter is not None else 0,
+        )
+    )
+    if active_filters > 1:
         raise ValueError("rev-list NUL adapter accepts only one structured object filter")
     if object_type is not None and object_type not in {"commit", "tree", "blob"}:
         raise ValueError("rev-list NUL object:type filter supports commit, tree, or blob")
@@ -287,6 +308,8 @@ def try_run_rev_list_nul(
             requested=object_type,
             provided_oids=provided_oids,
         )
+    elif entry_filter is not None:
+        entries = tuple(entry_filter(repo, entries))
 
     mode = parsed["nul_missing_mode"]
     if parsed["count"]:
