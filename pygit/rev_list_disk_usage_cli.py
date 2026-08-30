@@ -22,6 +22,9 @@ from .rev_list_header_cli import run_rev_list_header
 from .rev_list_in_commit_order_blob_limit_cli import (
     try_run_rev_list_in_commit_order_blob_limit,
 )
+from .rev_list_in_commit_order_blob_limit_omitted_cli import (
+    try_run_rev_list_in_commit_order_blob_limit_omitted,
+)
 from .rev_list_in_commit_order_cli import try_run_rev_list_in_commit_order
 from .rev_list_in_commit_order_object_type_cli import (
     try_run_rev_list_in_commit_order_object_type,
@@ -147,6 +150,10 @@ def _selected_oids(output: str, *, object_edge: bool) -> tuple[tuple[str, ...], 
 
 def run_rev_list_disk_usage(argv: Sequence[str]) -> int:
     """Run rev-list with Git-style ``--disk-usage[=human]`` accounting."""
+
+    ordered_blob_limit_omitted_code = try_run_rev_list_in_commit_order_blob_limit_omitted(argv)
+    if ordered_blob_limit_omitted_code is not None:
+        return ordered_blob_limit_omitted_code
 
     ordered_blob_limit_code = try_run_rev_list_in_commit_order_blob_limit(argv)
     if ordered_blob_limit_code is not None:
