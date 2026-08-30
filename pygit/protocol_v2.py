@@ -14,6 +14,11 @@ from typing import Dict, Optional, Sequence, Set
 from .remote import Advertisement, pkt_line
 
 
+_UPLOAD_PACK_ADVERTISEMENT_MEDIA_TYPE = "application/x-git-upload-pack-advertisement"
+_UPLOAD_PACK_REQUEST_MEDIA_TYPE = "application/x-git-upload-pack-request"
+_UPLOAD_PACK_RESULT_MEDIA_TYPE = "application/x-git-upload-pack-result"
+
+
 def _read_packet(data: bytes, offset: int) -> tuple[str, Optional[bytes], int]:
     if offset + 4 > len(data):
         raise ValueError("Truncated protocol-v2 pkt-line length")
@@ -32,6 +37,64 @@ def _read_packet(data: bytes, offset: int) -> tuple[str, Optional[bytes], int]:
     if size < 4 or offset + size - 4 > len(data):
         raise ValueError("Truncated protocol-v2 pkt-line payload")
     return "data", data[offset : offset + size - 4], offset + size - 4
+
+
+def _response_has_header_api(response) -> bool:
+    """Return whether *response* looks like a real HTTP response object."""
+
+    return getattr(response, "headers", None) is not None or callable(
+        getattr(response, "getheader", None)
+    )
+
+
+def _response_content_type(response) -> Optional[str]:
+    """Return a normalized HTTP media type when response headers are available."""
+
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        getter = getattr(headers, "get", None)
+        if callable(getter):
+            raw = getter("Content-Type")
+            if raw is None:
+                return None
+            return str(raw).split(";", 1)[0].strip().lower()
+
+    getheader = getattr(response, "getheader", None)
+    if callable(getheader):
+        raw = getheader("Content-Type")
+        if raw is None:
+            return None
+        return str(raw).split(";", 1)[0].strip().lower()
+
+    return None
+
+
+def _smart_http_content_type_matches(response, expected: str) -> Optional[bool]:
+    """Compare one real HTTP response media type, or return ``None`` for doubles.
+
+    Older focused tests use minimal response doubles exposing only ``read()``.
+    Real ``urllib`` responses expose a header API even if Content-Type itself is
+    missing, so ``None`` here can safely mean "no HTTP envelope available to
+    validate" rather than "header present but missing".
+    """
+
+    if not _response_has_header_api(response):
+        return None
+    return _response_content_type(response) == expected
+
+
+def _validate_smart_http_content_type(response, expected: str, *, context: str) -> None:
+    """Fail closed on a real smart-HTTP response with an unexpected media type."""
+
+    matches = _smart_http_content_type_matches(response, expected)
+    if matches is None or matches:
+        return
+    content_type = _response_content_type(response)
+    rendered = "<missing>" if content_type is None else content_type
+    raise ValueError(
+        f"Unexpected smart-HTTP {context} Content-Type {rendered!r}; "
+        f"expected {expected!r}"
+    )
 
 
 @dataclass(frozen=True)
@@ -218,11 +281,22 @@ class SmartHttpV2QueryClient:
         request = urllib.request.Request(
             f"{self.url}/info/refs?{query}",
             headers={
-                "Accept": "application/x-git-upload-pack-advertisement",
+                "Accept": _UPLOAD_PACK_ADVERTISEMENT_MEDIA_TYPE,
                 "Git-Protocol": "version=2",
             },
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            # gitprotocol-http says a smart discovery response uses the
+            # service-specific advertisement media type and clients SHOULD fall
+            # back when another type is returned.  Return the existing fallback
+            # signal without parsing an untrusted body.  Header-less legacy test
+            # doubles continue through the old parser path.
+            matches = _smart_http_content_type_matches(
+                response,
+                _UPLOAD_PACK_ADVERTISEMENT_MEDIA_TYPE,
+            )
+            if matches is False:
+                return None
             return parse_capability_advertisement(response.read())
 
     def discover_refs(
@@ -245,9 +319,14 @@ class SmartHttpV2QueryClient:
             data=body,
             method="POST",
             headers={
-                "Accept": "application/x-git-upload-pack-result",
-                "Content-Type": "application/x-git-upload-pack-request",
+                "Accept": _UPLOAD_PACK_RESULT_MEDIA_TYPE,
+                "Content-Type": _UPLOAD_PACK_REQUEST_MEDIA_TYPE,
             },
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            _validate_smart_http_content_type(
+                response,
+                _UPLOAD_PACK_RESULT_MEDIA_TYPE,
+                context="upload-pack response",
+            )
             return parse_ls_refs_response(response.read(), capabilities)
