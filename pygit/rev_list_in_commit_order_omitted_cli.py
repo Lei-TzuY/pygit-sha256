@@ -39,13 +39,24 @@ def _filter_spec(argv: Sequence[str]) -> str:
 
 
 def _omission_projection(argv: Sequence[str]) -> list[str]:
-    """Project ordered traversal back onto the mature omission inventory parser."""
+    """Project ordered traversal back onto the mature omission inventory parser.
 
-    return [
+    The historical line-oriented filter adapter requires an explicit missing
+    policy even for an ordinary repository. The omission collector itself is a
+    metadata-only inventory query, so provide ``allow-promisor`` when the user
+    did not choose a missing mode. This does not change user-visible traversal;
+    it only lets the shared collector classify local/missing entries without a
+    network fetch.
+    """
+
+    projected = [
         arg
         for arg in argv
         if arg not in {_IN_COMMIT_ORDER, _FILTER_PRINT_OMITTED}
     ]
+    if not any(arg.startswith("--missing=") for arg in projected):
+        projected.append("--missing=allow-promisor")
+    return projected
 
 
 def try_run_rev_list_in_commit_order_filter_print_omitted(
