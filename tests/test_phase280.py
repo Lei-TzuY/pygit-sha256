@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Optional
 
 import pytest
 
@@ -15,7 +16,7 @@ def _native_oid(type_name: str, data: bytes) -> str:
     return hashlib.sha1(f"{type_name} {len(data)}\0".encode() + data).hexdigest()
 
 
-def _partial_repo(tmp_path, *, trusted_size: int | None):
+def _partial_repo(tmp_path, *, trusted_size: Optional[int]):
     repo = Repository.init(str(tmp_path / "partial"))
     repo.add_remote("origin", "https://example.test/repo.git")
 
