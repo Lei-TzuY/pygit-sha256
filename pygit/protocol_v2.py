@@ -62,7 +62,13 @@ def _payload_without_optional_lf(payload: bytes, *, context: str) -> bytes:
 
 
 def _parse_capability_record(payload: bytes) -> tuple[str, Optional[str]]:
-    """Parse one capability according to protocol-v2's key/value ABNF."""
+    """Parse one capability according to protocol-v2's key/value grammar.
+
+    The generic capability value ABNF is intentionally strict.  The protocol's
+    dedicated ``agent`` capability is a documented semantic exception: its value
+    may contain any printable ASCII byte except space (33..126), so preserve that
+    wider compatibility without relaxing unknown capability values.
+    """
 
     raw = _payload_without_optional_lf(
         payload,
@@ -77,7 +83,10 @@ def _parse_capability_record(payload: bytes) -> tuple[str, Optional[str]]:
     if separator:
         if not value_raw:
             raise ValueError("Empty protocol-v2 capability value")
-        if any(byte not in _CAPABILITY_VALUE_BYTES for byte in value_raw):
+        if key_raw == b"agent":
+            if any(byte < 33 or byte > 126 for byte in value_raw):
+                raise ValueError("Invalid protocol-v2 agent capability value")
+        elif any(byte not in _CAPABILITY_VALUE_BYTES for byte in value_raw):
             raise ValueError("Invalid protocol-v2 capability value")
         value: Optional[str] = value_raw.decode("ascii")
     else:
@@ -169,7 +178,7 @@ def parse_capability_advertisement(data: bytes) -> Optional[ProtocolV2Capabiliti
     complete and end in exactly one flush packet; truncation, delimiter packets,
     response-end packets, or bytes after the flush are malformed transport.
 
-    Textual records follow protocol-v2's capability ABNF while retaining Git's
+    Textual records follow protocol-v2's capability grammar while retaining Git's
     common pkt-line compatibility rule that permits the terminal LF to be absent.
     """
 
