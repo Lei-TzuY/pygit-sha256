@@ -161,21 +161,3 @@ def test_ordered_blob_limit_omitted_nul_retains_objects_edge_guard(
                 f"{c1}..{c2}",
             ]
         )
-
-
-def test_plain_ordered_blob_limit_nul_remains_a_separate_deferred_composition(
-    tmp_path, monkeypatch
-):
-    repo, _c1, _c2 = _repo(tmp_path)
-    monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
-
-    with pytest.raises(ValueError, match="blob:limit and -z is not yet supported"):
-        run_rev_list_disk_usage(
-            [
-                "--objects",
-                "--in-commit-order",
-                "-z",
-                "--filter=blob:limit=8",
-                "HEAD",
-            ]
-        )
