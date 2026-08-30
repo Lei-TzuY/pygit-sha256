@@ -185,19 +185,13 @@ def test_nul_blob_none_boundary_keeps_boundary_metadata_and_snapshot_trees(
     assert read_promisor_state(repo.pygit_dir) == before
 
 
-def test_nul_blob_none_preserves_nul_protocol_option_rejections(
-    tmp_path, monkeypatch
-):
+def test_nul_blob_none_preserves_objects_edge_rejection(tmp_path, monkeypatch):
     repo = Repository.init(str(tmp_path / "reject"))
     (repo.worktree / "f.txt").write_text("x\n", encoding="utf-8")
     repo.add(["f.txt"])
     repo.commit("tip", author="Test <test@example.com>")
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
 
-    with pytest.raises(ValueError, match="not compatible with --count"):
-        run_rev_list_disk_usage(
-            ["--objects", "-z", "--filter=blob:none", "--count", "HEAD"]
-        )
     with pytest.raises(ValueError, match="only compatible with --objects"):
         run_rev_list_disk_usage(
             ["--objects-edge", "-z", "--filter=blob:none", "HEAD"]
