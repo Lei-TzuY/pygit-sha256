@@ -19,9 +19,9 @@ Phase257 follows current Git's deliberately mixed ``-z`` behavior rather than
 inventing a new NUL metadata token for omissions. ``-z`` changes normal object
 and missing-object framing to NUL-delimited records, but upstream rev-list still
 prints collected omitted objects through the hard-coded ``~<oid>\n`` channel.
-The adapter therefore partitions projected NUL records structurally, emits
-traversal records first, then newline-terminated omissions, then NUL-framed
-missing records.
+Phase270 additionally models native ``-z + --count`` framing: omissions remain
+newline records, missing diagnostics remain NUL records, and the final count is
+again newline-terminated.
 """
 
 from __future__ import annotations
@@ -39,28 +39,7 @@ _FILTER_PRINT_OMITTED = "--filter-print-omitted"
 
 
 def _omitted_local_oids(repo, argv: Sequence[str], *, spec: str) -> tuple[str, ...]:
-    """Return genuine local SHA-256 ids collected by the active Git filter.
-
-    Git 2.55's ``filter_blobs_none()`` records filtered blobs in the omission
-    set, while ``filter_object_type()`` explicitly leaves its ``omits`` argument
-    unused. Therefore ``object:type`` may suppress traversal output but produces
-    no ``~`` records under ``--filter-print-omitted``. Matching that distinction
-    is important: reporting every filtered object would look plausible but would
-    diverge from native Git.
-
-    For ``blob:none``, boundary traversal needs the same snapshot roots as the
-    underlying filter adapter. Otherwise blobs that are visited only because
-    ``--boundary`` exposes an older boundary snapshot would be silently absent
-    from the omission set. ``--objects-edge`` needs no extra inventory roots:
-    its ``-<oid>`` records advertise excluded commits as a presentation channel,
-    while the normal revision grammar already keeps their object closure out of
-    the selected inventory.
-
-    The omitted-object channel is a repository object-id channel. If an
-    unresolved promise itself would have to be reported as omitted, pygit fails
-    rather than substituting its foreign/native transport identity for a local
-    SHA-256 object id.
-    """
+    """Return genuine local SHA-256 ids collected by the active Git filter."""
 
     if spec.startswith("object:type="):
         return ()
@@ -151,14 +130,7 @@ def _is_oid_field(value: str) -> bool:
 
 
 def _partition_projected_nul(output: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Split Git-style NUL object records into traversal and missing records.
-
-    ``rev-list -z`` is a flat sequence of NUL-terminated fields. Each record
-    begins with an object id; following ``token=value`` fields belong to that
-    record until the next object id. This parser never interprets path contents:
-    a path is prefixed by ``path=`` and therefore cannot be mistaken for the
-    next object id even when the path itself looks hexadecimal.
-    """
+    """Split Git-style NUL object records into traversal and missing records."""
 
     fields = output.split("\0")
     if fields and fields[-1] == "":
@@ -191,6 +163,42 @@ def _partition_projected_nul(output: str) -> tuple[tuple[str, ...], tuple[str, .
     return tuple(traversal), tuple(missing)
 
 
+def _partition_projected_nul_count(
+    output: str,
+) -> tuple[tuple[str, ...], tuple[str, ...], str]:
+    """Split NUL diagnostics from native's final newline count.
+
+    Paths inside structured records may contain literal newlines, so the count
+    cannot be found with ``splitlines()``. Native count output follows the final
+    NUL record; splitting at the last NUL preserves path bytes verbatim and
+    isolates the trailing decimal line. When there are no missing records the
+    projection consists solely of that decimal line.
+    """
+
+    if "\0" in output:
+        last_nul = output.rfind("\0")
+        records_output = output[: last_nul + 1]
+        count_output = output[last_nul + 1 :]
+    else:
+        records_output = ""
+        count_output = output
+
+    if not count_output.endswith("\n"):
+        raise RuntimeError("rev-list NUL count projection did not end with newline")
+    count_line = count_output[:-1]
+    if "\n" in count_line or "\0" in count_line:
+        raise RuntimeError("rev-list NUL count projection has malformed count suffix")
+    try:
+        int(count_line)
+    except ValueError as exc:
+        raise RuntimeError(
+            "rev-list NUL count projection did not end with an integer"
+        ) from exc
+
+    traversal, missing = _partition_projected_nul(records_output)
+    return traversal, missing, count_line
+
+
 def try_run_rev_list_filter_print_omitted(argv: Sequence[str]) -> Optional[int]:
     """Handle Git's local-SHA-256 omitted-object protocol."""
 
@@ -215,15 +223,21 @@ def try_run_rev_list_filter_print_omitted(argv: Sequence[str]) -> Optional[int]:
 
     projected_output = capture.getvalue()
     if "-z" in cleaned:
-        traversal, missing = _partition_projected_nul(projected_output)
+        count_line: Optional[str] = None
+        if "--count" in cleaned:
+            traversal, missing, count_line = _partition_projected_nul_count(
+                projected_output
+            )
+        else:
+            traversal, missing = _partition_projected_nul(projected_output)
         for record in traversal:
             sys.stdout.write(record)
-        # Upstream rev-list.c deliberately does not use line_term here: even
-        # under -z, omitted objects remain the legacy newline-framed ~ channel.
         for oid in omitted:
             sys.stdout.write(f"~{oid}\n")
         for record in missing:
             sys.stdout.write(record)
+        if count_line is not None:
+            sys.stdout.write(f"{count_line}\n")
         return code
 
     traversal, missing, count_line = _partition_projected_lines(
