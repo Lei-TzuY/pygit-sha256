@@ -102,7 +102,7 @@ def test_v2_client_negotiate_rejects_pack_transition(monkeypatch):
         ),
     )
 
-    with pytest.raises(RuntimeError, match="pack transfer"):
+    with pytest.raises(ValueError, match="wait-for-done"):
         client.negotiate(haves=["b" * 40], advertisement=advertisement)
 
 
