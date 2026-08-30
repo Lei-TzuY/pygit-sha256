@@ -58,12 +58,11 @@ def test_parse_acknowledgment_only_response():
     body = (
         pkt_line(b"acknowledgments\n")
         + pkt_line(f"ACK {have}\n".encode())
-        + pkt_line(b"ready\n")
         + b"0000"
     )
     parsed = parse_fetch_response(body)
     assert parsed.acknowledgments == (have,)
-    assert parsed.ready is True
+    assert parsed.ready is False
     assert parsed.nak is False
     assert parsed.pack is None
 
