@@ -215,8 +215,7 @@ def test_object_type_tag_filter_print_omitted_stays_empty(tmp_path, monkeypatch,
 @pytest.mark.parametrize(
     ("extra", "message"),
     [
-        (("-z",), "tag NUL placement is not modelled"),
-        (("--in-commit-order",), "ordered tag placement is not modelled"),
+        (("--in-commit-order",), "--in-commit-order is not yet supported"),
         (("--disk-usage",), "with --disk-usage is not yet supported"),
     ],
 )
