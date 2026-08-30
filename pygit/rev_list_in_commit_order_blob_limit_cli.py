@@ -1,9 +1,9 @@
 """Compose ordered rev-list traversal with ``blob:limit`` filtering.
 
-Phase267 rebases the earlier Phase258 size-filter work onto the current ordered
-stack. The ordered inventory remains authoritative for commit/snapshot order,
-boundaries, object edges, and missing-object policy; this adapter only performs
-blob-size membership before the shared renderer runs.
+The ordered inventory remains authoritative for commit/snapshot order,
+boundaries, object edges, and missing-object policy. Blob membership is decided
+from local payload size or trusted promisor size metadata without materializing
+an unresolved object merely to classify the filter.
 """
 
 from __future__ import annotations
@@ -35,9 +35,9 @@ def _apply_blob_limit(
     *,
     limit: int,
 ) -> Tuple[PromisorObjectInventoryEntry, ...]:
-    """Filter local blobs by uncompressed payload size without reordering."""
+    """Filter blobs by trusted uncompressed size without changing order."""
 
-    _blob_limit._ensure_missing_blobs_are_classifiable(entries)
+    _blob_limit._ensure_missing_blobs_are_classifiable(repo, entries)
     return tuple(
         entry
         for entry in entries
@@ -50,10 +50,9 @@ def try_run_rev_list_in_commit_order_blob_limit(
 ) -> Optional[int]:
     """Handle ordered ``blob:limit=<n>[kmg]`` line/count traversal.
 
-    The Phase267 scope deliberately leaves NUL and omitted-object framing for
-    follow-up phases. Unresolved promised blobs are rejected before rendering
-    because pygit's promisor metadata does not persist their size and the filter
-    must not demand-fetch content merely to classify membership.
+    Unresolved promised blobs are classified only when trusted promisor size
+    metadata is present. Missing metadata remains a pre-render hard error, and
+    this path never triggers content materialization for size classification.
     """
 
     if _IN_COMMIT_ORDER not in argv:
