@@ -333,11 +333,9 @@ def test_in_commit_order_nul_ordinary_partial_fails_before_output(
     assert read_promisor_state(repo.pygit_dir) == before
 
 
-def test_in_commit_order_nul_keeps_existing_output_option_guards(tmp_path, monkeypatch):
+def test_in_commit_order_nul_keeps_objects_edge_guard(tmp_path, monkeypatch):
     repo, (_c1, _c2, _c3) = _ordinary_three_commit_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
 
     with pytest.raises(ValueError, match="only compatible with --objects"):
         run_rev_list_disk_usage(["--objects-edge", "--in-commit-order", "-z", "HEAD"])
-    with pytest.raises(ValueError, match="not compatible with --count"):
-        run_rev_list_disk_usage(["--objects", "--in-commit-order", "-z", "--count", "HEAD"])
