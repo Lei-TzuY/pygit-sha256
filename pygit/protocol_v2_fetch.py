@@ -26,6 +26,15 @@ from .protocol_v2 import (
 from .remote import Advertisement, FetchResult, PackParser
 
 
+_FETCH_SECTION_ORDER = {
+    "acknowledgments": 0,
+    "shallow-info": 1,
+    "wanted-refs": 2,
+    "packfile-uris": 3,
+    "packfile": 4,
+}
+
+
 def _validate_sha1_oid(oid: str, *, field: str) -> str:
     value = oid.lower()
     if len(value) != 40:
@@ -78,6 +87,14 @@ def build_fetch_request(
     if shallow_requested and not capabilities.feature("fetch", "shallow"):
         raise RuntimeError("Remote protocol-v2 fetch does not advertise shallow")
 
+    if wait_for_done:
+        if done:
+            raise ValueError("wait-for-done cannot be combined with done")
+        if not capabilities.feature("fetch", "wait-for-done"):
+            raise RuntimeError(
+                "Remote protocol-v2 fetch does not advertise wait-for-done"
+            )
+
     body = _command_prefix(
         "fetch",
         capabilities,
@@ -91,10 +108,6 @@ def build_fetch_request(
     if include_tag:
         body += _pkt_line(b"include-tag\n")
     if wait_for_done:
-        if not capabilities.feature("fetch", "wait-for-done"):
-            raise RuntimeError(
-                "Remote protocol-v2 fetch does not advertise wait-for-done"
-            )
         body += _pkt_line(b"wait-for-done\n")
     for oid in shallow_oids:
         body += _pkt_line(f"shallow {oid}\n".encode())
@@ -116,6 +129,29 @@ def _pkt_line(payload: bytes) -> bytes:
     return f"{len(payload) + 4:04x}".encode() + payload
 
 
+def _decode_fetch_text(payload: bytes, *, context: str, ascii_only: bool = False) -> str:
+    """Decode one textual fetch pkt-line without silently normalizing records.
+
+    Git's pkt-line rules require receivers to tolerate a missing terminal LF, so
+    accept either no LF or exactly one terminal LF. Embedded/repeated LF, CR,
+    and NUL bytes remain structural errors rather than being hidden by rstrip().
+    """
+
+    if payload.endswith(b"\n"):
+        payload = payload[:-1]
+    if b"\n" in payload:
+        raise ValueError(f"Unexpected LF inside {context}")
+    if b"\r" in payload:
+        raise ValueError(f"Unexpected CR inside {context}")
+    if b"\x00" in payload:
+        raise ValueError(f"Unexpected NUL inside {context}")
+    try:
+        return payload.decode("ascii" if ascii_only else "utf-8")
+    except UnicodeDecodeError as exc:
+        encoding = "ASCII" if ascii_only else "UTF-8"
+        raise ValueError(f"Invalid {encoding} in {context}") from exc
+
+
 @dataclass(frozen=True)
 class ProtocolV2FetchResponse:
     """Parsed protocol-v2 fetch response sections."""
@@ -128,6 +164,12 @@ class ProtocolV2FetchResponse:
     wanted_refs: Dict[str, str]
     pack: Optional[bytes]
 
+    @property
+    def has_acknowledgments(self) -> bool:
+        """Return whether an acknowledgments section was observably present."""
+
+        return bool(self.acknowledgments or self.ready or self.nak)
+
 
 @dataclass
 class V2FetchResult(FetchResult):
@@ -137,78 +179,132 @@ class V2FetchResult(FetchResult):
     unshallow: Tuple[str, ...] = ()
 
 
-def _parse_ack_line(text: str, acknowledgments: list[str]) -> tuple[bool, bool]:
-    if text == "NAK":
-        return False, True
-    if text == "ready":
-        return True, False
-    if text.startswith("ACK "):
-        oid = _validate_sha1_oid(text[4:], field="ACK")
-        acknowledgments.append(oid)
-        return False, False
-    raise ValueError(f"Malformed protocol-v2 acknowledgment line: {text!r}")
+def _validate_fetch_response_for_request(
+    response: ProtocolV2FetchResponse,
+    *,
+    done: bool = False,
+    wait_for_done: bool = False,
+) -> None:
+    """Validate response semantics that depend on the request negotiation mode."""
+
+    if done:
+        if response.has_acknowledgments:
+            raise ValueError(
+                "protocol-v2 done fetch response must omit acknowledgments"
+            )
+        if response.pack is None:
+            raise ValueError("protocol-v2 done fetch response did not contain a packfile")
+
+    if wait_for_done:
+        if response.ready:
+            raise ValueError(
+                "protocol-v2 wait-for-done response must not contain ready"
+            )
+        if response.pack is not None:
+            raise ValueError(
+                "protocol-v2 wait-for-done response must not contain a packfile before done"
+            )
+        if not response.has_acknowledgments:
+            raise ValueError(
+                "protocol-v2 wait-for-done response must contain acknowledgments"
+            )
 
 
 def parse_fetch_response(data: bytes) -> ProtocolV2FetchResponse:
     """Parse one complete sectioned response to a protocol-v2 ``fetch`` command.
 
-    Current Git protocol-v2 defines fetch output as either an acknowledgments
-    section followed by ``flush-pkt`` or a sectioned pack response whose final
-    packfile section is followed by ``flush-pkt``. Treat that terminator as part
-    of the trusted command envelope: EOF without flush, ``response-end-pkt``, and
-    trailing bytes after the flush are rejected rather than accepting a valid
-    looking prefix of a malformed response.
+    Git's current grammar permits either one acknowledgments-only response or a
+    strictly ordered section stream ending in ``packfile``. Delimiter packets
+    separate sections; they cannot appear before the first section, repeat, or
+    follow the final packfile section. The final response terminator is one
+    flush-pkt, with no trailing bytes.
     """
 
     acknowledgments: list[str] = []
+    acknowledgment_set: set[str] = set()
     ready = False
     nak = False
     shallow: list[str] = []
     unshallow: list[str] = []
+    shallow_seen: set[str] = set()
+    unshallow_seen: set[str] = set()
     wanted_refs: Dict[str, str] = {}
     pack_chunks: list[bytes] = []
+
     section: Optional[str] = None
     seen_sections: set[str] = set()
+    last_section_rank = -1
     saw_flush = False
     offset = 0
 
+    def validate_section_end(name: str) -> None:
+        if name == "acknowledgments" and not (
+            acknowledgments or ready or nak
+        ):
+            raise ValueError(
+                "protocol-v2 acknowledgments section contained no result"
+            )
+
     while offset < len(data):
         kind, payload, offset = _read_packet(data, offset)
+
         if kind == "flush":
+            if section is None:
+                if seen_sections:
+                    raise ValueError(
+                        "protocol-v2 fetch response ended immediately after delimiter"
+                    )
+                raise ValueError("protocol-v2 fetch response contained no section")
+            validate_section_end(section)
             saw_flush = True
             if offset != len(data):
                 raise ValueError("Trailing data after protocol-v2 fetch flush packet")
             break
+
         if kind == "response-end":
             raise ValueError(
                 "Unexpected response-end-pkt in protocol-v2 fetch response"
             )
+
         if kind == "delim":
+            if section is None:
+                raise ValueError(
+                    "Unexpected delimiter before protocol-v2 fetch section"
+                )
+            if section == "packfile":
+                raise ValueError(
+                    "Unexpected delimiter after protocol-v2 packfile section"
+                )
+            validate_section_end(section)
             section = None
             continue
+
         if kind != "data" or payload is None:
             raise ValueError("Unexpected packet in protocol-v2 fetch response")
 
         if section is None:
-            try:
-                header = payload.rstrip(b"\n").decode("ascii")
-            except UnicodeDecodeError as exc:
-                raise ValueError("Invalid protocol-v2 fetch section header") from exc
-            if header not in {
-                "acknowledgments",
-                "shallow-info",
-                "wanted-refs",
-                "packfile-uris",
-                "packfile",
-            }:
+            header = _decode_fetch_text(
+                payload,
+                context="protocol-v2 fetch section header",
+                ascii_only=True,
+            )
+            if header not in _FETCH_SECTION_ORDER:
                 raise ValueError(f"Unknown protocol-v2 fetch section: {header!r}")
             if header in seen_sections:
                 raise ValueError(f"Duplicate protocol-v2 fetch section: {header}")
+
+            rank = _FETCH_SECTION_ORDER[header]
+            if rank <= last_section_rank:
+                raise ValueError(
+                    f"Out-of-order protocol-v2 fetch section: {header}"
+                )
             if header == "packfile-uris":
                 raise RuntimeError(
                     "protocol-v2 packfile-uris response is unsupported; pygit did not request it"
                 )
+
             seen_sections.add(header)
+            last_section_rank = rank
             section = header
             continue
 
@@ -225,35 +321,99 @@ def parse_fetch_response(data: bytes) -> ProtocolV2FetchResponse:
                 raise ValueError(f"Invalid protocol-v2 pack sideband channel: {channel}")
             continue
 
-        try:
-            text = payload.rstrip(b"\n").decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("Invalid UTF-8 in protocol-v2 fetch response") from exc
+        text = _decode_fetch_text(
+            payload,
+            context=f"protocol-v2 {section} record",
+            ascii_only=section != "wanted-refs",
+        )
 
         if section == "acknowledgments":
-            line_ready, line_nak = _parse_ack_line(text, acknowledgments)
-            ready = ready or line_ready
-            nak = nak or line_nak
+            if text == "NAK":
+                if nak:
+                    raise ValueError("Duplicate NAK in protocol-v2 acknowledgments")
+                if acknowledgments or ready:
+                    raise ValueError(
+                        "protocol-v2 acknowledgments cannot mix NAK with ACK or ready"
+                    )
+                nak = True
+            elif text == "ready":
+                if ready:
+                    raise ValueError("Duplicate ready in protocol-v2 acknowledgments")
+                if nak:
+                    raise ValueError(
+                        "protocol-v2 acknowledgments cannot mix NAK with ready"
+                    )
+                ready = True
+            elif text.startswith("ACK "):
+                if nak:
+                    raise ValueError(
+                        "protocol-v2 acknowledgments cannot contain both ACK and NAK"
+                    )
+                if ready:
+                    raise ValueError(
+                        "protocol-v2 ACK cannot appear after ready"
+                    )
+                oid = _validate_sha1_oid(text[4:], field="ACK")
+                if oid in acknowledgment_set:
+                    raise ValueError(f"Duplicate protocol-v2 ACK for {oid}")
+                acknowledgment_set.add(oid)
+                acknowledgments.append(oid)
+            else:
+                raise ValueError(
+                    f"Malformed protocol-v2 acknowledgment line: {text!r}"
+                )
+
         elif section == "shallow-info":
             if text.startswith("shallow "):
-                shallow.append(_validate_sha1_oid(text[8:], field="shallow"))
+                oid = _validate_sha1_oid(text[8:], field="shallow")
+                if oid in shallow_seen:
+                    raise ValueError(f"Duplicate protocol-v2 shallow result for {oid}")
+                if oid in unshallow_seen:
+                    raise ValueError(
+                        f"Conflicting shallow/unshallow result for {oid}"
+                    )
+                shallow_seen.add(oid)
+                shallow.append(oid)
             elif text.startswith("unshallow "):
-                unshallow.append(_validate_sha1_oid(text[10:], field="unshallow"))
+                oid = _validate_sha1_oid(text[10:], field="unshallow")
+                if oid in unshallow_seen:
+                    raise ValueError(f"Duplicate protocol-v2 unshallow result for {oid}")
+                if oid in shallow_seen:
+                    raise ValueError(
+                        f"Conflicting shallow/unshallow result for {oid}"
+                    )
+                unshallow_seen.add(oid)
+                unshallow.append(oid)
             else:
                 raise ValueError(f"Malformed protocol-v2 shallow-info line: {text!r}")
+
         elif section == "wanted-refs":
-            if " " not in text:
+            oid, separator, refname = text.partition(" ")
+            if not separator or not refname or " " in refname:
                 raise ValueError("Malformed protocol-v2 wanted-refs line")
-            oid, refname = text.split(" ", 1)
-            if not refname:
-                raise ValueError("Malformed protocol-v2 wanted-refs line")
+            if refname in wanted_refs:
+                raise ValueError(
+                    f"Duplicate protocol-v2 wanted-ref result for {refname}"
+                )
             wanted_refs[refname] = _validate_sha1_oid(oid, field="wanted-ref")
 
     if not saw_flush:
         raise ValueError("protocol-v2 fetch response did not end with flush packet")
 
-    if nak and acknowledgments:
-        raise ValueError("protocol-v2 acknowledgments cannot contain both ACK and NAK")
+    has_packfile_section = "packfile" in seen_sections
+    non_ack_sections = seen_sections - {"acknowledgments"}
+    if non_ack_sections and not has_packfile_section:
+        raise ValueError(
+            "protocol-v2 fetch response with non-acknowledgment sections must end in packfile"
+        )
+    if ready and not has_packfile_section:
+        raise ValueError(
+            "protocol-v2 ready acknowledgment requires a packfile in the same response"
+        )
+    if "acknowledgments" in seen_sections and has_packfile_section and not ready:
+        raise ValueError(
+            "protocol-v2 acknowledgments preceding packfile must contain ready"
+        )
 
     pack = b"".join(pack_chunks) if pack_chunks else None
     if pack is not None and not pack.startswith(b"PACK"):
@@ -364,9 +524,8 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
             server_options=self.server_options,
         )
         parsed = self._post_fetch(body)
+        _validate_fetch_response_for_request(parsed, done=True)
 
-        if parsed.pack is None:
-            raise ValueError("protocol-v2 fetch response did not contain a packfile")
         return V2FetchResult(
             advertisement,
             PackParser(parsed.pack).parse(),
@@ -402,8 +561,5 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
             server_options=self.server_options,
         )
         parsed = self._post_fetch(body)
-        if parsed.ready or parsed.pack is not None:
-            raise RuntimeError(
-                "protocol-v2 negotiate-only unexpectedly advanced to pack transfer"
-            )
+        _validate_fetch_response_for_request(parsed, wait_for_done=True)
         return parsed.acknowledgments
