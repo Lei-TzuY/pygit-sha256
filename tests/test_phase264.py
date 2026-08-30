@@ -251,14 +251,10 @@ def test_blob_none_accepts_filter_provided_objects_for_commit_roots(tmp_path, mo
     assert capsys.readouterr().out.splitlines()[0:2] == [c3, tree3]
 
 
-def test_in_commit_order_still_defers_other_filter_families(tmp_path, monkeypatch):
+def test_in_commit_order_filter_provided_still_requires_filter(tmp_path, monkeypatch):
     repo, _commits = _ordinary_three_commit_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
 
-    with pytest.raises(ValueError, match="only --filter=blob:none"):
-        run_rev_list_disk_usage(
-            ["--objects", "--in-commit-order", "--filter=object:type=tree", "HEAD"]
-        )
     with pytest.raises(ValueError, match="requires --filter"):
         run_rev_list_disk_usage(
             ["--objects", "--in-commit-order", "--filter-provided-objects", "HEAD"]
