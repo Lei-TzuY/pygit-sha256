@@ -1,9 +1,10 @@
 """Metadata-only ``rev-list --filter=blob:limit=<n>[kmg]`` adapter.
 
-This is the clean current-stack port of the earlier Phase258 sibling. Local
-blobs are classified from already-materialized payloads. Unresolved promised
-blobs do not currently carry persistent size metadata in pygit, so classification
-fails explicitly instead of materializing content merely to apply the filter.
+Local blobs are classified from already-materialized payloads. Unresolved
+promised blobs may also be classified when the promisor sidecar contains a
+trusted uncompressed size learned from metadata-only remote object-info.
+Missing size metadata remains a hard error: this filter never materializes
+content merely to decide membership.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from . import rev_list_filter_cli as _filter
 from . import rev_list_missing_print_cli as _missing_print
 from . import rev_list_promisor_cli as _promisor
 from .objects import BlobObject
+from .promisor import promised_kind, promised_size
 
 
 _BLOB_LIMIT_RE = re.compile(r"^blob:limit=([0-9]+)([kKmMgG]?)$")
@@ -99,13 +101,21 @@ def _inventory_context(repo, argv: Sequence[str]):
     return parsed, boundary_commits, entries
 
 
-def _ensure_missing_blobs_are_classifiable(entries) -> None:
+def _promised_blob_size(repo, native_oid: Optional[str]) -> Optional[int]:
+    if not native_oid:
+        return None
+    return promised_size(repo.pygit_dir, native_oid)
+
+
+def _ensure_missing_blobs_are_classifiable(repo, entries) -> None:
     for entry in entries:
-        if entry.missing and entry.type_name == "blob":
-            native = entry.native_oid or "<unknown>"
+        if not (entry.missing and entry.type_name == "blob"):
+            continue
+        native = entry.native_oid or "<unknown>"
+        if _promised_blob_size(repo, entry.native_oid) is None:
             raise RuntimeError(
                 "--filter=blob:limit cannot classify unresolved promised blob "
-                f"{native}: persistent promisor size metadata is unavailable"
+                f"{native}: trusted promisor size metadata is unavailable"
             )
 
 
@@ -127,9 +137,16 @@ def _keep_line(repo, line: str, *, limit: int) -> bool:
         return False
     token = line.split(None, 1)[0]
     if token.startswith("?"):
-        # Missing blobs are rejected by the inventory preflight. Any remaining
-        # missing record is a non-blob and therefore unaffected by blob:limit.
-        return True
+        native_oid = token[1:]
+        if promised_kind(repo.pygit_dir, native_oid) != "blob":
+            return True
+        size = _promised_blob_size(repo, native_oid)
+        if size is None:
+            raise RuntimeError(
+                "--filter=blob:limit cannot classify unresolved promised blob "
+                f"{native_oid}: trusted promisor size metadata is unavailable"
+            )
+        return size < limit
     if token.startswith("-"):
         token = token[1:]
     size = _local_blob_size(repo, token)
@@ -137,10 +154,17 @@ def _keep_line(repo, line: str, *, limit: int) -> bool:
 
 
 def _entry_is_kept(repo, entry, *, limit: int) -> bool:
-    if entry.missing:
-        return False
     if entry.type_name != "blob":
         return True
+    if entry.missing:
+        size = _promised_blob_size(repo, entry.native_oid)
+        if size is None:
+            native = entry.native_oid or "<unknown>"
+            raise RuntimeError(
+                "--filter=blob:limit cannot classify unresolved promised blob "
+                f"{native}: trusted promisor size metadata is unavailable"
+            )
+        return size < limit
     if entry.oid is None:
         raise RuntimeError("present blob inventory entry has no local SHA-256 identity")
     size = _local_blob_size(repo, entry.oid)
@@ -151,15 +175,20 @@ def _entry_is_kept(repo, entry, *, limit: int) -> bool:
 
 def _filtered_present_count(repo, argv: Sequence[str], *, limit: int) -> int:
     parsed, boundary_commits, entries = _inventory_context(repo, argv)
-    _ensure_missing_blobs_are_classifiable(entries)
+    _ensure_missing_blobs_are_classifiable(repo, entries)
 
     if not parsed["boundary"]:
-        return sum(1 for entry in entries if _entry_is_kept(repo, entry, limit=limit))
+        return sum(
+            1
+            for entry in entries
+            if not entry.missing and _entry_is_kept(repo, entry, limit=limit)
+        )
 
     snapshot_present = sum(
         1
         for entry in entries
-        if not (entry.type_name == "commit" and entry.path is None)
+        if not entry.missing
+        and not (entry.type_name == "commit" and entry.path is None)
         and _entry_is_kept(repo, entry, limit=limit)
     )
 
@@ -186,7 +215,7 @@ def try_run_rev_list_blob_limit(argv: Sequence[str]) -> Optional[int]:
     projected = _project(argv)
     repo = _promisor._find_repo()
     _parsed, _boundary_commits, entries = _inventory_context(repo, projected)
-    _ensure_missing_blobs_are_classifiable(entries)
+    _ensure_missing_blobs_are_classifiable(repo, entries)
 
     code, lines = _filter._run_projected(projected)
     if code:
