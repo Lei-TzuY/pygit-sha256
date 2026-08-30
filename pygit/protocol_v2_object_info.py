@@ -23,6 +23,9 @@ from .protocol_v2_fetch import _validate_sha1_oid
 from .remote import pkt_line
 
 
+_UPLOAD_PACK_RESULT_MEDIA_TYPE = "application/x-git-upload-pack-result"
+
+
 class ObjectInfoUnsupportedError(RuntimeError):
     """The remote negotiated protocol v2 but does not advertise object-info.
 
@@ -57,6 +60,61 @@ def _normalize_oids(oids: Sequence[str]) -> Tuple[str, ...]:
     if not normalized:
         raise ValueError("protocol-v2 object-info requires at least one object id")
     return normalized
+
+
+def _response_content_type(response) -> Optional[str]:
+    """Return one normalized HTTP media type when response headers are available.
+
+    Real ``urllib`` responses expose either ``headers`` or ``getheader``.  A few
+    older unit-test doubles predate HTTP-envelope validation and expose only
+    ``read()``; callers can distinguish that no-header-API case from a genuine
+    HTTP response whose Content-Type header is missing.
+    """
+
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        getter = getattr(headers, "get", None)
+        if callable(getter):
+            raw = getter("Content-Type")
+            if raw is None:
+                return None
+            return str(raw).split(";", 1)[0].strip().lower()
+
+    getheader = getattr(response, "getheader", None)
+    if callable(getheader):
+        raw = getheader("Content-Type")
+        if raw is None:
+            return None
+        return str(raw).split(";", 1)[0].strip().lower()
+
+    return None
+
+
+def _validate_upload_pack_result_content_type(response) -> None:
+    """Reject a real smart-HTTP response with the wrong upload-pack media type.
+
+    Git smart HTTP identifies POST results as
+    ``application/x-git-upload-pack-result``.  Validate the media type before
+    reading/parsing object-info metadata so an HTML proxy/login/error body cannot
+    be mistaken for trusted pkt-line metadata.  Parameters and media-type case
+    are normalized away.  Header-less legacy test doubles are ignored; actual
+    ``urllib`` HTTP responses always expose a header API, including when the
+    Content-Type field itself is absent.
+    """
+
+    has_header_api = getattr(response, "headers", None) is not None or callable(
+        getattr(response, "getheader", None)
+    )
+    if not has_header_api:
+        return
+
+    content_type = _response_content_type(response)
+    if content_type != _UPLOAD_PACK_RESULT_MEDIA_TYPE:
+        rendered = "<missing>" if content_type is None else content_type
+        raise ValueError(
+            "Unexpected smart-HTTP upload-pack response Content-Type "
+            f"{rendered!r}; expected {_UPLOAD_PACK_RESULT_MEDIA_TYPE!r}"
+        )
 
 
 def build_object_info_size_request(
@@ -195,11 +253,12 @@ class SmartHttpV2ObjectInfoClient(SmartHttpV2QueryClient):
             data=body,
             method="POST",
             headers={
-                "Accept": "application/x-git-upload-pack-result",
+                "Accept": _UPLOAD_PACK_RESULT_MEDIA_TYPE,
                 "Content-Type": "application/x-git-upload-pack-request",
             },
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            _validate_upload_pack_result_content_type(response)
             return parse_object_info_size_response(response.read())
 
     def query_sizes(
