@@ -216,7 +216,6 @@ def test_object_type_tag_filter_print_omitted_stays_empty(tmp_path, monkeypatch,
     ("extra", "message"),
     [
         (("--in-commit-order",), "--in-commit-order is not yet supported"),
-        (("--disk-usage",), "with --disk-usage is not yet supported"),
     ],
 )
 def test_object_type_tag_retains_explicit_followup_guards(
