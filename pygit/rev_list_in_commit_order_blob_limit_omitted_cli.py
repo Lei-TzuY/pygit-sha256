@@ -38,7 +38,7 @@ def _partition_blob_limit(
 ) -> Tuple[Tuple[PromisorObjectInventoryEntry, ...], Tuple[str, ...]]:
     """Return surviving entries and genuine local SHA-256 omitted blob ids."""
 
-    _blob_limit._ensure_missing_blobs_are_classifiable(entries)
+    _blob_limit._ensure_missing_blobs_are_classifiable(repo, entries)
 
     surviving: list[PromisorObjectInventoryEntry] = []
     omitted: list[str] = []
