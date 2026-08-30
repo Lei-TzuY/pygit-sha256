@@ -561,5 +561,9 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
             server_options=self.server_options,
         )
         parsed = self._post_fetch(body)
+        if parsed.ready or parsed.pack is not None:
+            raise RuntimeError(
+                "protocol-v2 negotiate-only unexpectedly advanced to pack transfer"
+            )
         _validate_fetch_response_for_request(parsed, wait_for_done=True)
         return parsed.acknowledgments
