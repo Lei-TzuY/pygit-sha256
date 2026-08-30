@@ -19,6 +19,9 @@ from .rev_list_filter_omitted_cli import try_run_rev_list_filter_print_omitted
 from .rev_list_filter_cli import try_run_rev_list_filter
 from .rev_list_header_cli import run_rev_list_header
 from .rev_list_in_commit_order_cli import try_run_rev_list_in_commit_order
+from .rev_list_in_commit_order_object_type_cli import (
+    try_run_rev_list_in_commit_order_object_type,
+)
 from .rev_list_in_commit_order_omitted_cli import (
     try_run_rev_list_in_commit_order_filter_print_omitted,
 )
@@ -140,6 +143,10 @@ def _selected_oids(output: str, *, object_edge: bool) -> tuple[tuple[str, ...], 
 
 def run_rev_list_disk_usage(argv: Sequence[str]) -> int:
     """Run rev-list with Git-style ``--disk-usage[=human]`` accounting."""
+
+    ordered_object_type_code = try_run_rev_list_in_commit_order_object_type(argv)
+    if ordered_object_type_code is not None:
+        return ordered_object_type_code
 
     ordered_omitted_code = try_run_rev_list_in_commit_order_filter_print_omitted(argv)
     if ordered_omitted_code is not None:
