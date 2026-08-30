@@ -14,6 +14,8 @@ object edge and a boundary frame, the leading edge owns presentation and the
 later boundary frame is suppressed; limit-induced boundaries remain in their
 commit/snapshot position. Phase263 adds Git's structured ``-z`` object metadata
 protocol for the ``--objects`` path without changing traversal or SHA domains.
+Phase264 applies ``--filter=blob:none`` directly to the ordered inventory, so
+line, count, boundary, edge, NUL, and promisor behavior share one filter point.
 Explicit negative-revision closure still subtracts snapshot objects without
 removing unrelated top-level presentation frames.
 """
@@ -31,6 +33,8 @@ from .rev_list import _object_exclusion_roots, rev_list
 
 
 _IN_COMMIT_ORDER = "--in-commit-order"
+_FILTER_PROVIDED = "--filter-provided-objects"
+_FILTER_PRINT_OMITTED = "--filter-print-omitted"
 _SUPPORTED_MISSING = {"allow-promisor", "print", "print-info"}
 
 
@@ -41,12 +45,29 @@ def _parse(argv: Sequence[str]):
     nul = "-z" in argv
     if any(arg == "--disk-usage" or arg.startswith("--disk-usage=") for arg in argv):
         raise ValueError("rev-list --in-commit-order with --disk-usage is not yet supported")
-    if any(
-        arg.startswith("--filter=")
-        or arg in {"--filter-print-omitted", "--filter-provided-objects"}
-        for arg in argv
-    ):
-        raise ValueError("rev-list --in-commit-order with --filter is not yet supported")
+
+    filters = [arg for arg in argv if arg.startswith("--filter=")]
+    filter_provided = _FILTER_PROVIDED in argv
+    if filter_provided and not filters:
+        raise ValueError("--filter-provided-objects requires --filter")
+    if len(filters) > 1:
+        raise ValueError("rev-list --in-commit-order accepts exactly one --filter action in this phase")
+
+    filter_blob_none = False
+    if filters:
+        spec = filters[0].split("=", 1)[1]
+        if spec != "blob:none":
+            raise ValueError(
+                "rev-list --in-commit-order currently supports only --filter=blob:none"
+            )
+        filter_blob_none = True
+
+    if _FILTER_PRINT_OMITTED in argv:
+        if not filters:
+            raise ValueError("--filter-print-omitted requires --filter")
+        raise ValueError(
+            "rev-list --in-commit-order with --filter-print-omitted is not yet supported"
+        )
 
     object_modes = [arg for arg in argv if arg in {"--objects", "--objects-edge"}]
     if len(object_modes) != 1:
@@ -74,12 +95,12 @@ def _parse(argv: Sequence[str]):
         mode = "ordinary"
 
     # Reuse the mature inventory parser with an --objects projection, then keep
-    # ordering/presentation local to this adapter. ``-z`` is stripped before
-    # projection because it is handled structurally below, not by the generic
-    # promisor line renderer.
+    # ordering/presentation local to this adapter. ``-z`` and object filters are
+    # stripped before projection because both are handled structurally below,
+    # not by the generic promisor line renderer.
     projected: list[str] = []
     for arg in argv:
-        if arg in {_IN_COMMIT_ORDER, "-z"}:
+        if arg in {_IN_COMMIT_ORDER, "-z", _FILTER_PROVIDED} or arg.startswith("--filter="):
             continue
         if arg == "--objects-edge":
             projected.append("--objects")
@@ -97,6 +118,8 @@ def _parse(argv: Sequence[str]):
     parsed["in_commit_order_missing_mode"] = mode
     parsed["in_commit_order_objects_edge"] = objects_edge
     parsed["in_commit_order_nul"] = nul
+    parsed["in_commit_order_filter_blob_none"] = filter_blob_none
+    parsed["in_commit_order_filter_provided"] = filter_provided
     return parsed
 
 
@@ -231,6 +254,27 @@ def _dedupe_edge_boundary_overlap(
     return filtered, frozenset(oid for oid in boundary_oids if oid not in overlap)
 
 
+def _apply_object_filter(
+    entries: Sequence[PromisorObjectInventoryEntry],
+    *,
+    parsed,
+) -> Tuple[PromisorObjectInventoryEntry, ...]:
+    """Apply supported object filters without changing traversal order.
+
+    ``blob:none`` is an output-membership filter, not a traversal-pruning rule:
+    commits and trees must still be walked so later ordered snapshots are known.
+    Filtering the structured inventory after traversal but before rendering also
+    means unresolved promised blobs disappear without materialization or an
+    ordinary missing-object error. ``--filter-provided-objects`` has no visible
+    effect in the current commit-rooted model because provided roots are commits,
+    never blobs, but accepting it preserves Git's option composition contract.
+    """
+
+    if not parsed["in_commit_order_filter_blob_none"]:
+        return tuple(entries)
+    return tuple(entry for entry in entries if entry.type_name != "blob")
+
+
 def _plain_missing(entry: PromisorObjectInventoryEntry) -> str:
     if entry.native_oid is None:
         raise RuntimeError("missing inventory entry has no native object identity")
@@ -359,6 +403,7 @@ def try_run_rev_list_in_commit_order(argv: Sequence[str]) -> Optional[int]:
             boundary_oids=boundary_oids,
             edges=edges,
         )
+    entries = _apply_object_filter(entries, parsed=parsed)
     return _render(
         entries,
         parsed=parsed,
