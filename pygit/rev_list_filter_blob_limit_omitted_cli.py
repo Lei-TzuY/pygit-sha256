@@ -11,6 +11,11 @@ size promise that survives the filter remains in the missing-object channel. A
 promise omitted by the filter has no genuine local SHA-256 identity and cannot
 legally be printed as ``~<oid>`` until materialized, so the command fails before
 emitting any output instead of exposing native SHA-1 or inventing a surrogate.
+
+Phase282 moves plain blob-limit traversal onto the structured NUL renderer, but
+keeps NUL + omission framing as an explicit follow-up. This adapter therefore
+owns its own `-z` guard instead of depending on the underlying blob-limit layer
+to reject the combination indirectly.
 """
 
 from __future__ import annotations
@@ -83,6 +88,8 @@ def try_run_rev_list_blob_limit_filter_print_omitted(
     limit = _blob_limit._blob_limit(argv)
     if limit is None:
         return None
+    if "-z" in argv:
+        raise ValueError("--filter=blob:limit with -z is not yet supported")
 
     cleaned = [arg for arg in argv if arg != _FILTER_PRINT_OMITTED]
     projected = _blob_limit._project(cleaned)
