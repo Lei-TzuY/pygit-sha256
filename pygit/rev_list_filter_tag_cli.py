@@ -6,17 +6,22 @@ positive revision arguments (and by ``--all`` refs), and those tag objects are
 also "provided objects" that bypass object filters unless
 ``--filter-provided-objects`` is requested.
 
-Phase274 adds that missing object family for line-oriented and count output. It
-also enables ``object:type=tag`` itself. Structured ``-z`` and
-``--in-commit-order`` tag placement remain explicit follow-up work rather than
-silently emitting an incorrect order.
+Phase274 adds that missing object family for line-oriented and count output.
+Phase277 extends the same composition to Git 2.55's structured ``-z`` protocol:
+provided tag names use the normal ``path=<name>`` metadata token, present local
+identities remain SHA-256, and the mature NUL renderer still owns missing,
+boundary, and count framing.
 """
 
 from __future__ import annotations
 
+import io
+import sys
+from contextlib import redirect_stdout
 from typing import Optional, Sequence, Tuple
 
 from . import rev_list_filter_cli as _filter
+from . import rev_list_nul_cli as _nul
 from .objects import TagObject
 from .plumbing import list_refs
 from .rev_list import _split_range
@@ -59,6 +64,25 @@ def _project_line(argv: Sequence[str], *, requested: str) -> list[str]:
         raise ValueError(
             f"--filter=object:type={requested} currently requires "
             "--missing=allow-promisor, print, or print-info"
+        )
+    return projected
+
+
+def _project_nul(argv: Sequence[str]) -> list[str]:
+    """Project annotated-tag filtering onto the mature structured renderer."""
+
+    projected = [
+        arg
+        for arg in argv
+        if not arg.startswith("--filter=")
+        and arg not in {_FILTER_PROVIDED, _FILTER_PRINT_OMITTED}
+    ]
+    missing = [arg for arg in projected if arg.startswith("--missing=")]
+    if len(missing) > 1:
+        raise ValueError("rev-list accepts exactly one --missing action")
+    if missing and missing[0] not in _SUPPORTED_MISSING:
+        raise ValueError(
+            "--filter=object:type with -z supports --missing=allow-promisor, print, or print-info"
         )
     return projected
 
@@ -177,8 +201,148 @@ def _compose_lines(
     return [*kept[:insert_at], *tag_lines, *kept[insert_at:]]
 
 
+def _parse_nul_records(raw: str) -> list[tuple[str, ...]]:
+    """Parse a present/missing NUL stream into opaque structured records."""
+
+    if not raw:
+        return []
+    if not raw.endswith("\0"):
+        raise RuntimeError("rev-list NUL projection did not end at a record boundary")
+
+    records: list[tuple[str, ...]] = []
+    current: list[str] = []
+    for field in raw[:-1].split("\0"):
+        # OIDs never contain '='; every metadata field does. This is the same
+        # record-boundary rule documented by Git for rev-list -z.
+        if "=" not in field:
+            if current:
+                records.append(tuple(current))
+            current = [field]
+            continue
+        if not current:
+            raise RuntimeError("rev-list NUL projection started with metadata")
+        current.append(field)
+    if current:
+        records.append(tuple(current))
+    return records
+
+
+def _tag_nul_records(
+    entries: Sequence[Tuple[str, str]],
+    *,
+    no_object_names: bool,
+) -> list[tuple[str, ...]]:
+    records: list[tuple[str, ...]] = []
+    for oid, name in entries:
+        if no_object_names:
+            records.append((oid.lower(),))
+        else:
+            records.append((oid.lower(), f"path={name}"))
+    return records
+
+
+def _record_is_provided_commit(record: Sequence[str], *, provided) -> bool:
+    return bool(record) and record[0].lower() in provided and "boundary=yes" not in record[1:]
+
+
+def _compose_nul_records(
+    records: Sequence[tuple[str, ...]],
+    *,
+    requested: str,
+    provided,
+    tag_records: Sequence[tuple[str, ...]],
+) -> list[tuple[str, ...]]:
+    """Insert tag records at the same object phase as line-oriented Git output."""
+
+    kept = list(records)
+    if not tag_records:
+        return kept
+    if requested == "commit":
+        return [*kept, *tag_records]
+
+    insert_at = 0
+    while insert_at < len(kept) and _record_is_provided_commit(
+        kept[insert_at], provided=provided
+    ):
+        insert_at += 1
+    return [*kept[:insert_at], *tag_records, *kept[insert_at:]]
+
+
+def _write_nul_records(records: Sequence[Sequence[str]]) -> None:
+    for record in records:
+        sys.stdout.write("\0".join(record) + "\0")
+
+
+def _split_nul_count(raw: str) -> tuple[str, int]:
+    """Return preserved NUL diagnostics plus Git's final newline count."""
+
+    if "\0" in raw:
+        prefix, count_line = raw.rsplit("\0", 1)
+        prefix += "\0"
+    else:
+        prefix, count_line = "", raw
+    if not count_line.endswith("\n"):
+        raise RuntimeError("rev-list NUL count projection did not end with a newline integer")
+    try:
+        value = int(count_line[:-1])
+    except ValueError as exc:
+        raise RuntimeError("rev-list NUL count projection did not end with an integer") from exc
+    return prefix, value
+
+
+def _run_nul(
+    repo,
+    argv: Sequence[str],
+    *,
+    requested: str,
+    discovery,
+    emitted_tags: Sequence[Tuple[str, str]],
+    filter_provided: bool,
+) -> int:
+    """Render annotated-tag-aware object:type output through Phase270 framing."""
+
+    projected = _project_nul(argv)
+    provided = (
+        frozenset()
+        if filter_provided
+        else _filter._provided_commit_roots(repo, discovery)
+    )
+
+    capture = io.StringIO()
+    with redirect_stdout(capture):
+        code = _nul.try_run_rev_list_nul(
+            projected,
+            object_type=requested,
+            provided_oids=provided,
+        )
+    if code is None:
+        raise RuntimeError("NUL rev-list adapter declined annotated-tag projection")
+    raw = capture.getvalue()
+
+    if "--count" in projected:
+        prefix, base_count = _split_nul_count(raw)
+        sys.stdout.write(prefix)
+        print(base_count + len(emitted_tags))
+        return code
+
+    records = _parse_nul_records(raw)
+    tag_records = _tag_nul_records(
+        emitted_tags,
+        no_object_names=discovery["no_object_names"],
+    )
+    _write_nul_records(
+        _compose_nul_records(
+            records,
+            requested=requested,
+            provided=provided,
+            tag_records=tag_records,
+        )
+    )
+    return code
+
+
 def try_run_rev_list_object_type_tag(argv: Sequence[str]) -> Optional[int]:
-    """Compose annotated-tag roots with supported line/count object filters."""
+    """Compose annotated-tag roots with supported line/count/NUL object filters."""
 
     requested = _requested_object_type(argv)
     if requested is None:
@@ -193,24 +357,28 @@ def try_run_rev_list_object_type_tag(argv: Sequence[str]) -> Optional[int]:
     emitted_tags = discovered_tags if requested == "tag" or not filter_provided else ()
 
     # Existing commit/tree/blob paths remain authoritative when there are no
-    # annotated-tag objects to add. This keeps Phase274 narrowly compositional.
+    # annotated-tag objects to add. This keeps Phase277 narrowly compositional.
     if requested != "tag" and not emitted_tags:
         return None
 
-    if "-z" in argv:
-        raise ValueError(
-            f"rev-list object:type={requested} with annotated tags and -z is not yet supported; "
-            "tag NUL placement is not modelled"
-        )
     if _IN_COMMIT_ORDER in argv:
         raise ValueError(
             f"rev-list object:type={requested} with annotated tags and --in-commit-order is not yet supported; "
-            "ordered tag placement is not modelled"
+            "ordered tag placement is modelled on the independent Phase273 line"
         )
     if any(arg == "--disk-usage" or arg.startswith("--disk-usage=") for arg in argv):
         raise ValueError(
             f"rev-list object:type={requested} with --disk-usage is not yet supported; "
             "annotated-tag disk accounting is not modelled"
+        )
+    if "-z" in argv:
+        return _run_nul(
+            repo,
+            argv,
+            requested=requested,
+            discovery=discovery,
+            emitted_tags=emitted_tags,
+            filter_provided=filter_provided,
         )
 
     projected = _project_line(argv, requested=requested)
