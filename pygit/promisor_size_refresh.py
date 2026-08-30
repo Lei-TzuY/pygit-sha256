@@ -13,11 +13,14 @@ reports the object as unknown, the requested size simply remains absent.
 
 from __future__ import annotations
 
-from typing import Dict, Sequence
+from typing import Dict, Iterator, Sequence
 
 from .fetch_server_option_config import configured_server_options
 from .promisor import promised_size, read_promisor_state, update_promisor_state
 from .protocol_v2_object_info import SmartHttpV2ObjectInfoClient
+
+
+OBJECT_INFO_SIZE_BATCH = 256
 
 
 def _normalize_native_oids(native_oids: Sequence[str]) -> tuple[str, ...]:
@@ -34,12 +37,23 @@ def _normalize_native_oids(native_oids: Sequence[str]) -> tuple[str, ...]:
     return tuple(normalized)
 
 
+def _chunked_oids(native_oids: Sequence[str]) -> Iterator[tuple[str, ...]]:
+    """Yield deterministic bounded object-info request batches."""
+
+    if OBJECT_INFO_SIZE_BATCH <= 0:
+        raise ValueError("object-info size batch must be positive")
+    for start in range(0, len(native_oids), OBJECT_INFO_SIZE_BATCH):
+        yield tuple(native_oids[start : start + OBJECT_INFO_SIZE_BATCH])
+
+
 def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
     """Best-effort refresh of missing promised-object sizes.
 
     Only unresolved promises that do not already have trusted size metadata are
     queried.  Promisor remotes are tried in deterministic name order; configured
-    protocol-v2 server options are preserved for each remote.  Query failures are
+    protocol-v2 server options are preserved for each remote.  Large pending sets
+    are split into bounded deterministic ``object-info size`` requests so one
+    partial clone cannot create an unbounded protocol request.  Query failures are
     intentionally soft because the caller owns the final strictness policy.
 
     The returned mapping contains every requested OID whose trusted size is
@@ -71,22 +85,28 @@ def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
             configured[remote],
             server_options=tuple(configured_server_options(repo, remote)),
         )
-        try:
-            sizes = client.query_sizes(tuple(sorted(pending)))
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if not sizes:
-            continue
+        remote_failed = False
+        for batch in _chunked_oids(tuple(sorted(pending))):
+            try:
+                sizes = client.query_sizes(batch)
+            except (OSError, RuntimeError, ValueError):
+                remote_failed = True
+                break
+            if not sizes:
+                continue
 
-        trusted = {
-            oid: size
-            for oid, size in sizes.items()
-            if oid in pending and size is not None
-        }
-        if not trusted:
+            trusted = {
+                oid: size
+                for oid, size in sizes.items()
+                if oid in pending and size is not None
+            }
+            if not trusted:
+                continue
+            update_promisor_state(repo.pygit_dir, sizes=trusted)
+            pending.difference_update(trusted)
+
+        if remote_failed:
             continue
-        update_promisor_state(repo.pygit_dir, sizes=trusted)
-        pending.difference_update(trusted)
 
     result: Dict[str, int] = {}
     for oid in requested:
