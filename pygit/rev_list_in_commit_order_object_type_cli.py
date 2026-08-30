@@ -223,6 +223,10 @@ def try_run_rev_list_in_commit_order_object_type(
     provided_tags = frozenset()
     if requested == "tag":
         tag_roots, provided_tags = _provided_tag_roots(repo, parsed)
+        if not provided_tags:
+            raise ValueError(
+                "rev-list --in-commit-order object:type=tag currently requires an annotated-tag positive root"
+            )
         entries = _augment_with_provided_tags(entries, by_commit=tag_roots)
 
     edges: Tuple[str, ...] = ()
