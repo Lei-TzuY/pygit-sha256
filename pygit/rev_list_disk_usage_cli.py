@@ -15,9 +15,13 @@ from typing import Sequence
 from .cat_file import object_disk_size
 from .count_objects_cli import _human_size
 from .entrypoint import _find_repo
+from .rev_list_filter_blob_limit_cli import try_run_rev_list_blob_limit
 from .rev_list_filter_omitted_cli import try_run_rev_list_filter_print_omitted
 from .rev_list_filter_cli import try_run_rev_list_filter
 from .rev_list_header_cli import run_rev_list_header
+from .rev_list_in_commit_order_blob_limit_cli import (
+    try_run_rev_list_in_commit_order_blob_limit,
+)
 from .rev_list_in_commit_order_cli import try_run_rev_list_in_commit_order
 from .rev_list_in_commit_order_object_type_cli import (
     try_run_rev_list_in_commit_order_object_type,
@@ -144,6 +148,10 @@ def _selected_oids(output: str, *, object_edge: bool) -> tuple[tuple[str, ...], 
 def run_rev_list_disk_usage(argv: Sequence[str]) -> int:
     """Run rev-list with Git-style ``--disk-usage[=human]`` accounting."""
 
+    ordered_blob_limit_code = try_run_rev_list_in_commit_order_blob_limit(argv)
+    if ordered_blob_limit_code is not None:
+        return ordered_blob_limit_code
+
     ordered_object_type_code = try_run_rev_list_in_commit_order_object_type(argv)
     if ordered_object_type_code is not None:
         return ordered_object_type_code
@@ -155,6 +163,10 @@ def run_rev_list_disk_usage(argv: Sequence[str]) -> int:
     in_commit_order_code = try_run_rev_list_in_commit_order(argv)
     if in_commit_order_code is not None:
         return in_commit_order_code
+
+    blob_limit_code = try_run_rev_list_blob_limit(argv)
+    if blob_limit_code is not None:
+        return blob_limit_code
 
     omitted_code = try_run_rev_list_filter_print_omitted(argv)
     if omitted_code is not None:
