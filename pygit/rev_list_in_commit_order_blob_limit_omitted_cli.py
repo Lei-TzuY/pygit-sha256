@@ -4,12 +4,15 @@ Phase267 established metadata-only ordered blob-size membership on the current
 rev-list stack. Phase268 adds Git's independent ``~<oid>`` omission channel
 without adding another object walker: the same ordered inventory determines
 traversal order, edge/boundary presentation, surviving membership, and omitted
-local SHA-256 identities.
+local SHA-256 identities. Phase269 extends that composition to Git's structured
+``-z`` object protocol while preserving upstream's deliberately mixed framing:
+NUL traversal records, newline-framed omissions, then NUL missing records.
 """
 
 from __future__ import annotations
 
 import io
+import sys
 from contextlib import redirect_stdout
 from typing import Optional, Sequence, Tuple
 
@@ -78,9 +81,12 @@ def try_run_rev_list_in_commit_order_blob_limit_omitted(
     """Render ordered blob-limit traversal, omissions, missing, then count.
 
     Native Git treats the omission set as a presentation channel after object
-    traversal. Capturing the shared ordered renderer lets Phase268 preserve the
-    already-tested edge/boundary/count semantics while moving missing diagnostics
-    behind ``~`` records, matching rev-list's observable framing.
+    traversal. Capturing the shared ordered renderer lets this adapter preserve
+    the already-tested edge/boundary/count semantics while moving missing
+    diagnostics behind ``~`` records. Under ``-z``, the shared renderer emits
+    structured NUL records and this adapter reuses the Phase257 partitioner so
+    the final observable stream remains ``NUL traversal -> newline omissions ->
+    NUL missing`` rather than inventing an undocumented omission token.
     """
 
     if _IN_COMMIT_ORDER not in argv or _FILTER_PRINT_OMITTED not in argv:
@@ -91,11 +97,6 @@ def try_run_rev_list_in_commit_order_blob_limit_omitted(
     limit = _blob_limit._blob_limit(argv)
     if limit is None:
         return None
-    if "-z" in argv:
-        raise ValueError(
-            "rev-list --in-commit-order with --filter=blob:limit, "
-            "--filter-print-omitted, and -z is not yet supported"
-        )
 
     cleaned = [arg for arg in argv if arg != _FILTER_PRINT_OMITTED]
     projected = _ordered_blob_limit._ordered_projection(cleaned)
@@ -133,11 +134,24 @@ def try_run_rev_list_in_commit_order_blob_limit_omitted(
             edges=edges,
         )
     if code:
-        print(capture.getvalue(), end="")
+        sys.stdout.write(capture.getvalue())
+        return code
+
+    projected_output = capture.getvalue()
+    if parsed["in_commit_order_nul"]:
+        traversal, missing = _omitted._partition_projected_nul(projected_output)
+        for record in traversal:
+            sys.stdout.write(record)
+        # Git 2.55's omitted-object loop remains hard-coded to newline framing
+        # even after -z switches normal and missing object records to NUL fields.
+        for oid in omitted:
+            sys.stdout.write(f"~{oid}\n")
+        for record in missing:
+            sys.stdout.write(record)
         return code
 
     traversal, missing, count_line = _omitted._partition_projected_lines(
-        capture.getvalue().splitlines(),
+        projected_output.splitlines(),
         count_mode="--count" in cleaned,
     )
     for line in traversal:
