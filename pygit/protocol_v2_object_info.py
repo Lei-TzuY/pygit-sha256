@@ -129,7 +129,34 @@ def parse_object_info_size_response(data: bytes) -> Tuple[ObjectSizeInfo, ...]:
 
 
 class SmartHttpV2ObjectInfoClient(SmartHttpV2QueryClient):
-    """Capability-gated smart-HTTP protocol-v2 object-size client."""
+    """Capability-gated smart-HTTP protocol-v2 object-size client.
+
+    Capability discovery is stable for the lifetime of one smart-HTTP client and
+    is therefore cached after the first successful discovery, including the
+    protocol-v0 ``None`` result.  This matters for callers that deliberately split
+    a large metadata request into several bounded ``object-info`` commands: each
+    chunk still gets its own POST, while the remote advertisement is fetched only
+    once.  Discovery exceptions are not cached so a later explicit retry remains
+    possible.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        timeout: int = 30,
+        *,
+        server_options: Sequence[str] = (),
+    ) -> None:
+        super().__init__(url, timeout, server_options=server_options)
+        self._object_info_capabilities_loaded = False
+        self._object_info_capabilities: Optional[ProtocolV2Capabilities] = None
+
+    def _discover_object_info_capabilities(self) -> Optional[ProtocolV2Capabilities]:
+        if not self._object_info_capabilities_loaded:
+            capabilities = super().discover_capabilities()
+            self._object_info_capabilities = capabilities
+            self._object_info_capabilities_loaded = True
+        return self._object_info_capabilities
 
     def _post_object_info(self, body: bytes) -> Tuple[ObjectSizeInfo, ...]:
         request = urllib.request.Request(
@@ -156,7 +183,7 @@ class SmartHttpV2ObjectInfoClient(SmartHttpV2QueryClient):
         """
 
         requested = _normalize_oids(oids)
-        capabilities = self.discover_capabilities()
+        capabilities = self._discover_object_info_capabilities()
         if capabilities is None:
             return None
 
