@@ -82,19 +82,34 @@ def test_ordered_objects_disk_usage_reuses_full_current_stack_selection(
     assert capsys.readouterr().out == "6\n"
 
 
-def test_ordered_disk_usage_z_and_reverse_are_aggregate_presentation_noops(
+def test_ordered_disk_usage_reverse_is_aggregate_presentation_noop(
     tmp_path, monkeypatch, capsys
 ):
     repo, _c1, _c2 = _repo(tmp_path)
     _route_repo(monkeypatch, repo)
     _unit_sizes(monkeypatch)
+    capsys.readouterr()
 
-    for extra in (["-z"], ["--reverse"], ["-z", "--reverse"]):
-        capsys.readouterr()
-        assert run_rev_list_disk_usage(
-            ["--objects", "--in-commit-order", "--disk-usage", *extra, "HEAD"]
-        ) == 0
-        assert capsys.readouterr().out == "6\n"
+    assert run_rev_list_disk_usage(
+        [
+            "--objects",
+            "--in-commit-order",
+            "--disk-usage",
+            "--reverse",
+            "HEAD",
+        ]
+    ) == 0
+    assert capsys.readouterr().out == "6\n"
+
+
+def test_ordered_disk_usage_rejects_nul_like_git_255(tmp_path, monkeypatch):
+    repo, _c1, _c2 = _repo(tmp_path)
+    _route_repo(monkeypatch, repo)
+
+    with pytest.raises(ValueError, match="-z option used with unsupported option"):
+        run_rev_list_disk_usage(
+            ["--objects", "--in-commit-order", "--disk-usage", "-z", "HEAD"]
+        )
 
 
 def test_ordered_disk_usage_count_is_zero_then_aggregate(
@@ -149,7 +164,6 @@ def test_ordered_blob_limit_disk_usage_preserves_omission_channel(
             "--objects",
             "--in-commit-order",
             "--disk-usage",
-            "-z",
             "--filter=blob:limit=8",
             "--filter-print-omitted",
             "HEAD",
@@ -180,12 +194,20 @@ def test_native_sha256_git_ordered_disk_usage_protocol(tmp_path):
     )
     (repo / "f").write_bytes(b"a")
     subprocess.run([git, "-C", str(repo), "add", "f"], check=True)
-    subprocess.run([git, "-C", str(repo), "commit", "-m", "one"], check=True, stdout=subprocess.PIPE)
+    subprocess.run(
+        [git, "-C", str(repo), "commit", "-m", "one"],
+        check=True,
+        stdout=subprocess.PIPE,
+    )
     (repo / "f").write_bytes(b"ab")
-    subprocess.run([git, "-C", str(repo), "commit", "-am", "two"], check=True, stdout=subprocess.PIPE)
+    subprocess.run(
+        [git, "-C", str(repo), "commit", "-am", "two"],
+        check=True,
+        stdout=subprocess.PIPE,
+    )
 
     plain = subprocess.run(
-        [git, "-C", str(repo), "rev-list", "--in-commit-order", "--disk-usage", "-z", "HEAD"],
+        [git, "-C", str(repo), "rev-list", "--in-commit-order", "--disk-usage", "HEAD"],
         check=True,
         stdout=subprocess.PIPE,
     ).stdout
@@ -203,11 +225,27 @@ def test_native_sha256_git_ordered_disk_usage_protocol(tmp_path):
         check=True,
         stdout=subprocess.PIPE,
     ).stdout
+    nul = subprocess.run(
+        [
+            git,
+            "-C",
+            str(repo),
+            "rev-list",
+            "--objects",
+            "--in-commit-order",
+            "--disk-usage",
+            "-z",
+            "HEAD",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
     assert plain.endswith(b"\n")
-    assert b"\0" not in plain
     assert plain[:-1].isdigit()
     count_line, total_line, empty = counted.split(b"\n")
     assert count_line == b"0"
     assert total_line.isdigit()
     assert empty == b""
+    assert nul.returncode != 0
+    assert b"-z option used with unsupported option" in nul.stderr
