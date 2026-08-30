@@ -265,16 +265,18 @@ def test_object_type_plain_print_uses_promisor_kind_for_missing_filter(
     assert capsys.readouterr().out.splitlines() == [tip, f"?{tip_blob}"]
 
 
-def test_object_type_tag_remains_deliberately_deferred(tmp_path, monkeypatch):
-    repo, _commits = _ordinary_two_commit_repo(tmp_path)
+def test_object_type_tag_head_preserves_provided_commit(tmp_path, monkeypatch, capsys):
+    repo, (_base, tip) = _ordinary_two_commit_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
+    capsys.readouterr()
 
-    with pytest.raises(ValueError, match="annotated-tag traversal is not modelled"):
-        run_rev_list_disk_usage(
-            [
-                "--objects",
-                "--filter=object:type=tag",
-                "--missing=allow-promisor",
-                "HEAD",
-            ]
-        )
+    assert run_rev_list_disk_usage(
+        [
+            "--objects",
+            "--filter=object:type=tag",
+            "--missing=allow-promisor",
+            "HEAD",
+        ]
+    ) == 0
+
+    assert capsys.readouterr().out.splitlines() == [tip]
