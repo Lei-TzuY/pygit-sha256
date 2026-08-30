@@ -150,7 +150,7 @@ def test_batch_preflight_preserves_native_sha1_only(tmp_path, monkeypatch):
             pass
 
         def query_sizes(self, oids):
-            assert tuple(oids) == (native_a, native_b)
+            assert tuple(oids) == tuple(sorted((native_a, native_b)))
             assert all(len(oid) == 40 for oid in oids)
             return {native_a: 3, native_b: 4}
 
