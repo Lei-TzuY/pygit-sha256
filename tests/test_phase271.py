@@ -114,16 +114,15 @@ def test_ordered_blob_limit_nul_preserves_first_seen_order(
         ]
     ) == 0
 
-    assert _fields(capsys.readouterr().out) == [
+    output = capsys.readouterr().out
+    assert _fields(output) == [
         c2,
         tree2,
         blobs2["small.bin"],
         c1,
         tree1,
     ]
-    assert blobs2["large.bin"] not in _fields(
-        f"{c2}\0{tree2}\0{blobs2['small.bin']}\0{c1}\0{tree1}\0"
-    )
+    assert blobs2["large.bin"] not in output
 
 
 def test_ordered_blob_limit_nul_preserves_path_metadata(
@@ -166,16 +165,15 @@ def test_ordered_blob_limit_nul_reverse_changes_first_seen_positions(
         ]
     ) == 0
 
-    assert _fields(capsys.readouterr().out) == [
+    output = capsys.readouterr().out
+    assert _fields(output) == [
         c1,
         tree1,
         blobs1["small.bin"],
         c2,
         tree2,
     ]
-    assert blobs2["large.bin"] not in _fields(
-        f"{c1}\0{tree1}\0{blobs1['small.bin']}\0{c2}\0{tree2}\0"
-    )
+    assert blobs2["large.bin"] not in output
 
 
 def test_ordered_blob_limit_nul_boundary_uses_structured_metadata(
