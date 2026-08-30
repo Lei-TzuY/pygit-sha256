@@ -16,14 +16,14 @@ from typing import Dict, Optional, Sequence, Tuple
 from .protocol_v2 import (
     ProtocolV2Capabilities,
     SmartHttpV2QueryClient,
+    _UPLOAD_PACK_REQUEST_MEDIA_TYPE,
+    _UPLOAD_PACK_RESULT_MEDIA_TYPE,
     _command_prefix,
     _read_packet,
+    _validate_smart_http_content_type,
 )
 from .protocol_v2_fetch import _validate_sha1_oid
 from .remote import pkt_line
-
-
-_UPLOAD_PACK_RESULT_MEDIA_TYPE = "application/x-git-upload-pack-result"
 
 
 class ObjectInfoUnsupportedError(RuntimeError):
@@ -62,61 +62,6 @@ def _normalize_oids(oids: Sequence[str]) -> Tuple[str, ...]:
     return normalized
 
 
-def _response_content_type(response) -> Optional[str]:
-    """Return one normalized HTTP media type when response headers are available.
-
-    Real ``urllib`` responses expose either ``headers`` or ``getheader``.  A few
-    older unit-test doubles predate HTTP-envelope validation and expose only
-    ``read()``; callers can distinguish that no-header-API case from a genuine
-    HTTP response whose Content-Type header is missing.
-    """
-
-    headers = getattr(response, "headers", None)
-    if headers is not None:
-        getter = getattr(headers, "get", None)
-        if callable(getter):
-            raw = getter("Content-Type")
-            if raw is None:
-                return None
-            return str(raw).split(";", 1)[0].strip().lower()
-
-    getheader = getattr(response, "getheader", None)
-    if callable(getheader):
-        raw = getheader("Content-Type")
-        if raw is None:
-            return None
-        return str(raw).split(";", 1)[0].strip().lower()
-
-    return None
-
-
-def _validate_upload_pack_result_content_type(response) -> None:
-    """Reject a real smart-HTTP response with the wrong upload-pack media type.
-
-    Git smart HTTP identifies POST results as
-    ``application/x-git-upload-pack-result``.  Validate the media type before
-    reading/parsing object-info metadata so an HTML proxy/login/error body cannot
-    be mistaken for trusted pkt-line metadata.  Parameters and media-type case
-    are normalized away.  Header-less legacy test doubles are ignored; actual
-    ``urllib`` HTTP responses always expose a header API, including when the
-    Content-Type field itself is absent.
-    """
-
-    has_header_api = getattr(response, "headers", None) is not None or callable(
-        getattr(response, "getheader", None)
-    )
-    if not has_header_api:
-        return
-
-    content_type = _response_content_type(response)
-    if content_type != _UPLOAD_PACK_RESULT_MEDIA_TYPE:
-        rendered = "<missing>" if content_type is None else content_type
-        raise ValueError(
-            "Unexpected smart-HTTP upload-pack response Content-Type "
-            f"{rendered!r}; expected {_UPLOAD_PACK_RESULT_MEDIA_TYPE!r}"
-        )
-
-
 def build_object_info_size_request(
     capabilities: ProtocolV2Capabilities,
     oids: Sequence[str],
@@ -146,7 +91,7 @@ def parse_object_info_size_response(data: bytes) -> Tuple[ObjectSizeInfo, ...]:
     """Parse one complete ``object-info size`` response.
 
     Git's protocol-v2 grammar defines an ``object-info`` response as its info
-    pkt-lines followed by one ``flush-pkt``.  Treat that terminator as part of
+    pkt-lines followed by one ``flush-pkt``. Treat that terminator as part of
     the trusted metadata envelope: truncated responses, response-end/delimiter
     packets, and bytes after the flush are rejected rather than silently
     accepting a prefix of a malformed response.
@@ -222,10 +167,10 @@ class SmartHttpV2ObjectInfoClient(SmartHttpV2QueryClient):
 
     Capability discovery is stable for the lifetime of one smart-HTTP client and
     is therefore cached after the first successful discovery, including the
-    protocol-v0 ``None`` result.  This matters for callers that deliberately split
+    protocol-v0 ``None`` result. This matters for callers that deliberately split
     a large metadata request into several bounded ``object-info`` commands: each
     chunk still gets its own POST, while the remote advertisement is fetched only
-    once.  Discovery exceptions are not cached so a later explicit retry remains
+    once. Discovery exceptions are not cached so a later explicit retry remains
     possible.
     """
 
@@ -254,11 +199,15 @@ class SmartHttpV2ObjectInfoClient(SmartHttpV2QueryClient):
             method="POST",
             headers={
                 "Accept": _UPLOAD_PACK_RESULT_MEDIA_TYPE,
-                "Content-Type": "application/x-git-upload-pack-request",
+                "Content-Type": _UPLOAD_PACK_REQUEST_MEDIA_TYPE,
             },
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            _validate_upload_pack_result_content_type(response)
+            _validate_smart_http_content_type(
+                response,
+                _UPLOAD_PACK_RESULT_MEDIA_TYPE,
+                context="upload-pack response",
+            )
             return parse_object_info_size_response(response.read())
 
     def query_sizes(
@@ -268,7 +217,7 @@ class SmartHttpV2ObjectInfoClient(SmartHttpV2QueryClient):
         """Return native object sizes, or ``None`` when the server is protocol v0.
 
         A protocol-v2 server that does not advertise ``object-info`` is an
-        explicit unsupported capability, not a v0 fallback.  Unknown OIDs are
+        explicit unsupported capability, not a v0 fallback. Unknown OIDs are
         retained in the returned mapping with a ``None`` value.
         """
 
