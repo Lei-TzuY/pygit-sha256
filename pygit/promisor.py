@@ -39,10 +39,26 @@ def _path(pygit_dir: Path) -> Path:
     return Path(pygit_dir) / _STATE_FILE
 
 
+def _validate_native_size_oid(native_oid: object) -> None:
+    """Require one full remote-native SHA-1 identity for size metadata."""
+
+    if not isinstance(native_oid, str):
+        raise ValueError("promisor size object id must be a string")
+    if len(native_oid) != 40:
+        raise ValueError(
+            "promisor size object id must be a full native SHA-1 object id"
+        )
+    try:
+        int(native_oid, 16)
+    except ValueError as exc:
+        raise ValueError(
+            "promisor size object id must be a full native SHA-1 object id"
+        ) from exc
+
+
 def _validate_sizes(sizes: Mapping[str, object]) -> None:
     for native_oid, size in sizes.items():
-        if not isinstance(native_oid, str):
-            raise ValueError("promisor size object id must be a string")
+        _validate_native_size_oid(native_oid)
         if isinstance(size, bool) or not isinstance(size, int) or size < 0:
             raise ValueError(
                 f"promisor size for {native_oid} must be a non-negative integer"
