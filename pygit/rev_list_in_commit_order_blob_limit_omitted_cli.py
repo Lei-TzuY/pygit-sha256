@@ -7,6 +7,8 @@ traversal order, edge/boundary presentation, surviving membership, and omitted
 local SHA-256 identities. Phase269 extends that composition to Git's structured
 ``-z`` object protocol while preserving upstream's deliberately mixed framing:
 NUL traversal records, newline-framed omissions, then NUL missing records.
+Phase270 additionally preserves native ``-z + --count`` ordering, with a final
+newline-terminated integer after omissions and missing diagnostics.
 """
 
 from __future__ import annotations
@@ -36,9 +38,6 @@ def _partition_blob_limit(
 ) -> Tuple[Tuple[PromisorObjectInventoryEntry, ...], Tuple[str, ...]]:
     """Return surviving entries and genuine local SHA-256 omitted blob ids."""
 
-    # Pygit's promisor metadata knows unresolved object kind but not blob size.
-    # Classification must therefore fail before any output rather than fetching
-    # content merely to decide the filter or fabricating a local object id.
     _blob_limit._ensure_missing_blobs_are_classifiable(entries)
 
     surviving: list[PromisorObjectInventoryEntry] = []
@@ -49,9 +48,6 @@ def _partition_blob_limit(
             continue
 
         if entry.oid is None:
-            # The preflight above rejects unresolved promised blobs. Keep this
-            # guard explicit so repository-visible omission identities can never
-            # silently fall back to native/foreign SHA-1.
             native = entry.native_oid or "<unknown>"
             raise RuntimeError(
                 "--filter=blob:limit cannot classify unresolved promised blob "
@@ -78,16 +74,7 @@ def _partition_blob_limit(
 def try_run_rev_list_in_commit_order_blob_limit_omitted(
     argv: Sequence[str],
 ) -> Optional[int]:
-    """Render ordered blob-limit traversal, omissions, missing, then count.
-
-    Native Git treats the omission set as a presentation channel after object
-    traversal. Capturing the shared ordered renderer lets this adapter preserve
-    the already-tested edge/boundary/count semantics while moving missing
-    diagnostics behind ``~`` records. Under ``-z``, the shared renderer emits
-    structured NUL records and this adapter reuses the Phase257 partitioner so
-    the final observable stream remains ``NUL traversal -> newline omissions ->
-    NUL missing`` rather than inventing an undocumented omission token.
-    """
+    """Render ordered blob-limit traversal, omissions, missing, then count."""
 
     if _IN_COMMIT_ORDER not in argv or _FILTER_PRINT_OMITTED not in argv:
         return None
@@ -139,15 +126,21 @@ def try_run_rev_list_in_commit_order_blob_limit_omitted(
 
     projected_output = capture.getvalue()
     if parsed["in_commit_order_nul"]:
-        traversal, missing = _omitted._partition_projected_nul(projected_output)
+        count_line = None
+        if "--count" in cleaned:
+            traversal, missing, count_line = _omitted._partition_projected_nul_count(
+                projected_output
+            )
+        else:
+            traversal, missing = _omitted._partition_projected_nul(projected_output)
         for record in traversal:
             sys.stdout.write(record)
-        # Git 2.55's omitted-object loop remains hard-coded to newline framing
-        # even after -z switches normal and missing object records to NUL fields.
         for oid in omitted:
             sys.stdout.write(f"~{oid}\n")
         for record in missing:
             sys.stdout.write(record)
+        if count_line is not None:
+            sys.stdout.write(f"{count_line}\n")
         return code
 
     traversal, missing, count_line = _omitted._partition_projected_lines(
