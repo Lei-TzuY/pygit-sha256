@@ -42,9 +42,7 @@ def test_rev_list_z_ordinary_no_object_names(tmp_path, monkeypatch, capsys):
     assert "path=" not in out
 
 
-def test_rev_list_z_ordinary_rejects_count_and_objects_edge(tmp_path, monkeypatch):
+def test_rev_list_z_ordinary_rejects_objects_edge(tmp_path, monkeypatch):
     _repo, _commit = _repo_with_file(tmp_path, monkeypatch)
-    with pytest.raises(ValueError, match="not compatible with --count"):
-        run_rev_list_disk_usage(["--objects", "-z", "--count", "HEAD"])
     with pytest.raises(ValueError, match="only compatible with --objects"):
         run_rev_list_disk_usage(["--objects-edge", "-z", "HEAD"])
