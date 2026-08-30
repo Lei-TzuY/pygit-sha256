@@ -73,9 +73,6 @@ def _project(argv: Sequence[str]) -> list[str]:
     ]
     missing = [arg for arg in projected if arg.startswith("--missing=")]
 
-    # Structured NUL traversal has an ordinary-repository mode, so an explicit
-    # missing policy is optional there. Partial-clone callers may select the
-    # same three metadata-only policies supported by the line path.
     if "-z" in projected:
         if len(missing) > 1:
             raise ValueError("rev-list accepts exactly one --missing action")
@@ -145,7 +142,7 @@ def _ensure_missing_blobs_are_classifiable(repo, entries) -> None:
     """Preflight every unresolved blob before any output is emitted.
 
     Phase285 deliberately batches missing size metadata into one
-    ``refresh_promisor_sizes`` call.  The refresh helper already fans that batch
+    ``refresh_promisor_sizes`` call. The refresh helper already fans that batch
     across configured promisor remotes as needed, so callers avoid N metadata
     round-trips while retaining the same strict all-or-error presentation rule.
     """
@@ -170,8 +167,9 @@ def _ensure_missing_blobs_are_classifiable(repo, entries) -> None:
     for entry in entries:
         if not (entry.missing and entry.type_name == "blob"):
             continue
-        if not entry.native_oid or promised_size(repo.pygit_dir, entry.native_oid) is None:
-            raise _missing_size_error(entry.native_oid)
+        native_oid = entry.native_oid
+        if not native_oid or promised_size(repo.pygit_dir, native_oid.lower()) is None:
+            raise _missing_size_error(native_oid)
 
 
 def _local_blob_size(repo, oid: str) -> Optional[int]:
@@ -222,8 +220,6 @@ def _entry_is_kept(repo, entry, *, limit: int) -> bool:
 
 
 def _filter_inventory(repo, entries, *, limit: int):
-    """Apply blob-size membership before any structured record is emitted."""
-
     _ensure_missing_blobs_are_classifiable(repo, entries)
     return tuple(
         entry
@@ -265,8 +261,6 @@ def _filtered_present_count(repo, argv: Sequence[str], *, limit: int) -> int:
 
 
 def try_run_rev_list_blob_limit(argv: Sequence[str]) -> Optional[int]:
-    """Handle line/count/NUL ``blob:limit`` filtering without promisor fetches."""
-
     limit = _blob_limit(argv)
     if limit is None:
         return None
