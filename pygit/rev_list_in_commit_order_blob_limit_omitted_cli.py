@@ -9,6 +9,13 @@ local SHA-256 identities. Phase269 extends that composition to Git's structured
 NUL traversal records, newline-framed omissions, then NUL missing records.
 Phase270 additionally preserves native ``-z + --count`` ordering, with a final
 newline-terminated integer after omissions and missing diagnostics.
+
+Phase280 composes trusted promisor size metadata with this omission path. A
+promised blob that survives ``blob:limit`` remains a missing inventory entry and
+is rendered by the existing missing-object policy. A promised blob filtered by
+size cannot enter the ``~<oid>`` channel until it has a genuine local SHA-256
+identity, so that case fails before any output instead of exposing native SHA-1
+or inventing a surrogate repository object id.
 """
 
 from __future__ import annotations
@@ -30,13 +37,28 @@ _IN_COMMIT_ORDER = "--in-commit-order"
 _FILTER_PRINT_OMITTED = "--filter-print-omitted"
 
 
+def _unresolved_omitted_identity_error(entry: PromisorObjectInventoryEntry) -> RuntimeError:
+    native = entry.native_oid or "<unknown>"
+    return RuntimeError(
+        "--filter-print-omitted cannot expose unresolved filtered promisor blob "
+        f"{native} as a local SHA-256 id; materialize it first or omit "
+        "--filter-print-omitted"
+    )
+
+
 def _partition_blob_limit(
     repo,
     entries: Sequence[PromisorObjectInventoryEntry],
     *,
     limit: int,
 ) -> Tuple[Tuple[PromisorObjectInventoryEntry, ...], Tuple[str, ...]]:
-    """Return surviving entries and genuine local SHA-256 omitted blob ids."""
+    """Return surviving entries and genuine local SHA-256 omitted blob ids.
+
+    Promised blobs with trusted size metadata can be classified without content.
+    Survivors stay missing and retain their native identity only for the explicit
+    missing-object renderer. Filtered promised blobs have no local SHA-256 to put
+    in Git's omission channel, so they are rejected before rendering anything.
+    """
 
     _blob_limit._ensure_missing_blobs_are_classifiable(repo, entries)
 
@@ -47,12 +69,14 @@ def _partition_blob_limit(
             surviving.append(entry)
             continue
 
+        if entry.missing:
+            if _blob_limit._entry_is_kept(repo, entry, limit=limit):
+                surviving.append(entry)
+                continue
+            raise _unresolved_omitted_identity_error(entry)
+
         if entry.oid is None:
-            native = entry.native_oid or "<unknown>"
-            raise RuntimeError(
-                "--filter=blob:limit cannot classify unresolved promised blob "
-                f"{native}: persistent promisor size metadata is unavailable"
-            )
+            raise RuntimeError("present blob inventory entry has no local SHA-256 identity")
 
         size = _blob_limit._local_blob_size(repo, entry.oid)
         if size is None:
