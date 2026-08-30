@@ -110,7 +110,7 @@ def parse_object_info_size_response(data: bytes) -> Tuple[ObjectSizeInfo, ...]:
                     "Trailing data after protocol-v2 object-info flush packet"
                 )
             break
-        if kind in {"delimiter", "response-end"}:
+        if kind in {"delim", "response-end"}:
             raise ValueError(
                 "Unexpected non-flush terminator in protocol-v2 object-info response"
             )
