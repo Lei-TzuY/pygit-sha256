@@ -17,6 +17,12 @@ from .remote import Advertisement, pkt_line
 _UPLOAD_PACK_ADVERTISEMENT_MEDIA_TYPE = "application/x-git-upload-pack-advertisement"
 _UPLOAD_PACK_REQUEST_MEDIA_TYPE = "application/x-git-upload-pack-request"
 _UPLOAD_PACK_RESULT_MEDIA_TYPE = "application/x-git-upload-pack-result"
+_CAPABILITY_KEY_BYTES = frozenset(
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+)
+_CAPABILITY_VALUE_BYTES = frozenset(
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_.,?/{}[]()<>!@#$%^&*+=:;"
+)
 
 
 def _read_packet(data: bytes, offset: int) -> tuple[str, Optional[bytes], int]:
@@ -37,6 +43,47 @@ def _read_packet(data: bytes, offset: int) -> tuple[str, Optional[bytes], int]:
     if size < 4 or offset + size - 4 > len(data):
         raise ValueError("Truncated protocol-v2 pkt-line payload")
     return "data", data[offset : offset + size - 4], offset + size - 4
+
+
+def _payload_without_optional_lf(payload: bytes, *, context: str) -> bytes:
+    """Remove at most one terminal LF from one textual pkt-line payload.
+
+    Git's common pkt-line rules allow a sender to omit the terminal LF and require
+    receivers to accept that form.  Do not use ``rstrip`` here: it would silently
+    normalize multiple or embedded LF bytes that are not part of the record
+    grammar.
+    """
+
+    if payload.endswith(b"\n"):
+        payload = payload[:-1]
+    if b"\n" in payload:
+        raise ValueError(f"Unexpected LF inside {context}")
+    return payload
+
+
+def _parse_capability_record(payload: bytes) -> tuple[str, Optional[str]]:
+    """Parse one capability according to protocol-v2's key/value ABNF."""
+
+    raw = _payload_without_optional_lf(
+        payload,
+        context="protocol-v2 capability record",
+    )
+    key_raw, separator, value_raw = raw.partition(b"=")
+    if not key_raw:
+        raise ValueError("Empty protocol-v2 capability name")
+    if any(byte not in _CAPABILITY_KEY_BYTES for byte in key_raw):
+        raise ValueError("Invalid protocol-v2 capability name")
+
+    if separator:
+        if not value_raw:
+            raise ValueError("Empty protocol-v2 capability value")
+        if any(byte not in _CAPABILITY_VALUE_BYTES for byte in value_raw):
+            raise ValueError("Invalid protocol-v2 capability value")
+        value: Optional[str] = value_raw.decode("ascii")
+    else:
+        value = None
+
+    return key_raw.decode("ascii"), value
 
 
 def _response_has_header_api(response) -> bool:
@@ -121,6 +168,9 @@ def parse_capability_advertisement(data: bytes) -> Optional[ProtocolV2Capabiliti
     v0 fallback candidate.  The protocol-v2 capability list must therefore be
     complete and end in exactly one flush packet; truncation, delimiter packets,
     response-end packets, or bytes after the flush are malformed transport.
+
+    Textual records follow protocol-v2's capability ABNF while retaining Git's
+    common pkt-line compatibility rule that permits the terminal LF to be absent.
     """
 
     offset = 0
@@ -128,13 +178,23 @@ def parse_capability_advertisement(data: bytes) -> Optional[ProtocolV2Capabiliti
     if kind != "data" or payload is None:
         return None
 
-    if payload == b"# service=git-upload-pack\n":
+    service = _payload_without_optional_lf(
+        payload,
+        context="smart HTTP service advertisement",
+    )
+    if service == b"# service=git-upload-pack":
         kind, payload, offset = _read_packet(data, offset)
         if kind != "flush":
             return None
         kind, payload, offset = _read_packet(data, offset)
 
-    if kind != "data" or payload is None or payload.rstrip(b"\n") != b"version 2":
+    if kind != "data" or payload is None:
+        return None
+    version = _payload_without_optional_lf(
+        payload,
+        context="protocol-v2 version record",
+    )
+    if version != b"version 2":
         return None
 
     values: Dict[str, Optional[str]] = {}
@@ -154,16 +214,7 @@ def parse_capability_advertisement(data: bytes) -> Optional[ProtocolV2Capabiliti
             )
         if kind != "data" or payload is None:
             raise ValueError("Unexpected packet in protocol-v2 capability advertisement")
-        try:
-            text = payload.rstrip(b"\n").decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("Invalid UTF-8 in protocol-v2 capability advertisement") from exc
-        if "=" in text:
-            key, value = text.split("=", 1)
-        else:
-            key, value = text, None
-        if not key:
-            raise ValueError("Empty protocol-v2 capability name")
+        key, value = _parse_capability_record(payload)
         values[key] = value
 
     if not saw_flush:
@@ -237,10 +288,17 @@ def parse_ls_refs_response(
     data: bytes,
     capabilities: ProtocolV2Capabilities,
 ) -> Advertisement:
-    """Parse one complete ``ls-refs`` response into an Advertisement."""
+    """Parse one complete ``ls-refs`` response into an Advertisement.
+
+    The common pkt-line rules permit a missing terminal LF, but record separators
+    and ref names remain structural: embedded/multiple LF bytes, empty ref names,
+    duplicate ref records, empty symref targets, and malformed peeled identities
+    are rejected instead of being silently normalized or overwritten.
+    """
 
     refs: Dict[str, str] = {}
     symrefs: Dict[str, str] = {}
+    seen_names: set[str] = set()
     offset = 0
     saw_flush = False
     while offset < len(data):
@@ -254,13 +312,26 @@ def parse_ls_refs_response(
             raise ValueError("Unexpected non-flush terminator in protocol-v2 ls-refs response")
         if kind != "data" or payload is None:
             raise ValueError("Unexpected packet in protocol-v2 ls-refs response")
+
+        raw = _payload_without_optional_lf(
+            payload,
+            context="protocol-v2 ls-refs record",
+        )
         try:
-            fields = payload.rstrip(b"\n").decode("utf-8").split(" ")
+            text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("Invalid UTF-8 in protocol-v2 ls-refs response") from exc
-        if len(fields) < 2:
+        if "\x00" in text:
+            raise ValueError("NUL in protocol-v2 ls-refs response")
+        fields = text.split(" ")
+        if len(fields) < 2 or any(field == "" for field in fields):
             raise ValueError("Malformed protocol-v2 ls-refs response line")
+
         oid, name, *attributes = fields
+        if name in seen_names:
+            raise ValueError(f"Duplicate protocol-v2 ls-refs result for {name}")
+        seen_names.add(name)
+
         if oid != "unborn":
             if len(oid) != 40:
                 raise RuntimeError(
@@ -271,10 +342,27 @@ def parse_ls_refs_response(
             except ValueError as exc:
                 raise ValueError("Malformed protocol-v2 object id") from exc
             refs[name] = oid.lower()
+
+        saw_symref = False
+        saw_peeled = False
         for attribute in attributes:
             if attribute.startswith("symref-target:"):
-                symrefs[name] = attribute.split(":", 1)[1]
+                if saw_symref:
+                    raise ValueError(
+                        f"Duplicate symref-target attribute for protocol-v2 ref {name}"
+                    )
+                target = attribute.split(":", 1)[1]
+                if not target:
+                    raise ValueError(
+                        f"Empty symref-target attribute for protocol-v2 ref {name}"
+                    )
+                symrefs[name] = target
+                saw_symref = True
             elif attribute.startswith("peeled:"):
+                if saw_peeled:
+                    raise ValueError(
+                        f"Duplicate peeled attribute for protocol-v2 ref {name}"
+                    )
                 peeled = attribute.split(":", 1)[1]
                 if len(peeled) != 40:
                     raise RuntimeError(
@@ -285,6 +373,7 @@ def parse_ls_refs_response(
                 except ValueError as exc:
                     raise ValueError("Malformed peeled protocol-v2 object id") from exc
                 refs[f"{name}^{{}}"] = peeled.lower()
+                saw_peeled = True
 
     if not saw_flush:
         raise ValueError("protocol-v2 ls-refs response did not end with flush packet")
