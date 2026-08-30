@@ -23,6 +23,16 @@ from .protocol_v2_fetch import _validate_sha1_oid
 from .remote import pkt_line
 
 
+class ObjectInfoUnsupportedError(RuntimeError):
+    """The remote negotiated protocol v2 but does not advertise object-info.
+
+    This is a stable capability-negative result, not a transport/session
+    failure.  Callers may safely retain the negotiated capability advertisement
+    instead of discarding the client and rediscovering the same absence on every
+    metadata refresh.
+    """
+
+
 @dataclass(frozen=True)
 class ObjectSizeInfo:
     """One native object-size result.
@@ -58,7 +68,9 @@ def build_object_info_size_request(
     """Build one capability-gated ``object-info`` size request."""
 
     if not capabilities.supports("object-info"):
-        raise RuntimeError("Remote protocol-v2 server does not advertise object-info")
+        raise ObjectInfoUnsupportedError(
+            "Remote protocol-v2 server does not advertise object-info"
+        )
 
     requested = _normalize_oids(oids)
     body = _command_prefix(
