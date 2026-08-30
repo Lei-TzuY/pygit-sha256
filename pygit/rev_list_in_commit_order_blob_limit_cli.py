@@ -3,7 +3,9 @@
 Phase267 rebases the earlier Phase258 size-filter work onto the current ordered
 stack. The ordered inventory remains authoritative for commit/snapshot order,
 boundaries, object edges, and missing-object policy; this adapter only performs
-blob-size membership before the shared renderer runs.
+blob-size membership before the shared renderer runs. Phase271 composes that
+same membership with the structured ``-z`` renderer added by Phase263 and the
+native-compatible NUL count behavior established in Phase270.
 """
 
 from __future__ import annotations
@@ -48,12 +50,13 @@ def _apply_blob_limit(
 def try_run_rev_list_in_commit_order_blob_limit(
     argv: Sequence[str],
 ) -> Optional[int]:
-    """Handle ordered ``blob:limit=<n>[kmg]`` line/count traversal.
+    """Handle ordered ``blob:limit=<n>[kmg]`` traversal in line/NUL/count modes.
 
-    The Phase267 scope deliberately leaves NUL and omitted-object framing for
-    follow-up phases. Unresolved promised blobs are rejected before rendering
-    because pygit's promisor metadata does not persist their size and the filter
-    must not demand-fetch content merely to classify membership.
+    Unresolved promised blobs are rejected before rendering because pygit's
+    promisor metadata does not persist their size and the filter must not
+    demand-fetch content merely to classify membership. ``--filter-print-omitted``
+    remains owned by the dedicated Phase268/269 composition so the plain path
+    only selects surviving objects before delegating to the shared renderer.
     """
 
     if _IN_COMMIT_ORDER not in argv:
@@ -62,10 +65,6 @@ def try_run_rev_list_in_commit_order_blob_limit(
     if limit is None:
         return None
 
-    if "-z" in argv:
-        raise ValueError(
-            "rev-list --in-commit-order with --filter=blob:limit and -z is not yet supported"
-        )
     if _FILTER_PRINT_OMITTED in argv:
         raise ValueError(
             "rev-list --in-commit-order with --filter=blob:limit and --filter-print-omitted is not yet supported"
