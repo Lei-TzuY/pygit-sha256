@@ -3,8 +3,9 @@
 Local blobs are classified from already-materialized payloads. Unresolved
 promised blobs may also be classified when the promisor sidecar contains a
 trusted uncompressed size learned from metadata-only remote object-info.
-Missing size metadata remains a hard error: this filter never materializes
-content merely to decide membership.
+When that metadata is absent, Phase284 performs one best-effort metadata-only
+refresh against configured promisor remotes before retaining the existing hard
+error. Content is never materialized merely to decide filter membership.
 
 Phase282 routes plain non-ordered ``-z`` requests through the shared structured
 NUL renderer after applying the same metadata-only membership predicate to its
@@ -22,6 +23,7 @@ from . import rev_list_nul_cli as _nul
 from . import rev_list_promisor_cli as _promisor
 from .objects import BlobObject
 from .promisor import promised_kind, promised_size
+from .promisor_size_refresh import refresh_promisor_sizes
 
 
 _BLOB_LIMIT_RE = re.compile(r"^blob:limit=([0-9]+)([kKmMgG]?)$")
@@ -121,7 +123,11 @@ def _inventory_context(repo, argv: Sequence[str]):
 def _promised_blob_size(repo, native_oid: Optional[str]) -> Optional[int]:
     if not native_oid:
         return None
-    return promised_size(repo.pygit_dir, native_oid)
+    size = promised_size(repo.pygit_dir, native_oid)
+    if size is not None:
+        return size
+    refreshed = refresh_promisor_sizes(repo, (native_oid,))
+    return refreshed.get(native_oid.lower())
 
 
 def _missing_size_error(native_oid: Optional[str]) -> RuntimeError:
