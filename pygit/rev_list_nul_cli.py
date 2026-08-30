@@ -16,6 +16,11 @@ Phase270 reconciles the historical pygit ``-z + --count`` guard with native Git:
 count suppresses normal object records and is printed afterward as a regular
 newline-terminated integer. Missing records remain structured NUL records and
 are emitted before that integer, matching ``builtin/rev-list.c``.
+
+Phase277 allows ``object:type=tag`` as a structured membership filter. The
+commit-rooted inventory does not itself synthesize annotated-tag objects; the
+annotated-tag adapter composes those explicit provided objects around this
+renderer while reusing its missing/boundary/count semantics.
 """
 
 from __future__ import annotations
@@ -236,10 +241,12 @@ def try_run_rev_list_nul(
 
     ``omit_blobs`` is a structured presentation filter used by Phase248's
     ``--filter=blob:none`` adapter. ``object_type`` composes the same structured
-    inventory with Git's ``object:type=(commit|tree|blob)`` semantics. Filtering
-    happens before any NUL record is emitted, so nonmatching promised objects
-    disappear without fetches and explicitly provided commit roots remain
-    visible even when their type differs from the requested filter.
+    inventory with Git's ``object:type=(tag|commit|tree|blob)`` semantics.
+    Annotated tags are explicit provided objects outside this commit-rooted
+    inventory and are injected by the Phase277 adapter. Filtering happens before
+    any NUL record is emitted, so nonmatching promised objects disappear without
+    fetches and explicitly provided commit roots remain visible even when their
+    type differs from the requested filter.
 
     When ``--count`` is present, normal object records are suppressed and only
     structured missing diagnostics plus the final newline count are emitted.
@@ -249,8 +256,8 @@ def try_run_rev_list_nul(
         return None
     if omit_blobs and object_type is not None:
         raise ValueError("rev-list NUL adapter accepts only one structured object filter")
-    if object_type is not None and object_type not in {"commit", "tree", "blob"}:
-        raise ValueError("rev-list NUL object:type filter supports commit, tree, or blob")
+    if object_type is not None and object_type not in {"tag", "commit", "tree", "blob"}:
+        raise ValueError("rev-list NUL object:type filter supports tag, commit, tree, or blob")
 
     repo = _promisor._find_repo()
     boundary_commits = ()
