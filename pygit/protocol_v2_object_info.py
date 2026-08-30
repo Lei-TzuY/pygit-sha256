@@ -87,14 +87,29 @@ def build_object_info_size_request(
     return body + b"0000"
 
 
+def _decode_object_info_record(payload: bytes) -> str:
+    """Decode one textual object-info pkt-line using Git's exact LF grammar."""
+
+    if not payload.endswith(b"\n"):
+        raise ValueError("protocol-v2 object-info record did not end with LF")
+    record = payload[:-1]
+    if b"\n" in record or b"\r" in record:
+        raise ValueError("Malformed line ending in protocol-v2 object-info response")
+    try:
+        return record.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Invalid ASCII in protocol-v2 object-info response") from exc
+
+
 def parse_object_info_size_response(data: bytes) -> Tuple[ObjectSizeInfo, ...]:
     """Parse one complete ``object-info size`` response.
 
     Git's protocol-v2 grammar defines an ``object-info`` response as its info
     pkt-lines followed by one ``flush-pkt``. Treat that terminator as part of
     the trusted metadata envelope: truncated responses, response-end/delimiter
-    packets, and bytes after the flush are rejected rather than silently
-    accepting a prefix of a malformed response.
+    packets, bytes after the flush, and textual records that do not use the
+    mandated single LF terminator are rejected rather than silently accepting a
+    prefix of a malformed response.
     """
 
     saw_size = False
@@ -120,10 +135,7 @@ def parse_object_info_size_response(data: bytes) -> Tuple[ObjectSizeInfo, ...]:
         if kind != "data" or payload is None:
             raise ValueError("Unexpected delimiter in protocol-v2 object-info response")
 
-        try:
-            text = payload.rstrip(b"\n").decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise ValueError("Invalid ASCII in protocol-v2 object-info response") from exc
+        text = _decode_object_info_record(payload)
 
         if text == "size":
             if saw_size:
@@ -138,7 +150,7 @@ def parse_object_info_size_response(data: bytes) -> Tuple[ObjectSizeInfo, ...]:
         saw_object = True
 
         oid, separator, raw_size = text.partition(" ")
-        if not separator:
+        if not separator or " " in raw_size:
             raise ValueError("Malformed protocol-v2 object-info result")
         oid = _validate_sha1_oid(oid, field="object-info response oid")
         if oid in seen:
