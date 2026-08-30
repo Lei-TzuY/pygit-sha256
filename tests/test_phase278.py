@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import pytest
 
 from pygit import rev_list_filter_blob_limit_cli as blob_limit
@@ -9,7 +11,7 @@ from pygit.promisor_object_inventory import PromisorObjectInventoryEntry
 from pygit.repo import Repository
 
 
-def _promised_blob(repo, native_oid: str, *, size: int | None):
+def _promised_blob(repo, native_oid: str, *, size: Optional[int]):
     update_promisor_state(repo.pygit_dir, promised={native_oid: "blob"})
     if size is not None:
         update_promisor_state(repo.pygit_dir, sizes={native_oid: size})
