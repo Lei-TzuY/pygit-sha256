@@ -36,7 +36,7 @@ def _requested_type(argv: Sequence[str]) -> Optional[str]:
     spec = _filter._filter_spec(argv)
     if spec is None or not spec.startswith("object:type="):
         return None
-    return spec.split("=", 2)[2]
+    return spec.split("=", 1)[1]
 
 
 def _ordered_projection(argv: Sequence[str]) -> list[str]:
