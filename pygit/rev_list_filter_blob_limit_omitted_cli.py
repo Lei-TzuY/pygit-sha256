@@ -1,10 +1,12 @@
-"""Compose line-oriented ``blob:limit`` filtering with omitted-object output.
+"""Compose non-ordered ``blob:limit`` filtering with omitted-object output.
 
 The ordinary blob-limit adapter owns metadata-only size classification and the
 existing generic omission adapter owns Git's output ordering: traversal first,
 then ``~<oid>`` omissions, missing diagnostics, and finally the optional count.
-Phase281 composes those layers for the non-``--in-commit-order`` path without
-adding another object walker.
+Phase281 composes those layers for line/count output without adding another
+object walker. Phase283 extends that same composition to current Git's
+structured ``-z`` object protocol now that Phase282 provides plain blob-limit
+NUL traversal.
 
 Unresolved promised blobs follow Phase280's cross-hash-domain rule. A trusted-
 size promise that survives the filter remains in the missing-object channel. A
@@ -12,10 +14,11 @@ promise omitted by the filter has no genuine local SHA-256 identity and cannot
 legally be printed as ``~<oid>`` until materialized, so the command fails before
 emitting any output instead of exposing native SHA-1 or inventing a surrogate.
 
-Phase282 moves plain blob-limit traversal onto the structured NUL renderer, but
-keeps NUL + omission framing as an explicit follow-up. This adapter therefore
-owns its own `-z` guard instead of depending on the underlying blob-limit layer
-to reject the combination indirectly.
+Git's ``-z`` protocol deliberately keeps omission records newline-framed while
+present and missing object records are NUL-framed. Count mode suppresses present
+object records, preserves omission-before-missing ordering, and leaves the final
+integer newline-terminated. Phase283 reuses the mature shared NUL partitioners
+rather than inventing an ``omitted=yes`` metadata token.
 """
 
 from __future__ import annotations
@@ -78,7 +81,7 @@ def _omitted_local_oids(repo, entries, *, limit: int) -> tuple[str, ...]:
 def try_run_rev_list_blob_limit_filter_print_omitted(
     argv: Sequence[str],
 ) -> Optional[int]:
-    """Handle line/count ``blob:limit + --filter-print-omitted`` output."""
+    """Handle non-ordered ``blob:limit + --filter-print-omitted`` output."""
 
     if _IN_COMMIT_ORDER in argv or _FILTER_PRINT_OMITTED not in argv:
         return None
@@ -88,8 +91,6 @@ def try_run_rev_list_blob_limit_filter_print_omitted(
     limit = _blob_limit._blob_limit(argv)
     if limit is None:
         return None
-    if "-z" in argv:
-        raise ValueError("--filter=blob:limit with -z is not yet supported")
 
     cleaned = [arg for arg in argv if arg != _FILTER_PRINT_OMITTED]
     projected = _blob_limit._project(cleaned)
@@ -105,8 +106,27 @@ def try_run_rev_list_blob_limit_filter_print_omitted(
     if code is None:
         raise RuntimeError("rev-list blob:limit adapter declined omitted-object projection")
 
+    projected_output = capture.getvalue()
+    if "-z" in cleaned:
+        count_line: Optional[str] = None
+        if "--count" in cleaned:
+            traversal, missing, count_line = _omitted._partition_projected_nul_count(
+                projected_output
+            )
+        else:
+            traversal, missing = _omitted._partition_projected_nul(projected_output)
+        for record in traversal:
+            sys.stdout.write(record)
+        for oid in omitted:
+            sys.stdout.write(f"~{oid}\n")
+        for record in missing:
+            sys.stdout.write(record)
+        if count_line is not None:
+            sys.stdout.write(f"{count_line}\n")
+        return code
+
     traversal, missing, count_line = _omitted._partition_projected_lines(
-        capture.getvalue().splitlines(),
+        projected_output.splitlines(),
         count_mode="--count" in cleaned,
     )
     for line in traversal:
