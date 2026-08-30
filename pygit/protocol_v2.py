@@ -14,6 +14,11 @@ from typing import Dict, Optional, Sequence, Set
 from .remote import Advertisement, pkt_line
 
 
+_UPLOAD_PACK_ADVERTISEMENT_MEDIA_TYPE = "application/x-git-upload-pack-advertisement"
+_UPLOAD_PACK_REQUEST_MEDIA_TYPE = "application/x-git-upload-pack-request"
+_UPLOAD_PACK_RESULT_MEDIA_TYPE = "application/x-git-upload-pack-result"
+
+
 def _read_packet(data: bytes, offset: int) -> tuple[str, Optional[bytes], int]:
     if offset + 4 > len(data):
         raise ValueError("Truncated protocol-v2 pkt-line length")
@@ -34,6 +39,64 @@ def _read_packet(data: bytes, offset: int) -> tuple[str, Optional[bytes], int]:
     return "data", data[offset : offset + size - 4], offset + size - 4
 
 
+def _response_has_header_api(response) -> bool:
+    """Return whether *response* looks like a real HTTP response object."""
+
+    return getattr(response, "headers", None) is not None or callable(
+        getattr(response, "getheader", None)
+    )
+
+
+def _response_content_type(response) -> Optional[str]:
+    """Return a normalized HTTP media type when response headers are available."""
+
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        getter = getattr(headers, "get", None)
+        if callable(getter):
+            raw = getter("Content-Type")
+            if raw is None:
+                return None
+            return str(raw).split(";", 1)[0].strip().lower()
+
+    getheader = getattr(response, "getheader", None)
+    if callable(getheader):
+        raw = getheader("Content-Type")
+        if raw is None:
+            return None
+        return str(raw).split(";", 1)[0].strip().lower()
+
+    return None
+
+
+def _smart_http_content_type_matches(response, expected: str) -> Optional[bool]:
+    """Compare one real HTTP response media type, or return ``None`` for doubles.
+
+    Older focused tests use minimal response doubles exposing only ``read()``.
+    Real ``urllib`` responses expose a header API even if Content-Type itself is
+    missing, so ``None`` here can safely mean "no HTTP envelope available to
+    validate" rather than "header present but missing".
+    """
+
+    if not _response_has_header_api(response):
+        return None
+    return _response_content_type(response) == expected
+
+
+def _validate_smart_http_content_type(response, expected: str, *, context: str) -> None:
+    """Fail closed on a real smart-HTTP response with an unexpected media type."""
+
+    matches = _smart_http_content_type_matches(response, expected)
+    if matches is None or matches:
+        return
+    content_type = _response_content_type(response)
+    rendered = "<missing>" if content_type is None else content_type
+    raise ValueError(
+        f"Unexpected smart-HTTP {context} Content-Type {rendered!r}; "
+        f"expected {expected!r}"
+    )
+
+
 @dataclass(frozen=True)
 class ProtocolV2Capabilities:
     """One protocol-v2 capability advertisement."""
@@ -52,7 +115,13 @@ class ProtocolV2Capabilities:
 
 
 def parse_capability_advertisement(data: bytes) -> Optional[ProtocolV2Capabilities]:
-    """Parse a v2 capability advertisement, or return ``None`` for v0."""
+    """Parse a complete v2 capability advertisement, or return ``None`` for v0.
+
+    Once a ``version 2`` marker has been recognized the response is no longer a
+    v0 fallback candidate.  The protocol-v2 capability list must therefore be
+    complete and end in exactly one flush packet; truncation, delimiter packets,
+    response-end packets, or bytes after the flush are malformed transport.
+    """
 
     offset = 0
     kind, payload, offset = _read_packet(data, offset)
@@ -69,13 +138,26 @@ def parse_capability_advertisement(data: bytes) -> Optional[ProtocolV2Capabiliti
         return None
 
     values: Dict[str, Optional[str]] = {}
+    saw_flush = False
     while offset < len(data):
         kind, payload, offset = _read_packet(data, offset)
         if kind == "flush":
+            saw_flush = True
+            if offset != len(data):
+                raise ValueError(
+                    "Trailing data after protocol-v2 capability advertisement flush packet"
+                )
             break
+        if kind in {"delim", "response-end"}:
+            raise ValueError(
+                "Unexpected non-flush terminator in protocol-v2 capability advertisement"
+            )
         if kind != "data" or payload is None:
             raise ValueError("Unexpected packet in protocol-v2 capability advertisement")
-        text = payload.rstrip(b"\n").decode("utf-8")
+        try:
+            text = payload.rstrip(b"\n").decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Invalid UTF-8 in protocol-v2 capability advertisement") from exc
         if "=" in text:
             key, value = text.split("=", 1)
         else:
@@ -83,6 +165,9 @@ def parse_capability_advertisement(data: bytes) -> Optional[ProtocolV2Capabiliti
         if not key:
             raise ValueError("Empty protocol-v2 capability name")
         values[key] = value
+
+    if not saw_flush:
+        raise ValueError("protocol-v2 capability advertisement did not end with flush packet")
 
     object_format = values.get("object-format")
     if object_format not in (None, "sha1"):
@@ -152,18 +237,27 @@ def parse_ls_refs_response(
     data: bytes,
     capabilities: ProtocolV2Capabilities,
 ) -> Advertisement:
-    """Parse ``ls-refs`` output into pygit's existing Advertisement shape."""
+    """Parse one complete ``ls-refs`` response into an Advertisement."""
 
     refs: Dict[str, str] = {}
     symrefs: Dict[str, str] = {}
     offset = 0
+    saw_flush = False
     while offset < len(data):
         kind, payload, offset = _read_packet(data, offset)
-        if kind in {"flush", "response-end"}:
+        if kind == "flush":
+            saw_flush = True
+            if offset != len(data):
+                raise ValueError("Trailing data after protocol-v2 ls-refs flush packet")
             break
+        if kind in {"delim", "response-end"}:
+            raise ValueError("Unexpected non-flush terminator in protocol-v2 ls-refs response")
         if kind != "data" or payload is None:
-            raise ValueError("Unexpected delimiter in protocol-v2 ls-refs response")
-        fields = payload.rstrip(b"\n").decode("utf-8").split(" ")
+            raise ValueError("Unexpected packet in protocol-v2 ls-refs response")
+        try:
+            fields = payload.rstrip(b"\n").decode("utf-8").split(" ")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Invalid UTF-8 in protocol-v2 ls-refs response") from exc
         if len(fields) < 2:
             raise ValueError("Malformed protocol-v2 ls-refs response line")
         oid, name, *attributes = fields
@@ -192,6 +286,9 @@ def parse_ls_refs_response(
                     raise ValueError("Malformed peeled protocol-v2 object id") from exc
                 refs[f"{name}^{{}}"] = peeled.lower()
 
+    if not saw_flush:
+        raise ValueError("protocol-v2 ls-refs response did not end with flush packet")
+
     capability_strings: Set[str] = {
         key if value is None else f"{key}={value}"
         for key, value in capabilities.values.items()
@@ -218,11 +315,17 @@ class SmartHttpV2QueryClient:
         request = urllib.request.Request(
             f"{self.url}/info/refs?{query}",
             headers={
-                "Accept": "application/x-git-upload-pack-advertisement",
+                "Accept": _UPLOAD_PACK_ADVERTISEMENT_MEDIA_TYPE,
                 "Git-Protocol": "version=2",
             },
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            matches = _smart_http_content_type_matches(
+                response,
+                _UPLOAD_PACK_ADVERTISEMENT_MEDIA_TYPE,
+            )
+            if matches is False:
+                return None
             return parse_capability_advertisement(response.read())
 
     def discover_refs(
@@ -245,9 +348,14 @@ class SmartHttpV2QueryClient:
             data=body,
             method="POST",
             headers={
-                "Accept": "application/x-git-upload-pack-result",
-                "Content-Type": "application/x-git-upload-pack-request",
+                "Accept": _UPLOAD_PACK_RESULT_MEDIA_TYPE,
+                "Content-Type": _UPLOAD_PACK_REQUEST_MEDIA_TYPE,
             },
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            _validate_smart_http_content_type(
+                response,
+                _UPLOAD_PACK_RESULT_MEDIA_TYPE,
+                context="upload-pack response",
+            )
             return parse_ls_refs_response(response.read(), capabilities)
