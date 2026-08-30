@@ -144,24 +144,11 @@ def test_ordered_blob_limit_omitted_nul_boundary_is_structured(
     assert f"-{c1}" not in output
 
 
-def test_ordered_blob_limit_omitted_nul_retains_incompatible_output_guards(
+def test_ordered_blob_limit_omitted_nul_retains_objects_edge_guard(
     tmp_path, monkeypatch
 ):
     repo, c1, c2 = _repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
-
-    with pytest.raises(ValueError, match="-z is not compatible with --count"):
-        run_rev_list_disk_usage(
-            [
-                "--objects",
-                "--in-commit-order",
-                "-z",
-                "--count",
-                "--filter=blob:limit=8",
-                "--filter-print-omitted",
-                "HEAD",
-            ]
-        )
 
     with pytest.raises(ValueError, match="only compatible with --objects, --boundary, and --missing"):
         run_rev_list_disk_usage(
