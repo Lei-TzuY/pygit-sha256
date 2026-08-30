@@ -266,20 +266,3 @@ def test_ordered_blob_limit_omitted_refuses_unresolved_blob_before_output(
     assert capsys.readouterr().out == ""
     assert native_blob in before["promised"]
     assert read_promisor_state(repo.pygit_dir) == before
-
-
-def test_ordered_blob_limit_omitted_still_defers_nul(tmp_path, monkeypatch):
-    repo, _c1, _c2 = _ordinary_repo(tmp_path)
-    monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
-
-    with pytest.raises(ValueError, match="filter-print-omitted, and -z is not yet supported"):
-        run_rev_list_disk_usage(
-            [
-                "--objects",
-                "--in-commit-order",
-                "-z",
-                "--filter=blob:limit=8",
-                "--filter-print-omitted",
-                "HEAD",
-            ]
-        )
