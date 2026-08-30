@@ -70,7 +70,7 @@ def test_parse_object_info_size_response_preserves_unknown_oids():
     known = "a" * 40
     missing = "b" * 40
     body = (
-        pkt_line(b"size")
+        pkt_line(b"size\n")
         + pkt_line(f"{known} 123\n".encode())
         + pkt_line(f"{missing} \n".encode())
         + b"0000"
@@ -88,23 +88,23 @@ def test_parse_object_info_size_response_rejects_malformed_protocol():
     oid = "a" * 40
 
     with pytest.raises(ValueError, match="did not begin with size"):
-        parse_object_info_size_response(pkt_line(f"{oid} 1".encode()) + b"0000")
+        parse_object_info_size_response(pkt_line(f"{oid} 1\n".encode()) + b"0000")
 
     with pytest.raises(ValueError, match="Duplicate size attribute"):
         parse_object_info_size_response(
-            pkt_line(b"size") + pkt_line(b"size") + b"0000"
+            pkt_line(b"size\n") + pkt_line(b"size\n") + b"0000"
         )
 
     with pytest.raises(ValueError, match="Malformed protocol-v2 object-info size"):
         parse_object_info_size_response(
-            pkt_line(b"size") + pkt_line(f"{oid} nope".encode()) + b"0000"
+            pkt_line(b"size\n") + pkt_line(f"{oid} nope\n".encode()) + b"0000"
         )
 
     with pytest.raises(ValueError, match="Duplicate protocol-v2 object-info result"):
         parse_object_info_size_response(
-            pkt_line(b"size")
-            + pkt_line(f"{oid} 1".encode())
-            + pkt_line(f"{oid} 1".encode())
+            pkt_line(b"size\n")
+            + pkt_line(f"{oid} 1\n".encode())
+            + pkt_line(f"{oid} 1\n".encode())
             + b"0000"
         )
 
@@ -120,9 +120,9 @@ def test_object_info_http_exchange_queries_sizes_without_pack_fetch(monkeypatch)
         + b"0000"
     )
     object_info = (
-        pkt_line(b"size")
-        + pkt_line(f"{known} 42".encode())
-        + pkt_line(f"{missing} ".encode())
+        pkt_line(b"size\n")
+        + pkt_line(f"{known} 42\n".encode())
+        + pkt_line(f"{missing} \n".encode())
         + b"0000"
     )
     requests = []
@@ -215,7 +215,7 @@ def test_object_info_client_rejects_response_oid_mismatch(monkeypatch):
         + pkt_line(b"object-info\n")
         + b"0000"
     )
-    response = pkt_line(b"size") + pkt_line(f"{other} 1".encode()) + b"0000"
+    response = pkt_line(b"size\n") + pkt_line(f"{other} 1\n".encode()) + b"0000"
 
     class Response:
         def __init__(self, body):
