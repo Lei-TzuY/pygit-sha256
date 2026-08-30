@@ -15,7 +15,9 @@ from . import fetch_configured, fetch_porcelain, fetch_server_option_config
 from .fetch_cli import _default_fetch_remote
 from .fetch_importer import PromisorFilteredNativeImporter
 from .fetch_update_shallow_composition import run_fetch as _run_fetch
+from .promisor import update_promisor_state
 from .protocol_v2_fetch import SmartHttpV2FetchClient, V2FetchResult, build_fetch_request
+from .protocol_v2_object_info import SmartHttpV2ObjectInfoClient
 from .remote import Advertisement, PackParser, SmartHttpClient
 from .tracking import find_repo
 
@@ -134,6 +136,47 @@ def _filtered_v2_fetch(
     )
 
 
+def _record_promisor_sizes(
+    repo,
+    client: SmartHttpClient,
+    native_oids: Sequence[str],
+    *,
+    server_options: Sequence[str] = (),
+) -> None:
+    """Best-effort metadata enrichment for newly discovered promises.
+
+    A successful filtered fetch must not become dependent on the optional
+    ``object-info`` server capability.  Unsupported protocol/capability,
+    malformed metadata, and transport failures therefore leave sizes absent and
+    preserve the existing strict later-consumer behavior.  This helper never
+    falls back to fetching object contents merely to learn a size.
+    """
+
+    requested = tuple(dict.fromkeys(native_oids))
+    if not requested:
+        return
+
+    info = SmartHttpV2ObjectInfoClient(
+        client.url,
+        timeout=client.timeout,
+        server_options=server_options,
+    )
+    try:
+        sizes = info.query_sizes(requested)
+    except (OSError, RuntimeError, ValueError):
+        return
+    if not sizes:
+        return
+
+    trusted = {
+        native_oid: size
+        for native_oid, size in sizes.items()
+        if size is not None
+    }
+    if trusted:
+        update_promisor_state(repo.pygit_dir, sizes=trusted)
+
+
 def _fetch_import_sources_filtered(
     repo,
     client,
@@ -156,7 +199,7 @@ def _fetch_import_sources_filtered(
     active = _ACTIVE_FILTER
     if active is None:
         raise RuntimeError("filtered importer used without an active filter")
-    remote, filter_spec = active
+    remote, filter_spec, server_options = active
     importer = PromisorFilteredNativeImporter(
         repo.store,
         result.objects,
@@ -168,6 +211,12 @@ def _fetch_import_sources_filtered(
         refname: importer.import_oid(native_oid)
         for refname, native_oid in source_oids.items()
     }
+    _record_promisor_sizes(
+        repo,
+        client,
+        importer.promised_native_oids,
+        server_options=server_options,
+    )
     known_by_native.update(importer.converted)
     native_map.update(
         {local_oid: native_oid for native_oid, local_oid in importer.converted.items()}
@@ -175,7 +224,7 @@ def _fetch_import_sources_filtered(
     return imported, len(result.objects)
 
 
-_ACTIVE_FILTER: Optional[Tuple[str, str]] = None
+_ACTIVE_FILTER: Optional[Tuple[str, str, Tuple[str, ...]]] = None
 
 
 @contextmanager
@@ -231,7 +280,7 @@ def partial_filter_transport(
         )
 
     previous_active = _ACTIVE_FILTER
-    _ACTIVE_FILTER = (remote, filter_spec)
+    _ACTIVE_FILTER = (remote, filter_spec, tuple(server_options))
     SmartHttpClient.discover = discover
     SmartHttpClient.fetch = fetch
     fetch_configured._fetch_import_sources = _fetch_import_sources_filtered
