@@ -122,6 +122,7 @@ SHA-256, and stored under `.pygit/objects/`; the staging area is readable JSON.
 - `pygit write-tree` / `pygit commit-tree TREE -p PARENT -m MSG` — Build raw tree and commit objects
 - `pygit update-ref REF NEW_SHA [OLD_SHA]` / `pygit symbolic-ref [NAME [TARGET]]` — Manipulate raw reference targets
 - `pygit rev-list [REVISION] [--count] [--left-right] [--topo-order] [-n N]` — List or count commit SHAs with symmetric difference side markers (`--left-right`)
+- `pygit rev-list --objects[(-edge)] --in-commit-order [--boundary] [--filter=blob:none|blob:limit=<n>[kmg]|object:type=<commit|tree|blob>] [--filter-print-omitted] [--filter-provided-objects] [--missing=<allow-promisor|print|print-info>] [--count] [--reverse] [--no-object-names] REV...` — Metadata-oriented object traversal with Git-style commit/snapshot first-seen ordering, filtering, edge/boundary framing, local SHA-256 omission records (`~<oid>`), and partial-clone missing-object channels. Ordered `blob:limit + --filter-print-omitted` is supported in line mode; ordered `blob:limit` with `-z` remains deliberately deferred because omission framing is a separate compatibility surface.
 
 ### Smart HTTP Remote Sync & SSH Transport
 - `pygit clone URL [DIR] [-b BRANCH] [--single-branch] [--depth N]` — Clone from GitHub or Smart HTTP remotes with single-branch (`--single-branch`) and shallow depth support
