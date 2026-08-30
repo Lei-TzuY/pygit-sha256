@@ -16,8 +16,9 @@ commit/snapshot position. Phase263 adds Git's structured ``-z`` object metadata
 protocol for the ``--objects`` path without changing traversal or SHA domains.
 Phase264 applies ``--filter=blob:none`` directly to the ordered inventory, so
 line, count, boundary, edge, NUL, and promisor behavior share one filter point.
-Explicit negative-revision closure still subtracts snapshot objects without
-removing unrelated top-level presentation frames.
+Phase270 aligns ordered ``-z + --count`` with native Git: structured present
+records are suppressed, explicit missing records remain NUL-framed, and the
+final object count is a regular newline-terminated integer.
 """
 
 from __future__ import annotations
@@ -77,8 +78,6 @@ def _parse(argv: Sequence[str]):
     objects_edge = object_modes[0] == "--objects-edge"
     if nul and objects_edge:
         raise ValueError("rev-list -z is only compatible with --objects, --boundary, and --missing")
-    if nul and "--count" in argv:
-        raise ValueError("rev-list -z is not compatible with --count")
 
     missing = [arg for arg in argv if arg.startswith("--missing=")]
     if len(missing) > 1:
@@ -94,10 +93,6 @@ def _parse(argv: Sequence[str]):
     else:
         mode = "ordinary"
 
-    # Reuse the mature inventory parser with an --objects projection, then keep
-    # ordering/presentation local to this adapter. ``-z`` and object filters are
-    # stripped before projection because both are handled structurally below,
-    # not by the generic promisor line renderer.
     projected: list[str] = []
     for arg in argv:
         if arg in {_IN_COMMIT_ORDER, "-z", _FILTER_PROVIDED} or arg.startswith("--filter="):
@@ -155,12 +150,7 @@ def _commit_frames(repo, parsed) -> Tuple[Tuple[str, bool], ...]:
 def _ordered_inventory(
     repo, parsed
 ) -> Tuple[Tuple[PromisorObjectInventoryEntry, ...], frozenset[str]]:
-    """Build commit/snapshot-interleaved inventory with global object dedupe.
-
-    Boundary commit frames are presentation records and therefore survive
-    explicit negative-revision closure subtraction. Snapshot objects, including
-    path-bearing gitlink commits, remain subject to the normal exclusion closure.
-    """
+    """Build commit/snapshot-interleaved inventory with global object dedupe."""
 
     frames = _commit_frames(repo, parsed)
     if not frames:
@@ -228,14 +218,7 @@ def _dedupe_edge_boundary_overlap(
     boundary_oids: frozenset[str],
     edges: Sequence[str],
 ) -> Tuple[Tuple[PromisorObjectInventoryEntry, ...], frozenset[str]]:
-    """Let a leading object-edge record own any overlapping boundary frame.
-
-    Native Git prints an explicit excluded commit only once when it is both an
-    ``--objects-edge`` record and a ``--boundary`` commit. The edge appears at
-    the front of the output; the later top-level boundary frame is suppressed.
-    Snapshot entries are left untouched so non-overlapping limit boundaries keep
-    their normal commit/snapshot interleaving.
-    """
+    """Let a leading object-edge record own any overlapping boundary frame."""
 
     overlap = frozenset(oid.lower() for oid in edges) & boundary_oids
     if not overlap:
@@ -259,16 +242,7 @@ def _apply_object_filter(
     *,
     parsed,
 ) -> Tuple[PromisorObjectInventoryEntry, ...]:
-    """Apply supported object filters without changing traversal order.
-
-    ``blob:none`` is an output-membership filter, not a traversal-pruning rule:
-    commits and trees must still be walked so later ordered snapshots are known.
-    Filtering the structured inventory after traversal but before rendering also
-    means unresolved promised blobs disappear without materialization or an
-    ordinary missing-object error. ``--filter-provided-objects`` has no visible
-    effect in the current commit-rooted model because provided roots are commits,
-    never blobs, but accepting it preserves Git's option composition contract.
-    """
+    """Apply supported object filters without changing traversal order."""
 
     if not parsed["in_commit_order_filter_blob_none"]:
         return tuple(entries)
@@ -312,6 +286,12 @@ def _render_nul(
             f"missing object {native}; use --missing=allow-promisor, print, or print-info"
         )
 
+    if parsed["count"]:
+        for entry in missing:
+            _nul._emit_missing(entry, mode=mode)
+        print(sum(1 for entry in entries if not entry.missing))
+        return 0
+
     for entry in entries:
         if entry.missing:
             _nul._emit_missing(entry, mode=mode)
@@ -352,9 +332,6 @@ def _render(
             f"missing object {native}; use --missing=allow-promisor, print, or print-info"
         )
 
-    # Native Git emits excluded object edges before the in-commit-order object
-    # stream, even with --reverse and --count. Edge records are presentation
-    # metadata and do not contribute to the present-object count.
     for oid in edges:
         print(f"-{oid}")
 
