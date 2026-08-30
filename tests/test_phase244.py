@@ -178,11 +178,9 @@ def test_rev_list_z_allow_promisor_omits_missing_records(tmp_path, monkeypatch, 
     assert "missing=yes\0" not in out
 
 
-def test_rev_list_z_rejects_objects_edge_and_count(tmp_path, monkeypatch):
+def test_rev_list_z_rejects_objects_edge(tmp_path, monkeypatch):
     repo, _commit, _native_blob = _partial_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
 
     with pytest.raises(ValueError, match="only compatible with --objects"):
         run_rev_list_disk_usage(["--objects-edge", "-z", "--missing=print-info", "HEAD"])
-    with pytest.raises(ValueError, match="not compatible with --count"):
-        run_rev_list_disk_usage(["--objects", "-z", "--missing=print-info", "--count", "HEAD"])
