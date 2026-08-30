@@ -44,6 +44,7 @@ def test_stale_expected_old_oid_aborts_without_partial_publication(tmp_path: Pat
     repo = Repository.init(str(tmp_path / "repo"))
     old = _commit(repo, "a.txt", "one\n", "old")
     repo.branch("existing")
+    repo.checkout("main")
     new = _commit(repo, "a.txt", "two\n", "new")
     certificate = PackfileUriRootCertificate(
         {NATIVE_A: new, NATIVE_B: new},
