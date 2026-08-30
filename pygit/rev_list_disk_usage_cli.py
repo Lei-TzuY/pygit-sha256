@@ -43,11 +43,6 @@ _PRESENTATION_ONLY = {
     "--parents",
     "--children",
     "--no-object-names",
-    # ``--disk-usage`` itself always terminates aggregate/side-channel output
-    # with newlines in native Git.  Selection is easier and safer to parse in
-    # the mature line protocol, so structured NUL rendering is not requested
-    # from the composed traversal.
-    "-z",
 }
 
 
@@ -133,6 +128,12 @@ def _selection_argv(argv: Sequence[str]) -> tuple[list[str], bool, bool]:
     the captured stream remains one object per line. ``--count`` is special:
     native Git prints a zero count before the disk-usage result, but selection
     itself still has to be materialized for accounting.
+
+    Commit-only ``--in-commit-order`` is also a presentation ordering hint. The
+    current ordered object adapter intentionally requires ``--objects`` or
+    ``--objects-edge``; for commit-only disk accounting we can drop only that
+    ordering hint and route through the mature commit walker because membership
+    (and therefore the aggregate) is unchanged.
     """
 
     had_count = "--count" in argv
@@ -142,6 +143,12 @@ def _selection_argv(argv: Sequence[str]) -> tuple[list[str], bool, bool]:
         for arg in argv
         if arg not in _PRESENTATION_ONLY and arg != "--count"
     ]
+    if (
+        "--in-commit-order" in result
+        and "--objects" not in result
+        and "--objects-edge" not in result
+    ):
+        result = [arg for arg in result if arg != "--in-commit-order"]
     return result, had_count, object_edge
 
 
@@ -194,9 +201,9 @@ def run_rev_list_disk_usage(argv: Sequence[str]) -> int:
     """Run rev-list with Git-style ``--disk-usage[=human]`` accounting."""
 
     # Detect disk accounting before any current-stack presentation adapter.
-    # Otherwise an ordered/filter/NUL handler sees the unknown --disk-usage
-    # token and claims the invocation before this aggregate adapter can compose
-    # it.  The selection itself is then delegated back through the same mature
+    # Otherwise an ordered/filter handler sees the unknown --disk-usage token
+    # and claims the invocation before this aggregate adapter can compose it.
+    # The selection itself is then delegated back through the same mature
     # handlers with only the disk-usage token removed.
     enabled, human, cleaned = _parse_mode(argv)
 
@@ -207,6 +214,13 @@ def run_rev_list_disk_usage(argv: Sequence[str]) -> int:
 
     if not enabled:
         return _run_routed(cleaned)
+
+    # Git 2.55 rejects -z with --disk-usage before traversal.  Earlier Git
+    # versions accepted the pair and still printed a newline aggregate, so do
+    # not infer compatibility from older runners: the current target protocol
+    # is the explicit 2.55 rejection.
+    if "-z" in cleaned:
+        raise ValueError("-z option used with unsupported option")
 
     selection_argv, had_count, object_edge = _selection_argv(cleaned)
     code, output = _run_captured(selection_argv)
