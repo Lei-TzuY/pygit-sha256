@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from typing import Optional
 
 import pytest
 
@@ -145,7 +146,9 @@ def test_smart_http_client_requests_and_preserves_unborn(monkeypatch) -> None:
 
     monkeypatch.setattr("pygit.protocol_v2_unborn.urllib.request.urlopen", fake_urlopen)
 
-    result = SmartHttpV2UnbornQueryClient("https://example.invalid/repo").discover_refs_with_unborn()
+    result = SmartHttpV2UnbornQueryClient(
+        "https://example.invalid/repo"
+    ).discover_refs_with_unborn()
 
     assert result is not None
     assert result.unborn == frozenset({"HEAD"})
@@ -156,7 +159,12 @@ def test_smart_http_client_requests_and_preserves_unborn(monkeypatch) -> None:
     assert pkt_line(b"unborn\n") in requests[1].data
 
 
-def _native_upload_pack(repo, request: bytes | None, *, advertise: bool = False) -> bytes:
+def _native_upload_pack(
+    repo,
+    request: Optional[bytes],
+    *,
+    advertise: bool = False,
+) -> bytes:
     env = dict(os.environ)
     env["GIT_PROTOCOL"] = "version=2"
     command = ["git", "upload-pack", "--stateless-rpc"]
