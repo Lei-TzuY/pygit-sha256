@@ -46,7 +46,7 @@ def _validate_unborn_head_target(target: str) -> str:
         or any(
             not component
             or component.startswith(".")
-            or component.endswith(".lock")
+            or component.endswith((".lock", "."))
             for component in components
         )
         or any(
