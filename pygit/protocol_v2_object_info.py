@@ -85,18 +85,35 @@ def build_object_info_size_request(
 
 
 def parse_object_info_size_response(data: bytes) -> Tuple[ObjectSizeInfo, ...]:
-    """Parse the ``size`` attribute header followed by per-OID results."""
+    """Parse one complete ``object-info size`` response.
+
+    Git's protocol-v2 grammar defines an ``object-info`` response as its info
+    pkt-lines followed by one ``flush-pkt``.  Treat that terminator as part of
+    the trusted metadata envelope: truncated responses, response-end/delimiter
+    packets, and bytes after the flush are rejected rather than silently
+    accepting a prefix of a malformed response.
+    """
 
     saw_size = False
     saw_object = False
+    saw_flush = False
     seen: set[str] = set()
     results = []
     offset = 0
 
     while offset < len(data):
         kind, payload, offset = _read_packet(data, offset)
-        if kind in {"flush", "response-end"}:
+        if kind == "flush":
+            saw_flush = True
+            if offset != len(data):
+                raise ValueError(
+                    "Trailing data after protocol-v2 object-info flush packet"
+                )
             break
+        if kind in {"delimiter", "response-end"}:
+            raise ValueError(
+                "Unexpected non-flush terminator in protocol-v2 object-info response"
+            )
         if kind != "data" or payload is None:
             raise ValueError("Unexpected delimiter in protocol-v2 object-info response")
 
@@ -137,6 +154,8 @@ def parse_object_info_size_response(data: bytes) -> Tuple[ObjectSizeInfo, ...]:
 
     if not saw_size:
         raise ValueError("protocol-v2 object-info response omitted size attribute")
+    if not saw_flush:
+        raise ValueError("protocol-v2 object-info response did not end with flush packet")
     return tuple(results)
 
 
