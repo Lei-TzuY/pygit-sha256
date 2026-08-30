@@ -136,6 +136,7 @@ def test_initialize_empty_remote_head_rejects_concrete_and_unborn_head_conflict(
         "refs/heads/topic@{1}",
         "refs/heads/topic empty",
         "refs/heads/topic\\empty",
+        "refs/heads/topic./empty",
     ],
 )
 def test_initialize_empty_remote_head_rejects_invalid_branch_target_before_mutation(
@@ -189,7 +190,7 @@ def test_initialize_empty_remote_head_rejects_local_object_state_without_writing
 
     assert (repo.pygit_dir / "HEAD").read_bytes() == original_head
     assert _object_files(repo) == original_objects
-    assert oid in "".join(original_objects)
+    assert any(path.replace("/", "") == oid for path in original_objects)
 
 
 def test_initialize_empty_remote_head_never_touches_promisor_state(tmp_path) -> None:
