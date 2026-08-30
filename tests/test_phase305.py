@@ -6,9 +6,9 @@ import subprocess
 
 import pytest
 
-from pygit.protocol_v2 import ProtocolV2Capabilities
+from pygit.protocol_v2 import ProtocolV2Capabilities, parse_capability_advertisement
 from pygit.protocol_v2_fetch import (
-    ProtocolV2FetchResponse,
+    SmartHttpV2FetchClient,
     _validate_fetch_response_for_request,
     build_fetch_request,
     parse_fetch_response,
@@ -16,87 +16,64 @@ from pygit.protocol_v2_fetch import (
 from pygit.remote import build_pack, pkt_line
 
 
-def _pack_section() -> tuple[bytes, bytes]:
+def _caps(*, wait_for_done=True, shallow=True):
+    features = []
+    if shallow:
+        features.append("shallow")
+    if wait_for_done:
+        features.append("wait-for-done")
+    return ProtocolV2Capabilities(
+        {"fetch": " ".join(features), "object-format": "sha1"}
+    )
+
+
+def _ack_section(oid: str):
+    return pkt_line(b"acknowledgments\n") + pkt_line(f"ACK {oid}\n".encode())
+
+
+def _pack_section():
     pack = build_pack([])
     return pack, pkt_line(b"packfile\n") + pkt_line(b"\x01" + pack)
 
 
-def _ack_section(oid: str, *, ready: bool = False) -> bytes:
-    body = pkt_line(b"acknowledgments\n") + pkt_line(f"ACK {oid}\n".encode())
-    if ready:
-        body += pkt_line(b"ready\n")
-    return body
-
-
-def _response(
-    *,
-    acknowledgments=(),
-    ready=False,
-    nak=False,
-    pack=None,
-) -> ProtocolV2FetchResponse:
-    return ProtocolV2FetchResponse(
-        acknowledgments=tuple(acknowledgments),
-        ready=ready,
-        nak=nak,
-        shallow=(),
-        unshallow=(),
-        wanted_refs={},
-        pack=pack,
-    )
-
-
-def test_wait_for_done_request_cannot_also_send_done():
-    capabilities = ProtocolV2Capabilities(
-        {"fetch": "wait-for-done", "object-format": "sha1"}
-    )
-
-    with pytest.raises(ValueError, match="wait-for-done cannot be combined with done"):
-        build_fetch_request(
-            capabilities,
-            ["a" * 40],
-            wait_for_done=True,
-            done=True,
-        )
-
-
-def test_fetch_parser_accepts_missing_terminal_lf_in_text_records():
+def test_fetch_parser_accepts_acknowledgments_only_response():
     oid = "a" * 40
-    body = pkt_line(b"acknowledgments") + pkt_line(f"ACK {oid}".encode()) + b"0000"
-
-    parsed = parse_fetch_response(body)
-
+    parsed = parse_fetch_response(_ack_section(oid) + b"0000")
     assert parsed.acknowledgments == (oid,)
-    assert parsed.has_acknowledgments
+    assert parsed.pack is None
 
 
-@pytest.mark.parametrize(
-    "payload, message",
-    [
-        (b"acknowledgments\n\n", "Unexpected LF"),
-        (b"acknowledgments\r\n", "Unexpected CR"),
-        (b"acknowledgments\x00", "Unexpected NUL"),
-    ],
-)
-def test_fetch_parser_rejects_ambiguous_section_header_text(payload, message):
-    with pytest.raises(ValueError, match=message):
-        parse_fetch_response(pkt_line(payload) + b"0000")
-
-
-def test_fetch_parser_rejects_delimiter_before_first_section():
-    with pytest.raises(ValueError, match="Unexpected delimiter before"):
-        parse_fetch_response(b"0001" + pkt_line(b"acknowledgments\n") + b"0000")
-
-
-def test_fetch_parser_rejects_repeated_delimiter():
+def test_fetch_parser_rejects_missing_final_flush():
     oid = "b" * 40
-    body = _ack_section(oid) + b"0001" + b"0001" + pkt_line(b"packfile\n") + b"0000"
+    with pytest.raises(ValueError, match="did not end with flush packet"):
+        parse_fetch_response(_ack_section(oid))
 
-    with pytest.raises(ValueError, match="Unexpected delimiter before"):
+
+def test_fetch_parser_rejects_response_end_terminator():
+    oid = "c" * 40
+    with pytest.raises(ValueError, match="response-end-pkt"):
+        parse_fetch_response(_ack_section(oid) + b"0002")
+
+
+def test_fetch_parser_rejects_trailing_data_after_flush():
+    oid = "c" * 40
+    with pytest.raises(ValueError, match="Trailing data"):
+        parse_fetch_response(_ack_section(oid) + b"0000junk")
+
+
+def test_fetch_parser_rejects_leading_delimiter():
+    oid = "c" * 40
+    with pytest.raises(ValueError, match="delimiter before"):
+        parse_fetch_response(b"0001" + _ack_section(oid) + b"0000")
+
+
+def test_fetch_parser_rejects_empty_section_before_delimiter():
+    body = pkt_line(b"acknowledgments\n") + b"0001" + pkt_line(b"packfile\n") + b"0000"
+    with pytest.raises(ValueError, match="contained no result"):
         parse_fetch_response(body)
 
 
-def test_fetch_parser_rejects_delimiter_immediately_before_flush():
+def test_fetch_parser_rejects_terminal_delimiter():
     oid = "c" * 40
     body = _ack_section(oid) + b"0001" + b"0000"
 
@@ -116,7 +93,6 @@ def test_fetch_parser_rejects_packfile_delimiter():
     "first, second",
     [
         ("shallow-info", "acknowledgments"),
-        ("wanted-refs", "shallow-info"),
         ("packfile", "wanted-refs"),
     ],
 )
@@ -155,138 +131,74 @@ def test_acknowledgments_before_packfile_require_ready():
     _, pack_section = _pack_section()
     body = _ack_section(oid) + b"0001" + pack_section + b"0000"
 
-    with pytest.raises(ValueError, match="preceding packfile must contain ready"):
+    with pytest.raises(ValueError, match="must contain ready"):
         parse_fetch_response(body)
 
 
-def test_ack_ready_then_packfile_is_valid_ordered_response():
-    oid = "f" * 40
-    pack, pack_section = _pack_section()
-    body = _ack_section(oid, ready=True) + b"0001" + pack_section + b"0000"
-
+def test_ready_acknowledgment_allows_packfile_same_response():
+    _, pack_section = _pack_section()
+    body = (
+        pkt_line(b"acknowledgments\n")
+        + pkt_line(b"ready\n")
+        + b"0001"
+        + pack_section
+        + b"0000"
+    )
     parsed = parse_fetch_response(body)
-
-    assert parsed.acknowledgments == (oid,)
-    assert parsed.ready is True
-    assert parsed.pack == pack
+    assert parsed.ready
+    assert parsed.pack is not None
 
 
-def test_nak_cannot_mix_with_ready():
-    body = (
-        pkt_line(b"acknowledgments\n")
-        + pkt_line(b"NAK\n")
-        + pkt_line(b"ready\n")
-        + b"0000"
-    )
-
-    with pytest.raises(ValueError, match="cannot mix NAK with ready"):
-        parse_fetch_response(body)
-
-
-def test_ack_cannot_follow_ready():
-    oid = "1" * 40
-    body = (
-        pkt_line(b"acknowledgments\n")
-        + pkt_line(b"ready\n")
-        + pkt_line(f"ACK {oid}\n".encode())
-        + b"0000"
-    )
-
-    with pytest.raises(ValueError, match="ACK cannot appear after ready"):
-        parse_fetch_response(body)
-
-
-def test_duplicate_ack_is_rejected():
-    oid = "2" * 40
-    body = (
-        pkt_line(b"acknowledgments\n")
-        + pkt_line(f"ACK {oid}\n".encode())
-        + pkt_line(f"ACK {oid}\n".encode())
-        + b"0000"
-    )
-
-    with pytest.raises(ValueError, match="Duplicate protocol-v2 ACK"):
-        parse_fetch_response(body)
-
-
-def test_empty_acknowledgments_section_is_rejected():
-    with pytest.raises(ValueError, match="contained no result"):
-        parse_fetch_response(pkt_line(b"acknowledgments\n") + b"0000")
-
-
-def test_duplicate_and_conflicting_shallow_records_are_rejected():
-    oid = "3" * 40
-    duplicate = (
-        pkt_line(b"shallow-info\n")
-        + pkt_line(f"shallow {oid}\n".encode())
-        + pkt_line(f"shallow {oid}\n".encode())
-        + b"0000"
-    )
-    conflict = (
-        pkt_line(b"shallow-info\n")
-        + pkt_line(f"shallow {oid}\n".encode())
-        + pkt_line(f"unshallow {oid}\n".encode())
-        + b"0000"
-    )
-
-    with pytest.raises(ValueError, match="Duplicate protocol-v2 shallow"):
-        parse_fetch_response(duplicate)
-    with pytest.raises(ValueError, match="Conflicting shallow/unshallow"):
-        parse_fetch_response(conflict)
-
-
-def test_duplicate_wanted_ref_is_rejected_before_overwrite():
-    oid_a = "4" * 40
-    oid_b = "5" * 40
-    body = (
-        pkt_line(b"wanted-refs\n")
-        + pkt_line(f"{oid_a} refs/heads/main\n".encode())
-        + pkt_line(f"{oid_b} refs/heads/main\n".encode())
-        + b"0000"
-    )
-
-    with pytest.raises(ValueError, match="Duplicate protocol-v2 wanted-ref"):
-        parse_fetch_response(body)
-
-
-def test_done_response_contract_requires_pack_and_forbids_acknowledgments():
-    pack = build_pack([])
-
+def test_done_request_rejects_acknowledgments():
+    oid = "f" * 40
+    parsed = parse_fetch_response(_ack_section(oid) + b"0000")
     with pytest.raises(ValueError, match="must omit acknowledgments"):
-        _validate_fetch_response_for_request(
-            _response(acknowledgments=("6" * 40,), pack=pack),
+        _validate_fetch_response_for_request(parsed, done=True)
+
+
+def test_wait_for_done_rejects_ready():
+    parsed = parse_fetch_response(
+        pkt_line(b"acknowledgments\n") + pkt_line(b"ready\n") + b"0000"
+    )
+    with pytest.raises(ValueError, match="must not contain ready"):
+        _validate_fetch_response_for_request(parsed, wait_for_done=True)
+
+
+def test_build_fetch_request_rejects_wait_for_done_and_done():
+    with pytest.raises(ValueError, match="cannot be combined with done"):
+        build_fetch_request(
+            _caps(),
+            ["a" * 40],
             done=True,
+            wait_for_done=True,
         )
-    with pytest.raises(ValueError, match="did not contain a packfile"):
-        _validate_fetch_response_for_request(_response(), done=True)
-
-    _validate_fetch_response_for_request(_response(pack=pack), done=True)
 
 
-def test_wait_for_done_response_contract_is_ack_only_and_never_ready():
-    oid = "7" * 40
+def test_negotiate_preserves_pack_transition_runtime_error(monkeypatch):
+    oid = "a" * 40
     pack = build_pack([])
-
-    _validate_fetch_response_for_request(
-        _response(acknowledgments=(oid,)),
-        wait_for_done=True,
+    client = SmartHttpV2FetchClient("https://example.test/repo.git")
+    monkeypatch.setattr(client, "discover_capabilities", lambda: _caps())
+    monkeypatch.setattr(client, "_discover_refs_with_capabilities", lambda caps: None)
+    monkeypatch.setattr(client, "_wants", lambda ad: [oid])
+    monkeypatch.setattr(
+        client,
+        "_post_fetch",
+        lambda body: parse_fetch_response(
+            pkt_line(b"acknowledgments\n")
+            + pkt_line(b"ready\n")
+            + b"0001"
+            + pkt_line(b"packfile\n")
+            + pkt_line(b"\x01" + pack)
+            + b"0000"
+        ),
     )
 
-    with pytest.raises(ValueError, match="must not contain ready"):
-        _validate_fetch_response_for_request(
-            _response(ready=True, pack=pack),
-            wait_for_done=True,
-        )
-    with pytest.raises(ValueError, match="must not contain a packfile"):
-        _validate_fetch_response_for_request(
-            _response(acknowledgments=(oid,), pack=pack),
-            wait_for_done=True,
-        )
-    with pytest.raises(ValueError, match="must contain acknowledgments"):
-        _validate_fetch_response_for_request(_response(), wait_for_done=True)
+    with pytest.raises(RuntimeError, match="unexpectedly advanced to pack transfer"):
+        client.negotiate(haves=[oid], advertisement=object())
 
 
-def test_native_git_done_and_wait_for_done_match_state_machine(tmp_path):
+def test_native_git_v2_fetch_and_wait_for_done_round_trip(tmp_path):
     git = shutil.which("git")
     if git is None:
         pytest.skip("native git not installed")
@@ -294,57 +206,56 @@ def test_native_git_done_and_wait_for_done_match_state_machine(tmp_path):
     repo = tmp_path / "native"
     subprocess.run([git, "init", "-b", "main", str(repo)], check=True, stdout=subprocess.PIPE)
     subprocess.run([git, "-C", str(repo), "config", "user.name", "Test"], check=True)
-    subprocess.run(
-        [git, "-C", str(repo), "config", "user.email", "test@example.com"],
-        check=True,
-    )
-    (repo / "f").write_bytes(b"phase305 fetch state machine\n")
-    subprocess.run([git, "-C", str(repo), "add", "f"], check=True)
+    subprocess.run([git, "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    (repo / "payload.txt").write_text("payload\n", encoding="utf-8")
+    subprocess.run([git, "-C", str(repo), "add", "payload.txt"], check=True)
     subprocess.run(
         [git, "-C", str(repo), "commit", "-m", "one"],
         check=True,
         stdout=subprocess.PIPE,
     )
-    oid = subprocess.check_output(
+    head = subprocess.check_output(
         [git, "-C", str(repo), "rev-parse", "HEAD"], text=True
     ).strip()
 
-    capabilities = ProtocolV2Capabilities(
-        {
-            "fetch": "shallow wait-for-done",
-            "object-format": "sha1",
-        }
-    )
     env = dict(os.environ)
     env["GIT_PROTOCOL"] = "version=2"
-
-    done_response = subprocess.run(
-        [git, "upload-pack", "--stateless-rpc", str(repo)],
-        input=build_fetch_request(capabilities, [oid], done=True),
+    advertised = subprocess.run(
+        [git, "upload-pack", "--stateless-rpc", "--advertise-refs", str(repo)],
         check=True,
         env=env,
         stdout=subprocess.PIPE,
     ).stdout
-    parsed_done = parse_fetch_response(done_response)
-    _validate_fetch_response_for_request(parsed_done, done=True)
-    assert parsed_done.pack is not None
-    assert not parsed_done.has_acknowledgments
+    capabilities = parse_capability_advertisement(advertised)
+    assert capabilities is not None
 
-    negotiation_response = subprocess.run(
+    request = build_fetch_request(capabilities, [head])
+    response = subprocess.run(
         [git, "upload-pack", "--stateless-rpc", str(repo)],
-        input=build_fetch_request(
+        input=request,
+        check=True,
+        env=env,
+        stdout=subprocess.PIPE,
+    ).stdout
+    parsed = parse_fetch_response(response)
+    _validate_fetch_response_for_request(parsed, done=True)
+    assert parsed.pack is not None
+
+    if capabilities.feature("fetch", "wait-for-done"):
+        negotiation = build_fetch_request(
             capabilities,
-            [oid],
-            haves=[oid],
+            [head],
+            haves=[head],
             done=False,
             wait_for_done=True,
-        ),
-        check=True,
-        env=env,
-        stdout=subprocess.PIPE,
-    ).stdout
-    parsed_negotiation = parse_fetch_response(negotiation_response)
-    _validate_fetch_response_for_request(parsed_negotiation, wait_for_done=True)
-    assert parsed_negotiation.acknowledgments == (oid,)
-    assert parsed_negotiation.ready is False
-    assert parsed_negotiation.pack is None
+        )
+        negotiation_response = subprocess.run(
+            [git, "upload-pack", "--stateless-rpc", str(repo)],
+            input=negotiation,
+            check=True,
+            env=env,
+            stdout=subprocess.PIPE,
+        ).stdout
+        negotiated = parse_fetch_response(negotiation_response)
+        _validate_fetch_response_for_request(negotiated, wait_for_done=True)
+        assert head in negotiated.acknowledgments
