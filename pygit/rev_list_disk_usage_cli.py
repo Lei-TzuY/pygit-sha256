@@ -18,6 +18,7 @@ from .entrypoint import _find_repo
 from .rev_list_filter_blob_limit_cli import try_run_rev_list_blob_limit
 from .rev_list_filter_omitted_cli import try_run_rev_list_filter_print_omitted
 from .rev_list_filter_cli import try_run_rev_list_filter
+from .rev_list_filter_tag_disk_usage_cli import try_run_rev_list_object_type_tag_disk_usage
 from .rev_list_filter_tag_cli import try_run_rev_list_object_type_tag
 from .rev_list_header_cli import run_rev_list_header
 from .rev_list_in_commit_order_blob_limit_cli import (
@@ -151,6 +152,10 @@ def _selected_oids(output: str, *, object_edge: bool) -> tuple[tuple[str, ...], 
 
 def run_rev_list_disk_usage(argv: Sequence[str]) -> int:
     """Run rev-list with Git-style ``--disk-usage[=human]`` accounting."""
+
+    tag_disk_usage_code = try_run_rev_list_object_type_tag_disk_usage(argv)
+    if tag_disk_usage_code is not None:
+        return tag_disk_usage_code
 
     tag_filter_code = try_run_rev_list_object_type_tag(argv)
     if tag_filter_code is not None:
