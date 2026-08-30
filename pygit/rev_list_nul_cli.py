@@ -11,6 +11,11 @@ metadata-only partial-clone traversal. Ordinary ``-z`` never accepts an
 unresolved promise implicitly unless an enclosing object filter removes that
 entry before presentation; otherwise only an explicit ``--missing`` policy may
 handle it.
+
+Phase270 reconciles the historical pygit ``-z + --count`` guard with native Git:
+count suppresses normal object records and is printed afterward as a regular
+newline-terminated integer. Missing records remain structured NUL records and
+are emitted before that integer, matching ``builtin/rev-list.c``.
 """
 
 from __future__ import annotations
@@ -45,8 +50,6 @@ def _parse(argv: Sequence[str]):
 
     if "--objects-edge" in argv:
         raise ValueError("rev-list -z is only compatible with --objects, --boundary, and --missing")
-    if "--count" in argv:
-        raise ValueError("rev-list -z is not compatible with --count")
 
     projected: list[str] = []
     for arg in argv:
@@ -140,6 +143,81 @@ def _filter_entries_by_object_type(
     return tuple(kept)
 
 
+def _boundary_frame_is_kept(
+    oid: str,
+    *,
+    is_boundary: bool,
+    object_type: Optional[str],
+    provided_oids: frozenset[str],
+) -> bool:
+    if object_type is None:
+        return True
+    if is_boundary:
+        return object_type == "commit"
+    return object_type == "commit" or oid.lower() in provided_oids
+
+
+def _preflight_missing(
+    entries: Sequence[PromisorObjectInventoryEntry],
+    *,
+    mode: str,
+) -> None:
+    if mode != "ordinary":
+        return
+    for entry in entries:
+        if entry.missing:
+            native = entry.native_oid or "unknown"
+            raise RuntimeError(
+                f"missing object {native}; use --missing=allow-promisor, print, or print-info"
+            )
+
+
+def _render_count(
+    entries: Sequence[PromisorObjectInventoryEntry],
+    *,
+    parsed,
+    mode: str,
+    boundary_commits,
+    object_type: Optional[str],
+    provided_oids: frozenset[str],
+) -> int:
+    """Render native ``-z + --count`` diagnostics followed by a line count.
+
+    ``-z`` affects object metadata records, not the final count line. Native Git
+    therefore suppresses present-object NUL records, emits any explicit missing
+    records in structured NUL form, and finally prints the integer with ``\n``.
+    """
+
+    _preflight_missing(entries, mode=mode)
+    for entry in entries:
+        if entry.missing:
+            _emit_missing(entry, mode=mode)
+
+    if not parsed["boundary"]:
+        present_count = sum(1 for entry in entries if not entry.missing)
+        print(present_count)
+        return 0
+
+    top_level_count = sum(
+        1
+        for oid, is_boundary in boundary_commits
+        if _boundary_frame_is_kept(
+            oid,
+            is_boundary=is_boundary,
+            object_type=object_type,
+            provided_oids=provided_oids,
+        )
+    )
+    snapshot_count = sum(
+        1
+        for entry in entries
+        if not entry.missing
+        and not (entry.type_name == "commit" and entry.path is None)
+    )
+    print(top_level_count + snapshot_count)
+    return 0
+
+
 def try_run_rev_list_nul(
     argv: Sequence[str],
     *,
@@ -162,6 +240,9 @@ def try_run_rev_list_nul(
     happens before any NUL record is emitted, so nonmatching promised objects
     disappear without fetches and explicitly provided commit roots remain
     visible even when their type differs from the requested filter.
+
+    When ``--count`` is present, normal object records are suppressed and only
+    structured missing diagnostics plus the final newline count are emitted.
     """
     parsed = _parse(argv)
     if parsed is None:
@@ -208,13 +289,26 @@ def try_run_rev_list_nul(
         )
 
     mode = parsed["nul_missing_mode"]
+    if parsed["count"]:
+        return _render_count(
+            entries,
+            parsed=parsed,
+            mode=mode,
+            boundary_commits=boundary_commits,
+            object_type=object_type,
+            provided_oids=provided_oids,
+        )
+
+    _preflight_missing(entries, mode=mode)
     if parsed["boundary"]:
         for oid, is_boundary in boundary_commits:
-            if object_type is not None:
-                if is_boundary and object_type != "commit":
-                    continue
-                if not is_boundary and object_type != "commit" and oid.lower() not in provided_oids:
-                    continue
+            if not _boundary_frame_is_kept(
+                oid,
+                is_boundary=is_boundary,
+                object_type=object_type,
+                provided_oids=provided_oids,
+            ):
+                continue
             if is_boundary:
                 _emit_fields(oid.lower(), "boundary=yes")
             else:
