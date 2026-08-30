@@ -147,7 +147,15 @@ def _parse_ack_line(text: str, acknowledgments: list[str]) -> tuple[bool, bool]:
 
 
 def parse_fetch_response(data: bytes) -> ProtocolV2FetchResponse:
-    """Parse the sectioned response to a protocol-v2 ``fetch`` command."""
+    """Parse one complete sectioned response to a protocol-v2 ``fetch`` command.
+
+    Current Git protocol-v2 defines fetch output as either an acknowledgments
+    section followed by ``flush-pkt`` or a sectioned pack response whose final
+    packfile section is followed by ``flush-pkt``. Treat that terminator as part
+    of the trusted command envelope: EOF without flush, ``response-end-pkt``, and
+    trailing bytes after the flush are rejected rather than accepting a valid
+    looking prefix of a malformed response.
+    """
 
     acknowledgments: list[str] = []
     ready = False
@@ -158,12 +166,20 @@ def parse_fetch_response(data: bytes) -> ProtocolV2FetchResponse:
     pack_chunks: list[bytes] = []
     section: Optional[str] = None
     seen_sections: set[str] = set()
+    saw_flush = False
     offset = 0
 
     while offset < len(data):
         kind, payload, offset = _read_packet(data, offset)
-        if kind in {"flush", "response-end"}:
+        if kind == "flush":
+            saw_flush = True
+            if offset != len(data):
+                raise ValueError("Trailing data after protocol-v2 fetch flush packet")
             break
+        if kind == "response-end":
+            raise ValueError(
+                "Unexpected response-end-pkt in protocol-v2 fetch response"
+            )
         if kind == "delim":
             section = None
             continue
@@ -229,6 +245,9 @@ def parse_fetch_response(data: bytes) -> ProtocolV2FetchResponse:
             if not refname:
                 raise ValueError("Malformed protocol-v2 wanted-refs line")
             wanted_refs[refname] = _validate_sha1_oid(oid, field="wanted-ref")
+
+    if not saw_flush:
+        raise ValueError("protocol-v2 fetch response did not end with flush packet")
 
     if nak and acknowledgments:
         raise ValueError("protocol-v2 acknowledgments cannot contain both ACK and NAK")
