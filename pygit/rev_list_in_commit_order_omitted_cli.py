@@ -1,9 +1,10 @@
 """Compose ``rev-list --in-commit-order`` with filter omission framing.
 
 Phase264 already applies ``blob:none`` directly to the structured ordered object
-inventory.  Phase265 deliberately reuses that implementation for traversal and
+inventory. Phase265 deliberately reuses that implementation for traversal and
 the Phase253-257 omission helpers for the independent ``~<oid>`` channel instead
-of introducing a second object walker or a second wire protocol.
+of introducing a second object walker or a second wire protocol. Phase270
+extends the same composition to native ``-z + --count`` framing.
 """
 
 from __future__ import annotations
@@ -39,15 +40,7 @@ def _filter_spec(argv: Sequence[str]) -> str:
 
 
 def _omission_projection(argv: Sequence[str]) -> list[str]:
-    """Project ordered traversal back onto the mature omission inventory parser.
-
-    The historical line-oriented filter adapter requires an explicit missing
-    policy even for an ordinary repository. The omission collector itself is a
-    metadata-only inventory query, so provide ``allow-promisor`` when the user
-    did not choose a missing mode. This does not change user-visible traversal;
-    it only lets the shared collector classify local/missing entries without a
-    network fetch.
-    """
+    """Project ordered traversal back onto the mature omission inventory parser."""
 
     projected = [
         arg
@@ -62,14 +55,7 @@ def _omission_projection(argv: Sequence[str]) -> list[str]:
 def try_run_rev_list_in_commit_order_filter_print_omitted(
     argv: Sequence[str],
 ) -> Optional[int]:
-    """Render ordered traversal, omissions, missing diagnostics, then count.
-
-    Native rev-list treats ``--filter-print-omitted`` as a presentation channel
-    after ordinary object traversal.  Keeping the ordered traversal captured
-    until the omission set has been validated also guarantees that an unresolved
-    promised blob cannot leak partial output before pygit rejects the unavailable
-    repository-visible SHA-256 identity.
-    """
+    """Render ordered traversal, omissions, missing diagnostics, then count."""
 
     if _IN_COMMIT_ORDER not in argv or _FILTER_PRINT_OMITTED not in argv:
         return None
@@ -99,14 +85,21 @@ def try_run_rev_list_in_commit_order_filter_print_omitted(
 
     projected_output = capture.getvalue()
     if "-z" in cleaned:
-        traversal, missing = _omitted._partition_projected_nul(projected_output)
+        count_line = None
+        if "--count" in cleaned:
+            traversal, missing, count_line = _omitted._partition_projected_nul_count(
+                projected_output
+            )
+        else:
+            traversal, missing = _omitted._partition_projected_nul(projected_output)
         for record in traversal:
             sys.stdout.write(record)
-        # Git's omission loop deliberately stays newline-framed under -z.
         for oid in omitted:
             sys.stdout.write(f"~{oid}\n")
         for record in missing:
             sys.stdout.write(record)
+        if count_line is not None:
+            sys.stdout.write(f"{count_line}\n")
         return code
 
     traversal, missing, count_line = _omitted._partition_projected_lines(
