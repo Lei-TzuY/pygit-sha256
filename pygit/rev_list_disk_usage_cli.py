@@ -16,6 +16,9 @@ from .cat_file import object_disk_size
 from .count_objects_cli import _human_size
 from .entrypoint import _find_repo
 from .rev_list_filter_blob_limit_cli import try_run_rev_list_blob_limit
+from .rev_list_filter_blob_limit_omitted_cli import (
+    try_run_rev_list_blob_limit_filter_print_omitted,
+)
 from .rev_list_filter_omitted_cli import try_run_rev_list_filter_print_omitted
 from .rev_list_filter_cli import try_run_rev_list_filter
 from .rev_list_header_cli import run_rev_list_header
@@ -52,6 +55,7 @@ _ROUTED_HANDLERS: tuple[Callable[[Sequence[str]], int | None], ...] = (
     try_run_rev_list_in_commit_order_object_type,
     try_run_rev_list_in_commit_order_filter_print_omitted,
     try_run_rev_list_in_commit_order,
+    try_run_rev_list_blob_limit_filter_print_omitted,
     try_run_rev_list_blob_limit,
     try_run_rev_list_filter_print_omitted,
     try_run_rev_list_filter,
