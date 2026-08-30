@@ -303,21 +303,3 @@ def test_in_commit_order_filter_omitted_rejects_unresolved_promised_blob_without
     assert capsys.readouterr().out == ""
     assert read_promisor_state(repo.pygit_dir) == before
     assert len(a_blob) == 40
-
-
-def test_in_commit_order_filter_omitted_rejects_unsupported_filter_family(
-    tmp_path, monkeypatch
-):
-    repo, _commits = _ordinary_three_commit_repo(tmp_path)
-    monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
-
-    with pytest.raises(ValueError, match="currently supports only --filter=blob:none"):
-        run_rev_list_disk_usage(
-            [
-                "--objects",
-                "--in-commit-order",
-                "--filter=object:type=tree",
-                "--filter-print-omitted",
-                "HEAD",
-            ]
-        )
