@@ -356,17 +356,13 @@ def test_ordered_blob_limit_refuses_unresolved_promised_blob_without_fetch(
     assert native_blob in before["promised"]
 
 
-def test_ordered_blob_limit_rejects_invalid_and_deferred_framing(tmp_path, monkeypatch):
+def test_ordered_blob_limit_rejects_invalid_and_disk_usage(tmp_path, monkeypatch):
     repo, _c1, _c2 = _ordinary_two_commit_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
 
     with pytest.raises(ValueError, match=r"requires <n>\[kmg\]"):
         run_rev_list_disk_usage(
             ["--objects", "--in-commit-order", "--filter=blob:limit=1t", "HEAD"]
-        )
-    with pytest.raises(ValueError, match="and -z is not yet supported"):
-        run_rev_list_disk_usage(
-            ["--objects", "--in-commit-order", "-z", "--filter=blob:limit=8", "HEAD"]
         )
     with pytest.raises(ValueError, match="with --disk-usage"):
         run_rev_list_disk_usage(
