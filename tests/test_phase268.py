@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
 
 import pytest
 
@@ -283,3 +285,74 @@ def test_ordered_blob_limit_omitted_still_defers_nul(tmp_path, monkeypatch):
                 "HEAD",
             ]
         )
+
+
+def test_native_sha256_git_orders_blob_limit_omission_after_traversal_and_before_count(
+    tmp_path,
+):
+    """Probe the observable Git contract Phase268 intentionally reproduces."""
+
+    native = tmp_path / "native-sha256"
+    init = subprocess.run(
+        ["git", "init", "--object-format=sha256", "-q", str(native)],
+        capture_output=True,
+        text=True,
+    )
+    if init.returncode:
+        pytest.skip(f"native Git lacks SHA-256 repository support: {init.stderr.strip()}")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+    )
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(native), *args],
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    (native / "small.bin").write_bytes(b"sss")
+    git("add", "small.bin")
+    env["GIT_AUTHOR_DATE"] = "@1 +0000"
+    env["GIT_COMMITTER_DATE"] = "@1 +0000"
+    git("commit", "-q", "-m", "small")
+
+    (native / "large.bin").write_bytes(b"LLLLLLLL")
+    git("add", "large.bin")
+    env["GIT_AUTHOR_DATE"] = "@2 +0000"
+    env["GIT_COMMITTER_DATE"] = "@2 +0000"
+    git("commit", "-q", "-m", "large")
+
+    large_oid = git("hash-object", "large.bin")
+    output = git(
+        "rev-list",
+        "--objects",
+        "--in-commit-order",
+        "--filter=blob:limit=8",
+        "--filter-print-omitted",
+        "--no-object-names",
+        "HEAD",
+    ).splitlines()
+    assert output[-1] == f"~{large_oid}"
+    assert all(not line.startswith("~") for line in output[:-1])
+
+    counted = git(
+        "rev-list",
+        "--objects",
+        "--in-commit-order",
+        "--filter=blob:limit=8",
+        "--filter-print-omitted",
+        "--count",
+        "HEAD",
+    ).splitlines()
+    assert counted[-2:] == [f"~{large_oid}", "5"]
