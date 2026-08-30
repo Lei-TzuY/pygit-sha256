@@ -88,11 +88,15 @@ def build_object_info_size_request(
 
 
 def _decode_object_info_record(payload: bytes) -> str:
-    """Decode one textual object-info pkt-line using Git's exact LF grammar."""
+    """Decode one textual object-info pkt-line without accepting loose endings.
 
-    if not payload.endswith(b"\n"):
-        raise ValueError("protocol-v2 object-info record did not end with LF")
-    record = payload[:-1]
+    The published protocol-v2 grammar spells these records with a terminal LF,
+    while native Git 2.55 stateless-rpc emits object-info records without that
+    LF.  Accept both observable forms, but at most one terminal LF; CR, embedded
+    LF, and repeated LF remain malformed.
+    """
+
+    record = payload[:-1] if payload.endswith(b"\n") else payload
     if b"\n" in record or b"\r" in record:
         raise ValueError("Malformed line ending in protocol-v2 object-info response")
     try:
@@ -104,12 +108,10 @@ def _decode_object_info_record(payload: bytes) -> str:
 def parse_object_info_size_response(data: bytes) -> Tuple[ObjectSizeInfo, ...]:
     """Parse one complete ``object-info size`` response.
 
-    Git's protocol-v2 grammar defines an ``object-info`` response as its info
-    pkt-lines followed by one ``flush-pkt``. Treat that terminator as part of
-    the trusted metadata envelope: truncated responses, response-end/delimiter
-    packets, bytes after the flush, and textual records that do not use the
-    mandated single LF terminator are rejected rather than silently accepting a
-    prefix of a malformed response.
+    The command response must remain flush-terminated and its textual pkt-lines
+    must use either native Git's no-LF form or the documented single-terminal-LF
+    form. Truncated envelopes, response-end/delimiter packets, trailing bytes,
+    ambiguous line endings, and extra result fields are rejected.
     """
 
     saw_size = False
