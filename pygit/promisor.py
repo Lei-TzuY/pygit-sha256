@@ -39,21 +39,44 @@ def _path(pygit_dir: Path) -> Path:
     return Path(pygit_dir) / _STATE_FILE
 
 
+def _validate_hex_oid(value: object, *, length: int, field: str) -> None:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    if len(value) != length:
+        raise ValueError(f"{field} must be a full {length * 4}-bit object id")
+    try:
+        int(value, 16)
+    except ValueError as exc:
+        raise ValueError(f"{field} must be a full {length * 4}-bit object id") from exc
+
+
+def _validate_native_oid(native_oid: object, *, field: str) -> None:
+    _validate_hex_oid(native_oid, length=40, field=field)
+
+
+def _validate_local_oid(local_oid: object, *, field: str) -> None:
+    _validate_hex_oid(local_oid, length=64, field=field)
+
+
 def _validate_native_size_oid(native_oid: object) -> None:
     """Require one full remote-native SHA-1 identity for size metadata."""
 
-    if not isinstance(native_oid, str):
-        raise ValueError("promisor size object id must be a string")
-    if len(native_oid) != 40:
-        raise ValueError(
-            "promisor size object id must be a full native SHA-1 object id"
-        )
-    try:
-        int(native_oid, 16)
-    except ValueError as exc:
-        raise ValueError(
-            "promisor size object id must be a full native SHA-1 object id"
-        ) from exc
+    _validate_native_oid(native_oid, field="promisor size object id")
+
+
+def _validate_promised(promised: Mapping[str, object]) -> None:
+    for native_oid, kind in promised.items():
+        _validate_native_oid(native_oid, field="promised native object id")
+        if not isinstance(kind, str) or not kind:
+            raise ValueError(
+                f"promised object kind for {native_oid} must be a non-empty string"
+            )
+
+
+def _validate_resolved(resolved: Mapping[str, object]) -> None:
+    for native_oid, local_oid in resolved.items():
+        _validate_native_oid(native_oid, field="resolved native object id")
+        _validate_local_oid(local_oid, field=f"resolved local object id for {native_oid}")
 
 
 def _validate_sizes(sizes: Mapping[str, object]) -> None:
@@ -63,6 +86,21 @@ def _validate_sizes(sizes: Mapping[str, object]) -> None:
             raise ValueError(
                 f"promisor size for {native_oid} must be a non-negative integer"
             )
+
+
+def _validate_identity_maps(state: Mapping[str, object]) -> None:
+    promised = state.get("promised", {})
+    resolved = state.get("resolved", {})
+    sizes = state.get("sizes", {})
+    if not isinstance(promised, dict):
+        raise ValueError("promisor promised metadata must be an object")
+    if not isinstance(resolved, dict):
+        raise ValueError("promisor resolved metadata must be an object")
+    if not isinstance(sizes, dict):
+        raise ValueError("promisor sizes metadata must be an object")
+    _validate_promised(promised)
+    _validate_resolved(resolved)
+    _validate_sizes(sizes)
 
 
 def read_promisor_state(pygit_dir: Path) -> dict:
@@ -82,13 +120,12 @@ def read_promisor_state(pygit_dir: Path) -> dict:
     data.setdefault("promised", {})
     data.setdefault("resolved", {})
     data.setdefault("sizes", {})
-    if not isinstance(data["sizes"], dict):
-        raise ValueError("promisor sizes metadata must be an object")
-    _validate_sizes(data["sizes"])
+    _validate_identity_maps(data)
     return data
 
 
 def write_promisor_state(pygit_dir: Path, state: Mapping[str, object]) -> None:
+    _validate_identity_maps(state)
     path = _path(pygit_dir)
     payload = json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n"
     fd, name = tempfile.mkstemp(prefix="promisor-", suffix=".lock", dir=str(path.parent))
@@ -113,6 +150,13 @@ def update_promisor_state(
     resolved: Optional[Mapping[str, str]] = None,
     sizes: Optional[Mapping[str, int]] = None,
 ) -> None:
+    if promised:
+        _validate_promised(promised)
+    if resolved:
+        _validate_resolved(resolved)
+    if sizes:
+        _validate_sizes(sizes)
+
     state = read_promisor_state(pygit_dir)
     if remote is not None:
         state["remotes"][remote] = {"filter": filter_spec or ""}
@@ -121,7 +165,6 @@ def update_promisor_state(
             if native_oid not in state["resolved"]:
                 state["promised"][native_oid] = kind
     if sizes:
-        _validate_sizes(sizes)
         for native_oid, size in sizes.items():
             # Size is meaningful only while the native object is an unresolved
             # promise. Ignore stale/unrelated metadata rather than creating a
