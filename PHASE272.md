@@ -6,15 +6,16 @@ Phase272 composes Git-compatible on-disk object accounting with the current SHA-
 
 This phase enables `--disk-usage[=human]` when the selection is produced by the current ordered stack, including composition with:
 
-- `--in-commit-order`
+- commit-only `--in-commit-order`
 - `--objects`
 - `--boundary`
 - `--objects-edge`
 - `--reverse`
 - `--count`
-- `-z`
 - existing object filters, including ordered `blob:limit=<n>[kmg]`
 - `--filter-print-omitted`
+
+Git 2.55 explicitly rejects `-z + --disk-usage`; Phase272 follows that current compatibility boundary instead of preserving the permissive behavior observed in older Git releases.
 
 Normal traversal/object records remain suppressed by disk accounting. Independent edge/omitted/missing side channels remain visible before the final count/aggregate lines.
 
@@ -22,28 +23,31 @@ Normal traversal/object records remain suppressed by disk accounting. Independen
 
 The official `git-rev-list` documentation defines `--disk-usage` as suppressing normal output and reporting the sum of on-disk storage used by the selected commits or, with `--objects`, by the selected objects. `--disk-usage=human` formats that aggregate for humans.
 
-Native SHA-256 Git probes before implementation established several observable details that matter to the adapter:
+Native SHA-256 probes establish the observable details that matter to the adapter:
 
 - `--in-commit-order --disk-usage HEAD` emits one newline-terminated integer and no traversal records.
-- `-z` does not NUL-terminate the aggregate; disk usage still ends with `\n`.
+- `--objects --in-commit-order --disk-usage HEAD` accounts the ordered object selection but still suppresses traversal records.
 - `--reverse` does not change the aggregate because it changes order, not membership.
 - `--count` emits `0\n` before the disk-usage aggregate.
 - `--objects-edge` keeps its leading `-<oid>` edge records, but excluded edges do not contribute to the aggregate.
 - `--boundary` objects are part of the selected inventory and therefore do contribute when requested.
 - `--filter-print-omitted` keeps newline `~<oid>` omission records before the aggregate; omitted objects are not sized.
+- Git 2.55 rejects `-z` with `fatal: -z option used with unsupported option`.
 
-The Phase272 automated native SHA-256 probe locks the newline framing of `-z` disk usage and the `0\n<bytes>\n` count protocol on the GitHub Actions Git version.
+An older local Git 2.47.3 probe accepted `-z + --disk-usage` and still produced a newline aggregate. The authoritative Phase272 target is the CI runner's Git 2.55 behavior, so the automated SHA-256 probe locks the newer rejection rather than carrying the older permissive behavior forward.
 
 ## Implementation
 
-`rev_list_disk_usage_cli` now detects `--disk-usage` before any ordered/filter/NUL presentation adapter can claim the invocation. It then removes only the disk-accounting/presentation-only tokens and routes the remaining selection arguments through the same current-stack dispatcher used by normal `rev-list`.
+`rev_list_disk_usage_cli` detects `--disk-usage` before any ordered/filter presentation adapter can claim the invocation. It then removes only the disk-accounting and presentation-only tokens and routes the remaining selection arguments through the same current-stack dispatcher used by normal `rev-list`.
 
 That routing is factored into `_run_routed()`. Disk accounting captures its line-oriented selection and projects it into two channels:
 
 1. genuine local 64-hex SHA-256 object IDs that are passed to `object_disk_size()` exactly once per selected object;
 2. independent side-channel records such as leading `--objects-edge` records and `~`/`?` diagnostics, which are preserved but never sized.
 
-`-z` is intentionally stripped from the internal selection projection. Native Git's disk-usage aggregate and its surviving edge/omission channels remain newline-framed even when the user supplies `-z`; requesting structured NUL traversal internally would add no information and would make aggregate selection parsing less robust.
+The current ordered object adapter intentionally requires `--objects` or `--objects-edge`. For commit-only `--in-commit-order --disk-usage`, Phase272 removes only the ordering hint before delegating to the mature commit walker. This is safe because disk usage depends on the selected commit set, not its output order.
+
+`-z` is validated before traversal and rejected for disk accounting, matching Git 2.55.
 
 ## SHA-256-native boundary
 
@@ -59,20 +63,20 @@ On-disk size accounting continues to use the existing validated loose/pack/alter
 
 ## Compatibility matrix
 
-For a deterministic local repository, Phase272 regression coverage verifies:
+For deterministic local repositories, Phase272 regression coverage verifies:
 
 ```text
 --in-commit-order --disk-usage HEAD
 --objects --in-commit-order --disk-usage HEAD
---objects --in-commit-order --disk-usage -z HEAD
 --objects --in-commit-order --disk-usage --reverse HEAD
 --in-commit-order --disk-usage --count HEAD
 --objects-edge --in-commit-order --disk-usage <old>..<new>
---objects --in-commit-order --disk-usage -z \
+--objects --in-commit-order --disk-usage \
   --filter=blob:limit=8 --filter-print-omitted HEAD
+--objects --in-commit-order --disk-usage -z HEAD  => rejected on Git 2.55
 ```
 
-The tests use unit disk sizes for deterministic membership assertions and a separate native SHA-256 Git probe for external framing compatibility. The full repository test suite remains the final regression gate.
+The tests use unit disk sizes for deterministic membership assertions and a separate native SHA-256 Git probe for external protocol compatibility. The full repository test suite remains the final regression gate.
 
 ## Deferred work
 
