@@ -15,8 +15,11 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple
 from .protocol_v2 import (
     ProtocolV2Capabilities,
     SmartHttpV2QueryClient,
+    _UPLOAD_PACK_REQUEST_MEDIA_TYPE,
+    _UPLOAD_PACK_RESULT_MEDIA_TYPE,
     _command_prefix,
     _read_packet,
+    _validate_smart_http_content_type,
     build_ls_refs_request,
     parse_ls_refs_response,
 )
@@ -286,11 +289,16 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
             data=body,
             method="POST",
             headers={
-                "Accept": "application/x-git-upload-pack-result",
-                "Content-Type": "application/x-git-upload-pack-request",
+                "Accept": _UPLOAD_PACK_RESULT_MEDIA_TYPE,
+                "Content-Type": _UPLOAD_PACK_REQUEST_MEDIA_TYPE,
             },
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            _validate_smart_http_content_type(
+                response,
+                _UPLOAD_PACK_RESULT_MEDIA_TYPE,
+                context="upload-pack response",
+            )
             return parse_ls_refs_response(response.read(), capabilities)
 
     def _post_fetch(self, body: bytes) -> ProtocolV2FetchResponse:
@@ -299,11 +307,16 @@ class SmartHttpV2FetchClient(SmartHttpV2QueryClient):
             data=body,
             method="POST",
             headers={
-                "Accept": "application/x-git-upload-pack-result",
-                "Content-Type": "application/x-git-upload-pack-request",
+                "Accept": _UPLOAD_PACK_RESULT_MEDIA_TYPE,
+                "Content-Type": _UPLOAD_PACK_REQUEST_MEDIA_TYPE,
             },
         )
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            _validate_smart_http_content_type(
+                response,
+                _UPLOAD_PACK_RESULT_MEDIA_TYPE,
+                context="upload-pack response",
+            )
             return parse_fetch_response(response.read())
 
     @staticmethod
