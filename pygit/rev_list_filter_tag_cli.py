@@ -1,13 +1,15 @@
-"""Annotated-tag-aware ``rev-list --filter=object:type=tag`` adapter.
+"""Annotated-tag-aware ``rev-list object:type`` composition.
 
 The existing metadata-only object inventory is commit-rooted and deliberately
-omits annotated tag objects.  Git still treats annotated tags named by positive
-revision arguments (and by ``--all`` refs) as reachable objects.  This adapter
-adds that missing object family without changing commit/tree/blob traversal.
+omits annotated tag objects. Git nevertheless walks annotated tags named by
+positive revision arguments (and by ``--all`` refs), and those tag objects are
+also "provided objects" that bypass object filters unless
+``--filter-provided-objects`` is requested.
 
-Phase273 intentionally scopes the new tag traversal to line-oriented and count
-output.  Structured ``-z`` placement and ``--in-commit-order`` tag placement are
-left to focused follow-up phases instead of silently emitting the wrong order.
+Phase273 adds that missing object family for line-oriented and count output. It
+also enables ``object:type=tag`` itself. Structured ``-z`` and
+``--in-commit-order`` tag placement remain explicit follow-up work rather than
+silently emitting an incorrect order.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from .revision import resolve_revision
 _FILTER_PROVIDED = "--filter-provided-objects"
 _FILTER_PRINT_OMITTED = "--filter-print-omitted"
 _IN_COMMIT_ORDER = "--in-commit-order"
+_SUPPORTED_OBJECT_TYPES = {"commit", "tree", "blob", "tag"}
 _SUPPORTED_MISSING = {
     "--missing=allow-promisor",
     "--missing=print",
@@ -31,16 +34,20 @@ _SUPPORTED_MISSING = {
 }
 
 
-def _is_tag_filter(argv: Sequence[str]) -> bool:
+def _requested_object_type(argv: Sequence[str]) -> Optional[str]:
     filters = [arg for arg in argv if arg.startswith("--filter=")]
     if not filters:
-        return False
+        return None
     if len(filters) != 1:
         raise ValueError("rev-list accepts exactly one --filter action in this phase")
-    return filters[0].split("=", 1)[1] == "object:type=tag"
+    spec = filters[0].split("=", 1)[1]
+    if not spec.startswith("object:type="):
+        return None
+    requested = spec.split("=", 1)[1]
+    return requested if requested in _SUPPORTED_OBJECT_TYPES else None
 
 
-def _project(argv: Sequence[str]) -> list[str]:
+def _project_line(argv: Sequence[str], *, requested: str) -> list[str]:
     projected = [
         arg
         for arg in argv
@@ -50,9 +57,25 @@ def _project(argv: Sequence[str]) -> list[str]:
     missing = [arg for arg in projected if arg.startswith("--missing=")]
     if len(missing) != 1 or missing[0] not in _SUPPORTED_MISSING:
         raise ValueError(
-            "--filter=object:type=tag currently requires --missing=allow-promisor, print, or print-info"
+            f"--filter=object:type={requested} currently requires "
+            "--missing=allow-promisor, print, or print-info"
         )
     return projected
+
+
+def _parse_projection(argv: Sequence[str]):
+    """Parse selection independent of framing so tag roots can be discovered."""
+
+    projected = [
+        arg
+        for arg in argv
+        if not arg.startswith("--filter=")
+        and arg not in {_FILTER_PROVIDED, _FILTER_PRINT_OMITTED, "-z", _IN_COMMIT_ORDER}
+        and not (arg == "--disk-usage" or arg.startswith("--disk-usage="))
+    ]
+    if not any(arg.startswith("--missing=") for arg in projected):
+        projected.append("--missing=allow-promisor")
+    return _filter._parse_inventory_request(projected)
 
 
 def _positive_object_expressions(repo, parsed) -> Tuple[str, ...]:
@@ -105,80 +128,141 @@ def _annotated_tag_entries(repo, parsed) -> Tuple[Tuple[str, str], ...]:
     return tuple(output)
 
 
-def _print_tag_entries(entries: Sequence[Tuple[str, str]], *, no_object_names: bool) -> None:
-    for oid, name in entries:
-        print(oid if no_object_names else f"{oid} {name}")
+def _tag_lines(entries: Sequence[Tuple[str, str]], *, no_object_names: bool) -> list[str]:
+    return [oid if no_object_names else f"{oid} {name}" for oid, name in entries]
+
+
+def _is_edge_or_provided_commit(repo, line: str, *, provided, edges) -> bool:
+    prefix, oid = _filter._line_oid(line)
+    if prefix == "-" and oid in edges:
+        return True
+    if prefix != "" or oid not in provided:
+        return False
+    return _filter._local_type(repo, oid) == "commit"
+
+
+def _compose_lines(
+    repo,
+    lines: Sequence[str],
+    *,
+    requested: str,
+    provided,
+    edges,
+    tag_lines: Sequence[str],
+) -> list[str]:
+    kept = [
+        line
+        for line in lines
+        if _filter._keep_object_type_line(
+            repo,
+            line,
+            requested=requested,
+            provided=provided,
+            edges=edges,
+        )
+    ]
+    if not tag_lines:
+        return kept
+    if requested == "commit":
+        return [*kept, *tag_lines]
+
+    insert_at = 0
+    while insert_at < len(kept) and _is_edge_or_provided_commit(
+        repo,
+        kept[insert_at],
+        provided=provided,
+        edges=edges,
+    ):
+        insert_at += 1
+    return [*kept[:insert_at], *tag_lines, *kept[insert_at:]]
 
 
 def try_run_rev_list_object_type_tag(argv: Sequence[str]) -> Optional[int]:
-    """Handle line/count ``object:type=tag`` without materialization."""
+    """Compose annotated-tag roots with supported line/count object filters."""
 
-    if not _is_tag_filter(argv):
+    requested = _requested_object_type(argv)
+    if requested is None:
         return None
     if argv.count(_FILTER_PRINT_OMITTED) > 1:
         raise ValueError("rev-list accepts --filter-print-omitted at most once")
+
+    repo = _filter._promisor._find_repo()
+    discovery = _parse_projection(argv)
+    discovered_tags = _annotated_tag_entries(repo, discovery)
+    filter_provided = _FILTER_PROVIDED in argv
+    emitted_tags = (
+        discovered_tags
+        if requested == "tag" or not filter_provided
+        else ()
+    )
+
+    # Existing commit/tree/blob paths remain authoritative when there are no
+    # annotated-tag objects to add. This keeps Phase273 narrowly compositional.
+    if requested != "tag" and not emitted_tags:
+        return None
+
     if "-z" in argv:
         raise ValueError(
-            "rev-list --filter=object:type=tag with -z is not yet supported; tag NUL placement is not modelled"
+            "rev-list object:type with annotated tags and -z is not yet supported; tag NUL placement is not modelled"
         )
     if _IN_COMMIT_ORDER in argv:
         raise ValueError(
-            "rev-list --filter=object:type=tag with --in-commit-order is not yet supported; ordered tag placement is not modelled"
+            "rev-list object:type with annotated tags and --in-commit-order is not yet supported; ordered tag placement is not modelled"
         )
     if any(arg == "--disk-usage" or arg.startswith("--disk-usage=") for arg in argv):
         raise ValueError(
-            "rev-list --filter=object:type=tag with --disk-usage is not yet supported"
+            "rev-list object:type with annotated tags and --disk-usage is not yet supported"
         )
 
-    filter_provided = _FILTER_PROVIDED in argv
-    projected = _project(argv)
-    repo = _filter._promisor._find_repo()
+    projected = _project_line(argv, requested=requested)
     parsed, provided, edges = _filter._object_type_context(
         repo,
         projected,
         filter_provided_objects=filter_provided,
     )
-    tag_entries = _annotated_tag_entries(repo, parsed)
     code, lines = _filter._run_projected(projected)
     count_mode = "--count" in projected
 
     if count_mode:
         if not lines:
-            raise RuntimeError("rev-list object:type=tag count projection produced no output")
+            raise RuntimeError("rev-list object:type count projection produced no output")
         try:
             int(lines[-1])
         except ValueError as exc:
             raise RuntimeError(
-                "rev-list object:type=tag count projection did not end with an integer"
+                "rev-list object:type count projection did not end with an integer"
             ) from exc
-        for line in lines[:-1]:
-            if _filter._keep_object_type_line(
-                repo,
-                line,
-                requested="tag",
-                provided=provided,
-                edges=edges,
-            ):
-                print(line)
+        for line in _compose_lines(
+            repo,
+            lines[:-1],
+            requested=requested,
+            provided=provided,
+            edges=edges,
+            tag_lines=(),
+        ):
+            print(line)
         base_count = _filter._object_type_present_count(
             repo,
             projected,
-            requested="tag",
+            requested=requested,
             parsed=parsed,
             provided=provided,
             edges=edges,
         )
-        print(base_count + len(tag_entries))
+        print(base_count + len(emitted_tags))
         return code
 
-    for line in lines:
-        if _filter._keep_object_type_line(
-            repo,
-            line,
-            requested="tag",
-            provided=provided,
-            edges=edges,
-        ):
-            print(line)
-    _print_tag_entries(tag_entries, no_object_names=parsed["no_object_names"])
+    composed = _compose_lines(
+        repo,
+        lines,
+        requested=requested,
+        provided=provided,
+        edges=edges,
+        tag_lines=_tag_lines(
+            emitted_tags,
+            no_object_names=parsed["no_object_names"],
+        ),
+    )
+    for line in composed:
+        print(line)
     return code
