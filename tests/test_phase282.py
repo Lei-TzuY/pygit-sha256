@@ -258,23 +258,27 @@ def test_plain_blob_limit_nul_missing_size_fails_before_output(
     assert capsys.readouterr().out == ""
 
 
-def test_plain_blob_limit_nul_omitted_output_remains_deferred(
-    tmp_path, monkeypatch
+def test_plain_blob_limit_nul_omitted_output_composes_with_followup(
+    tmp_path, monkeypatch, capsys
 ):
-    repo, _commit_oid, _tree_oid, _blobs = _ordinary_repo(tmp_path)
+    repo, _commit_oid, _tree_oid, blobs = _ordinary_repo(tmp_path)
     _route_repo(monkeypatch, repo)
+    capsys.readouterr()
 
-    with pytest.raises(ValueError, match="blob:limit with -z is not yet supported"):
-        run_rev_list_disk_usage(
-            [
-                "--objects",
-                "-z",
-                "--filter=blob:limit=8",
-                "--filter-print-omitted",
-                "--missing=allow-promisor",
-                "HEAD",
-            ]
-        )
+    assert run_rev_list_disk_usage(
+        [
+            "--objects",
+            "-z",
+            "--filter=blob:limit=8",
+            "--filter-print-omitted",
+            "--missing=allow-promisor",
+            "--no-object-names",
+            "HEAD",
+        ]
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert output.endswith(f"~{blobs['large.bin']}\n")
 
 
 def test_plain_blob_limit_nul_keeps_existing_objects_edge_rejection(
