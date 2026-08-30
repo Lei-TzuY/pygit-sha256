@@ -26,12 +26,16 @@ from .protocol_v2 import (
 from .remote import Advertisement, FetchResult, PackParser
 
 
+# Git's documented fetch grammar lists shallow-info before wanted-refs, while
+# native Git 2.55.0 emits wanted-refs before shallow-info when ref-in-want and
+# shallow cutoffs are combined. Treat those two optional metadata sections as
+# one ordering tier while keeping acknowledgments first and pack transfer last.
 _FETCH_SECTION_ORDER = {
     "acknowledgments": 0,
     "shallow-info": 1,
-    "wanted-refs": 2,
-    "packfile-uris": 3,
-    "packfile": 4,
+    "wanted-refs": 1,
+    "packfile-uris": 2,
+    "packfile": 3,
 }
 
 
@@ -213,11 +217,11 @@ def _validate_fetch_response_for_request(
 def parse_fetch_response(data: bytes) -> ProtocolV2FetchResponse:
     """Parse one complete sectioned response to a protocol-v2 ``fetch`` command.
 
-    Git's current grammar permits either one acknowledgments-only response or a
-    strictly ordered section stream ending in ``packfile``. Delimiter packets
-    separate sections; they cannot appear before the first section, repeat, or
-    follow the final packfile section. The final response terminator is one
-    flush-pkt, with no trailing bytes.
+    Git's documented grammar orders shallow-info before wanted-refs, but native
+    Git 2.55.0 emits those two optional metadata sections in the reverse order
+    for combined ref-in-want shallow fetches. Both orders are accepted, while
+    acknowledgments must remain before metadata and pack transfer must remain
+    after it. Delimiter and final-flush framing stay strict.
     """
 
     acknowledgments: list[str] = []
@@ -294,7 +298,7 @@ def parse_fetch_response(data: bytes) -> ProtocolV2FetchResponse:
                 raise ValueError(f"Duplicate protocol-v2 fetch section: {header}")
 
             rank = _FETCH_SECTION_ORDER[header]
-            if rank <= last_section_rank:
+            if rank < last_section_rank:
                 raise ValueError(
                     f"Out-of-order protocol-v2 fetch section: {header}"
                 )
