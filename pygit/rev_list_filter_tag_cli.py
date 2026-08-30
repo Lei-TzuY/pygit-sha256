@@ -6,7 +6,7 @@ positive revision arguments (and by ``--all`` refs), and those tag objects are
 also "provided objects" that bypass object filters unless
 ``--filter-provided-objects`` is requested.
 
-Phase273 adds that missing object family for line-oriented and count output. It
+Phase274 adds that missing object family for line-oriented and count output. It
 also enables ``object:type=tag`` itself. Structured ``-z`` and
 ``--in-commit-order`` tag placement remain explicit follow-up work rather than
 silently emitting an incorrect order.
@@ -190,28 +190,27 @@ def try_run_rev_list_object_type_tag(argv: Sequence[str]) -> Optional[int]:
     discovery = _parse_projection(argv)
     discovered_tags = _annotated_tag_entries(repo, discovery)
     filter_provided = _FILTER_PROVIDED in argv
-    emitted_tags = (
-        discovered_tags
-        if requested == "tag" or not filter_provided
-        else ()
-    )
+    emitted_tags = discovered_tags if requested == "tag" or not filter_provided else ()
 
     # Existing commit/tree/blob paths remain authoritative when there are no
-    # annotated-tag objects to add. This keeps Phase273 narrowly compositional.
+    # annotated-tag objects to add. This keeps Phase274 narrowly compositional.
     if requested != "tag" and not emitted_tags:
         return None
 
     if "-z" in argv:
         raise ValueError(
-            "rev-list object:type with annotated tags and -z is not yet supported; tag NUL placement is not modelled"
+            f"rev-list object:type={requested} with annotated tags and -z is not yet supported; "
+            "tag NUL placement is not modelled"
         )
     if _IN_COMMIT_ORDER in argv:
         raise ValueError(
-            "rev-list object:type with annotated tags and --in-commit-order is not yet supported; ordered tag placement is not modelled"
+            f"rev-list object:type={requested} with annotated tags and --in-commit-order is not yet supported; "
+            "ordered tag placement is not modelled"
         )
     if any(arg == "--disk-usage" or arg.startswith("--disk-usage=") for arg in argv):
         raise ValueError(
-            "rev-list object:type with annotated tags and --disk-usage is not yet supported"
+            f"rev-list object:type={requested} with --disk-usage is not yet supported; "
+            "annotated-tag disk accounting is not modelled"
         )
 
     projected = _project_line(argv, requested=requested)
@@ -258,10 +257,7 @@ def try_run_rev_list_object_type_tag(argv: Sequence[str]) -> Optional[int]:
         requested=requested,
         provided=provided,
         edges=edges,
-        tag_lines=_tag_lines(
-            emitted_tags,
-            no_object_names=parsed["no_object_names"],
-        ),
+        tag_lines=_tag_lines(emitted_tags, no_object_names=parsed["no_object_names"]),
     )
     for line in composed:
         print(line)
