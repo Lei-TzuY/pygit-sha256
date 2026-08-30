@@ -233,7 +233,7 @@ def test_plain_blob_limit_nul_missing_then_count_order(tmp_path, monkeypatch, ca
     ) == 0
 
     output = capsys.readouterr().out
-    assert output == f"{native_blob}\0missing=yes\0path=f.txt\0type=blob\02\n"
+    assert output == f"{native_blob}\0missing=yes\0path=f.txt\0type=blob\0" + "2\n"
 
 
 def test_plain_blob_limit_nul_missing_size_fails_before_output(
