@@ -18,7 +18,10 @@ from weakref import WeakKeyDictionary
 
 from .fetch_server_option_config import configured_server_options
 from .promisor import promised_size, read_promisor_state, update_promisor_state
-from .protocol_v2_object_info import SmartHttpV2ObjectInfoClient
+from .protocol_v2_object_info import (
+    ObjectInfoUnsupportedError,
+    SmartHttpV2ObjectInfoClient,
+)
 
 
 OBJECT_INFO_SIZE_BATCH = 256
@@ -109,11 +112,15 @@ def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
     partial clone cannot create an unbounded protocol request.  Clients are
     reused while the same Repository object and effective remote configuration
     remain alive, allowing Phase287's capability cache to span repeated refresh
-    calls without persisting negotiation state on disk. A client that raises a
-    transport/protocol/query exception is evicted before trying the next remote,
-    so a later refresh can create a fresh session instead of inheriting a failed
-    cached client. Query failures are intentionally soft because the caller owns
-    the final strictness policy.
+    calls without persisting negotiation state on disk.
+
+    A client that raises a transport/protocol/query exception is evicted before
+    trying the next remote, so a later refresh can create a fresh session instead
+    of inheriting a failed cached client.  A protocol-v2 server that explicitly
+    lacks the ``object-info`` capability is different: its successful capability
+    advertisement is retained, so later refreshes can reuse that stable negative
+    result without another discovery request.  Query failures are intentionally
+    soft because the caller owns the final strictness policy.
 
     The returned mapping contains every requested OID whose trusted size is
     available after the refresh, whether it was already persisted or learned by
@@ -147,6 +154,12 @@ def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
         for batch in _chunked_oids(tuple(sorted(pending))):
             try:
                 sizes = client.query_sizes(batch)
+            except ObjectInfoUnsupportedError:
+                # Capability discovery succeeded and the negative capability is
+                # already cached inside this client. Retain it so a later refresh
+                # does not renegotiate the same stable absence.
+                remote_failed = True
+                break
             except (OSError, RuntimeError, ValueError):
                 _evict_object_info_client(repo, remote, url, server_options, client)
                 remote_failed = True
