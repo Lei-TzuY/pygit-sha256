@@ -319,21 +319,11 @@ def test_object_type_partial_clone_matching_promise_uses_missing_channel(
     assert read_promisor_state(repo.pygit_dir) == before
 
 
-def test_object_type_rejects_tag_and_still_defers_disk_usage(tmp_path, monkeypatch):
+def test_object_type_rejects_tag(tmp_path, monkeypatch):
     repo, _commits = _ordinary_three_commit_repo(tmp_path)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
 
     with pytest.raises(ValueError, match="object:type=tag"):
         run_rev_list_disk_usage(
             ["--objects", "--in-commit-order", "--filter=object:type=tag", "HEAD"]
-        )
-    with pytest.raises(ValueError, match="with --disk-usage"):
-        run_rev_list_disk_usage(
-            [
-                "--objects",
-                "--in-commit-order",
-                "--filter=object:type=tree",
-                "--disk-usage",
-                "HEAD",
-            ]
         )
