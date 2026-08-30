@@ -41,6 +41,7 @@ def _snapshot(repo: Repository, commit_oid: str):
 
 
 def _route_repo(monkeypatch, repo: Repository):
+    monkeypatch.setattr("pygit.rev_list_cli._find_repo", lambda: repo)
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
     monkeypatch.setattr("pygit.rev_list_disk_usage_cli._find_repo", lambda: repo)
 
