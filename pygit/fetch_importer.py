@@ -147,6 +147,12 @@ class PromisorFilteredNativeImporter(TagPreservingNativeImporter):
         self._tree_references: Set[str] = set()
         self._promised: dict[str, str] = {}
 
+    @property
+    def promised_native_oids(self) -> Tuple[str, ...]:
+        """Return unresolved native promises discovered while importing trees."""
+
+        return tuple(sorted(self._promised))
+
     def _dependencies(self, obj: NativeObject) -> List[str]:
         if obj.type_name != "tree":
             return super()._dependencies(obj)
