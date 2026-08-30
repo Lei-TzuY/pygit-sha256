@@ -79,10 +79,10 @@ def test_refresh_skips_persisted_sizes_before_chunking(tmp_path, monkeypatch):
 def test_chunk_failure_stops_remote_and_falls_back_with_remaining_set(tmp_path, monkeypatch):
     native_oids = tuple(f"{value:040x}" for value in range(20, 25))
     repo = _repo_with_promises(tmp_path, *native_oids)
-    repo.add_remote("backup", "https://example.invalid/backup.git")
+    repo.add_remote("zbackup", "https://example.invalid/backup.git")
     update_promisor_state(
         repo.pygit_dir,
-        remote="backup",
+        remote="zbackup",
         filter_spec="blob:none",
     )
     calls = []
@@ -104,10 +104,6 @@ def test_chunk_failure_stops_remote_and_falls_back_with_remaining_set(tmp_path, 
     result = refresh.refresh_promisor_sizes(repo, native_oids)
 
     assert calls == [
-        ("https://example.invalid/backup.git", native_oids[0:2]),
-        ("https://example.invalid/backup.git", native_oids[2:4]),
-        ("https://example.invalid/backup.git", native_oids[4:5]),
-    ] or calls == [
         ("https://example.invalid/origin.git", native_oids[0:2]),
         ("https://example.invalid/backup.git", native_oids[0:2]),
         ("https://example.invalid/backup.git", native_oids[2:4]),
