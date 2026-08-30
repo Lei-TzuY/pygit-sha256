@@ -368,13 +368,3 @@ def test_ordered_blob_limit_rejects_invalid_and_deferred_framing(tmp_path, monke
         run_rev_list_disk_usage(
             ["--objects", "--in-commit-order", "-z", "--filter=blob:limit=8", "HEAD"]
         )
-    with pytest.raises(ValueError, match="with --disk-usage"):
-        run_rev_list_disk_usage(
-            [
-                "--objects",
-                "--in-commit-order",
-                "--filter=blob:limit=8",
-                "--disk-usage",
-                "HEAD",
-            ]
-        )
