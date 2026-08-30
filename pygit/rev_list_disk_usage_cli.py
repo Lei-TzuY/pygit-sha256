@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import io
 from contextlib import redirect_stdout
-from typing import Sequence
+from typing import Callable, Sequence
 
 from .cat_file import object_disk_size
 from .count_objects_cli import _human_size
@@ -43,7 +43,27 @@ _PRESENTATION_ONLY = {
     "--parents",
     "--children",
     "--no-object-names",
+    # ``--disk-usage`` itself always terminates aggregate/side-channel output
+    # with newlines in native Git.  Selection is easier and safer to parse in
+    # the mature line protocol, so structured NUL rendering is not requested
+    # from the composed traversal.
+    "-z",
 }
+
+
+_ROUTED_HANDLERS: tuple[Callable[[Sequence[str]], int | None], ...] = (
+    try_run_rev_list_in_commit_order_blob_limit_omitted,
+    try_run_rev_list_in_commit_order_blob_limit,
+    try_run_rev_list_in_commit_order_object_type,
+    try_run_rev_list_in_commit_order_filter_print_omitted,
+    try_run_rev_list_in_commit_order,
+    try_run_rev_list_blob_limit,
+    try_run_rev_list_filter_print_omitted,
+    try_run_rev_list_filter,
+    try_run_rev_list_nul,
+    try_run_rev_list_missing_print,
+    try_run_rev_list_allow_promisor,
+)
 
 
 def _decorate_help(text: str) -> str:
@@ -66,11 +86,21 @@ def _decorate_help(text: str) -> str:
     return text[:line_end] + insertion + text[line_end:]
 
 
+def _run_routed(argv: Sequence[str]) -> int:
+    """Run the current rev-list stack without re-entering disk accounting."""
+
+    for handler in _ROUTED_HANDLERS:
+        code = handler(argv)
+        if code is not None:
+            return code
+    return run_rev_list_header(argv)
+
+
 def _run_captured(argv: Sequence[str]) -> tuple[int, str]:
     capture = io.StringIO()
     try:
         with redirect_stdout(capture):
-            code = run_rev_list_header(argv)
+            code = _run_routed(argv)
     except SystemExit as exc:
         raw_code = exc.code
         code = raw_code if isinstance(raw_code, int) else 1
@@ -115,11 +145,19 @@ def _selection_argv(argv: Sequence[str]) -> tuple[list[str], bool, bool]:
     return result, had_count, object_edge
 
 
-def _selected_oids(output: str, *, object_edge: bool) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Extract selected OIDs while separating leading ``--objects-edge`` records."""
+def _selected_oids(
+    output: str, *, object_edge: bool
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Extract selected OIDs and preserve non-selection side-channel records.
+
+    ``--objects-edge`` advertises leading excluded commits with ``-<oid>``;
+    those records remain visible under ``--disk-usage`` but do not contribute
+    to the byte total.  Omitted/missing records similarly retain their own
+    presentation channel while never becoming local objects to size.
+    """
 
     selected: list[str] = []
-    edges: list[str] = []
+    side_records: list[str] = []
     seen: set[str] = set()
     in_leading_edges = object_edge
 
@@ -131,9 +169,13 @@ def _selected_oids(output: str, *, object_edge: bool) -> tuple[tuple[str, ...], 
         if in_leading_edges and marked:
             candidate = token[1:].lower()
             if len(candidate) == 64 and all(ch in "0123456789abcdef" for ch in candidate):
-                edges.append(candidate)
+                side_records.append(raw_line)
                 continue
         in_leading_edges = False
+
+        if token.startswith(("~", "?")):
+            side_records.append(raw_line)
+            continue
 
         if token[:1] in {"<", ">", "-"}:
             token = token[1:]
@@ -145,56 +187,17 @@ def _selected_oids(output: str, *, object_edge: bool) -> tuple[tuple[str, ...], 
         seen.add(oid)
         selected.append(oid)
 
-    return tuple(selected), tuple(edges)
+    return tuple(selected), tuple(side_records)
 
 
 def run_rev_list_disk_usage(argv: Sequence[str]) -> int:
     """Run rev-list with Git-style ``--disk-usage[=human]`` accounting."""
 
-    ordered_blob_limit_omitted_code = try_run_rev_list_in_commit_order_blob_limit_omitted(argv)
-    if ordered_blob_limit_omitted_code is not None:
-        return ordered_blob_limit_omitted_code
-
-    ordered_blob_limit_code = try_run_rev_list_in_commit_order_blob_limit(argv)
-    if ordered_blob_limit_code is not None:
-        return ordered_blob_limit_code
-
-    ordered_object_type_code = try_run_rev_list_in_commit_order_object_type(argv)
-    if ordered_object_type_code is not None:
-        return ordered_object_type_code
-
-    ordered_omitted_code = try_run_rev_list_in_commit_order_filter_print_omitted(argv)
-    if ordered_omitted_code is not None:
-        return ordered_omitted_code
-
-    in_commit_order_code = try_run_rev_list_in_commit_order(argv)
-    if in_commit_order_code is not None:
-        return in_commit_order_code
-
-    blob_limit_code = try_run_rev_list_blob_limit(argv)
-    if blob_limit_code is not None:
-        return blob_limit_code
-
-    omitted_code = try_run_rev_list_filter_print_omitted(argv)
-    if omitted_code is not None:
-        return omitted_code
-
-    filter_code = try_run_rev_list_filter(argv)
-    if filter_code is not None:
-        return filter_code
-
-    nul_code = try_run_rev_list_nul(argv)
-    if nul_code is not None:
-        return nul_code
-
-    missing_print_code = try_run_rev_list_missing_print(argv)
-    if missing_print_code is not None:
-        return missing_print_code
-
-    promisor_code = try_run_rev_list_allow_promisor(argv)
-    if promisor_code is not None:
-        return promisor_code
-
+    # Detect disk accounting before any current-stack presentation adapter.
+    # Otherwise an ordered/filter/NUL handler sees the unknown --disk-usage
+    # token and claims the invocation before this aggregate adapter can compose
+    # it.  The selection itself is then delegated back through the same mature
+    # handlers with only the disk-usage token removed.
     enabled, human, cleaned = _parse_mode(argv)
 
     if "--help" in cleaned or "-h" in cleaned:
@@ -203,25 +206,23 @@ def run_rev_list_disk_usage(argv: Sequence[str]) -> int:
         return code
 
     if not enabled:
-        return run_rev_list_header(cleaned)
+        return _run_routed(cleaned)
 
     selection_argv, had_count, object_edge = _selection_argv(cleaned)
     code, output = _run_captured(selection_argv)
     if code:
         return code
 
-    selected, edges = _selected_oids(output, object_edge=object_edge)
+    selected, side_records = _selected_oids(output, object_edge=object_edge)
     repo = _find_repo()
     total = sum(object_disk_size(repo, oid) for oid in selected)
 
-    # Native rev-list keeps --objects-edge's advertised edge records even
-    # though excluded edge objects do not contribute to the byte total.
-    for oid in edges:
-        print(f"-{oid}")
+    for record in side_records:
+        print(record)
 
-    # Git currently emits a zero count before disk usage when --count is also
-    # requested. Preserve that observable plumbing protocol rather than
-    # inventing a count of the captured selection.
+    # Native rev-list emits a zero traversal count before disk usage when
+    # --count is combined with --disk-usage.  Disk accounting is independent
+    # of that presentation count.
     if had_count:
         print("0")
     print(_human_size(total) if human else total)
