@@ -107,16 +107,20 @@ def _promised_blob_size(repo, native_oid: Optional[str]) -> Optional[int]:
     return promised_size(repo.pygit_dir, native_oid)
 
 
+def _missing_size_error(native_oid: Optional[str]) -> RuntimeError:
+    native = native_oid or "<unknown>"
+    return RuntimeError(
+        "--filter=blob:limit cannot classify unresolved promised blob "
+        f"{native}: persistent promisor size metadata is unavailable"
+    )
+
+
 def _ensure_missing_blobs_are_classifiable(repo, entries) -> None:
     for entry in entries:
         if not (entry.missing and entry.type_name == "blob"):
             continue
-        native = entry.native_oid or "<unknown>"
         if _promised_blob_size(repo, entry.native_oid) is None:
-            raise RuntimeError(
-                "--filter=blob:limit cannot classify unresolved promised blob "
-                f"{native}: trusted promisor size metadata is unavailable"
-            )
+            raise _missing_size_error(entry.native_oid)
 
 
 def _local_blob_size(repo, oid: str) -> Optional[int]:
@@ -142,10 +146,7 @@ def _keep_line(repo, line: str, *, limit: int) -> bool:
             return True
         size = _promised_blob_size(repo, native_oid)
         if size is None:
-            raise RuntimeError(
-                "--filter=blob:limit cannot classify unresolved promised blob "
-                f"{native_oid}: trusted promisor size metadata is unavailable"
-            )
+            raise _missing_size_error(native_oid)
         return size < limit
     if token.startswith("-"):
         token = token[1:]
@@ -159,11 +160,7 @@ def _entry_is_kept(repo, entry, *, limit: int) -> bool:
     if entry.missing:
         size = _promised_blob_size(repo, entry.native_oid)
         if size is None:
-            native = entry.native_oid or "<unknown>"
-            raise RuntimeError(
-                "--filter=blob:limit cannot classify unresolved promised blob "
-                f"{native}: trusted promisor size metadata is unavailable"
-            )
+            raise _missing_size_error(entry.native_oid)
         return size < limit
     if entry.oid is None:
         raise RuntimeError("present blob inventory entry has no local SHA-256 identity")
