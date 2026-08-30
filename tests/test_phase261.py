@@ -236,7 +236,7 @@ def test_in_commit_order_objects_edge_nul_remains_explicitly_deferred(
     monkeypatch.setattr("pygit.rev_list_promisor_cli._find_repo", lambda: repo)
     capsys.readouterr()
 
-    with pytest.raises(ValueError, match="with -z"):
+    with pytest.raises(ValueError, match="only compatible with --objects"):
         run_rev_list_disk_usage(
             ["--objects-edge", "--in-commit-order", "-z", "HEAD"]
         )
