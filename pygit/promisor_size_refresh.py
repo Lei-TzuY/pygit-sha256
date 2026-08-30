@@ -54,16 +54,49 @@ def _chunked_oids(native_oids: Sequence[str]) -> Iterator[tuple[str, ...]]:
         yield tuple(native_oids[start : start + OBJECT_INFO_SIZE_BATCH])
 
 
+def _client_cache_key(remote: str, url: str, server_options: tuple[str, ...]):
+    return (remote, url, server_options)
+
+
 def _object_info_client(repo, remote: str, url: str, server_options: tuple[str, ...]):
     """Return a client scoped to one repository and effective remote config."""
 
     cache = _OBJECT_INFO_CLIENTS.setdefault(repo, {})
-    key = (remote, url, server_options)
+    key = _client_cache_key(remote, url, server_options)
     client = cache.get(key)
     if client is None:
         client = SmartHttpV2ObjectInfoClient(url, server_options=server_options)
         cache[key] = client
     return client
+
+
+def _evict_object_info_client(
+    repo,
+    remote: str,
+    url: str,
+    server_options: tuple[str, ...],
+    client,
+) -> None:
+    """Discard one failed cached client without disturbing sibling remotes.
+
+    Phase288 deliberately reuses a client (and its capability advertisement)
+    across refresh calls.  A transport/protocol failure means that particular
+    session object is no longer a safe thing to retain indefinitely.  Eviction
+    is identity-guarded so an older failing reference cannot remove a newer
+    replacement installed under the same effective remote configuration.
+    """
+
+    cache = _OBJECT_INFO_CLIENTS.get(repo)
+    if not cache:
+        return
+    key = _client_cache_key(remote, url, server_options)
+    if cache.get(key) is client:
+        cache.pop(key, None)
+    if not cache:
+        try:
+            del _OBJECT_INFO_CLIENTS[repo]
+        except KeyError:
+            pass
 
 
 def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
@@ -76,8 +109,11 @@ def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
     partial clone cannot create an unbounded protocol request.  Clients are
     reused while the same Repository object and effective remote configuration
     remain alive, allowing Phase287's capability cache to span repeated refresh
-    calls without persisting negotiation state on disk. Query failures are
-    intentionally soft because the caller owns the final strictness policy.
+    calls without persisting negotiation state on disk. A client that raises a
+    transport/protocol/query exception is evicted before trying the next remote,
+    so a later refresh can create a fresh session instead of inheriting a failed
+    cached client. Query failures are intentionally soft because the caller owns
+    the final strictness policy.
 
     The returned mapping contains every requested OID whose trusted size is
     available after the refresh, whether it was already persisted or learned by
@@ -105,12 +141,14 @@ def refresh_promisor_sizes(repo, native_oids: Sequence[str]) -> Dict[str, int]:
         if not pending:
             break
         server_options = tuple(configured_server_options(repo, remote))
-        client = _object_info_client(repo, remote, configured[remote], server_options)
+        url = configured[remote]
+        client = _object_info_client(repo, remote, url, server_options)
         remote_failed = False
         for batch in _chunked_oids(tuple(sorted(pending))):
             try:
                 sizes = client.query_sizes(batch)
             except (OSError, RuntimeError, ValueError):
+                _evict_object_info_client(repo, remote, url, server_options, client)
                 remote_failed = True
                 break
             if not sizes:
