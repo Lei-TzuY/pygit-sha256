@@ -21,6 +21,11 @@ from certified local SHA-256 roots immediately before tracking-ref publication.
 This mirrors native Git's distinction between fetched tips and successful local
 tracking-ref updates: a later ref lock/CAS failure may still leave the verified
 fetched tip in ``FETCH_HEAD``.
+
+Phase343 upgrades the Phase336 LMAP step to Phase342's durable publication
+boundary. A transaction that stages new objects cannot proceed to root
+certification, FETCH_HEAD, or ref publication until the immutable compatibility
+map has passed its directory durability fences.
 """
 
 from __future__ import annotations
@@ -29,7 +34,10 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping, Optional, Sequence
 
 from .fetch_head import write_fetch_head
-from .loose_object_map import PublishedLooseObjectMap, publish_staged_loose_object_map
+from .loose_object_map import PublishedLooseObjectMap
+from .loose_object_map_durable import (
+    publish_staged_loose_object_map_durable as publish_staged_loose_object_map,
+)
 from .protocol_v2_packfile_uri_batch import (
     DownloadedPackfileUriBatch,
     download_packfile_uris,
@@ -102,17 +110,7 @@ def _download_optional_packfile_uris(
     max_packs: int,
     opener,
 ) -> DownloadedPackfileUriBatch:
-    """Download an external batch, or represent a valid inline-only response.
-
-    Advertising/requesting ``packfile-uris`` does not require the server to
-    offload any pack. A normal inline ``packfile`` section with zero URI
-    descriptors is therefore a valid protocol-v2 result.
-
-    The existing batch downloader remains authoritative for iterable/type and
-    resource-bound validation. Phase334 translates only its exact empty-batch
-    rejection into an explicit verified empty batch; every other error is
-    preserved unchanged.
-    """
+    """Download an external batch, or represent a valid inline-only response."""
 
     try:
         items = tuple(descriptors)
@@ -139,14 +137,7 @@ def _fetch_head_refs(
     plan: PackfileUriRemoteTrackingPlan,
     certificate: PackfileUriRootCertificate,
 ) -> dict[str, str]:
-    """Project certified tracking publications back to their source branch refs.
-
-    The Phase328 plan is deliberately keyed by local
-    ``refs/remotes/<remote>/...`` names while ``FETCH_HEAD`` describes source
-    ``refs/heads/...`` names. The publication's genuine transport-native SHA-1
-    identifies which certified local SHA-256 root belongs to each source ref;
-    no transport id is ever written into repository-native metadata.
-    """
+    """Project certified tracking publications back to their source branch refs."""
 
     prefix = f"refs/remotes/{remote}/"
     result: dict[str, str] = {}
@@ -185,24 +176,13 @@ def execute_incremental_packfile_uri_fetch_transaction(
 
     Ordering is intentionally strict:
 
-    ``download -> stage -> [new immutable LMAP] -> certify -> [fetch metadata] -> guard/CAS refs``.
+    ``download -> stage -> [new durable immutable LMAP] -> certify -> [fetch metadata] -> guard/CAS refs``.
 
-    The server may either offload packs through URI descriptors or keep the
-    terminating pack entirely inline. Newly staged native/local identities are
-    persisted as one content-addressed immutable LMAP before refs advance.
-
-    A fully up-to-date response may contain no new objects at all. In that case
-    staging returns an intentionally empty result after validating the known map,
-    no new LMAP generation is created, and root certification falls back to the
-    exact same validated ``known_native_to_local`` mapping. CAS ref publication is
-    still performed so concurrent ref movement remains detectable; an old==new
-    update does not create a reflog entry in the existing ref backend.
-
-    ``before_ref_publication`` is a narrow post-certification hook used by the
-    named-remote adapter to publish ``FETCH_HEAD`` before tracking-ref updates.
-    Native Git preserves freshly fetched ``FETCH_HEAD`` data even when a later
-    local tracking-ref lock/update fails, so this metadata cannot be emitted only
-    after a successful CAS transaction.
+    Newly staged native/local identities are durably published as one
+    content-addressed immutable LMAP before root certification. A durability
+    failure therefore aborts before FETCH_HEAD or mutable refs can advance. A
+    fully up-to-date response may contain no new objects; in that case no new
+    LMAP generation or durability fence is needed.
     """
 
     if not isinstance(repo, Repository):
@@ -289,33 +269,7 @@ def fetch_named_remote_incrementally_with_packfile_uris(
     max_packs: int = 64,
     opener=None,
 ) -> Optional[IncrementalNamedRemotePackfileUriFetchResult]:
-    """Fetch a configured remote with automatically mapped incremental haves.
-
-    The function discovers refs before repository mutation, builds the ordinary
-    Phase328 tracking/ref CAS plan, and then asks Phase333 whether each existing
-    tracking tip has a complete validated LMAP-backed local closure.
-
-    The exact resulting ``haves`` are sent to Phase318's protocol-v2 request and
-    the paired ``known_native_to_local`` mapping is kept attached to the same
-    transaction. Missing map coverage simply yields no have for that ref and
-    therefore preserves full-fetch behavior. The server may either offload packs,
-    keep the terminating pack inline, or return a valid zero-object pack when the
-    requested tip is already fully known locally.
-
-    Every newly fetched mapping is persisted as immutable Git LMAP metadata before
-    refs advance. A fully known response creates no redundant empty LMAP and is
-    certified from the existing validated mapping. No SHA-1 identity is synthesized.
-
-    Once protocol-v2 discovery succeeds, ``FETCH_HEAD`` is reset so any later
-    failure cannot expose stale data from an older fetch. After root certification,
-    the selected source branch names and their certified local SHA-256 roots are
-    written before local tracking refs advance. Explicit ``branches=...`` entries
-    are mergeable; default/refspec-style discovery entries are ``not-for-merge``,
-    matching native Git's FETCH_HEAD marker behavior.
-
-    ``None`` is returned only when initial discovery proves that the remote is not
-    speaking protocol v2. A downgrade after successful v2 discovery fails closed.
-    """
+    """Fetch a configured remote with automatically mapped incremental haves."""
 
     if not isinstance(repo, Repository):
         raise TypeError("incremental packfile-URI named fetch requires a Repository")
@@ -334,9 +288,6 @@ def fetch_named_remote_incrementally_with_packfile_uris(
     if not isinstance(advertisement, Advertisement):
         raise TypeError("incremental packfile-URI ref discovery returned an unexpected type")
 
-    # Native Git truncates FETCH_HEAD for a real fetch before branch selection or
-    # later transport/ref errors are known. Defer this until v2 discovery succeeds
-    # so the adapter's documented v2-downgrade sentinel remains mutation-free.
     write_fetch_head(repo.pygit_dir, {}, source=url)
 
     explicit_branches = branches is not None
