@@ -18,9 +18,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
+from .clone_unborn import (
+    CloneRefDiscovery,
+    _rollback_empty_clone_destination,
+    discover_clone_refs_with_unborn,
+    initialize_discovered_unborn_clone,
+)
+from .clone_v2_reuse import fetch_discovered_clone
 from .fetch_importer import StableShallowNativeImporter
 from .fetch_shallow import _apply_shallow_response
 from .protocol_v2_fetch import SmartHttpV2FetchClient
+from .protocol_v2_unborn import ProtocolV2LsRefsResult
 from .remote import Advertisement
 from .repo import Repository
 
@@ -165,7 +173,7 @@ def clone_shallow_repository(
     server_options: Sequence[str] = (),
     checkout: bool = True,
 ) -> Repository:
-    """Create a repository from a genuinely truncated protocol-v2 pack."""
+    """Create a truncated v2 clone, including an explicitly unborn remote."""
     if depth <= 0:
         raise ValueError("shallow clone depth must be a positive integer")
     if path is None:
@@ -176,9 +184,36 @@ def clone_shallow_repository(
     if destination.exists():
         if not destination.is_dir() or any(destination.iterdir()):
             raise RuntimeError(f"Destination path is not empty: {destination}")
+    destination_existed = destination.exists()
 
     repo = Repository.init(str(destination))
     repo.add_remote("origin", url)
+
+    discovery = discover_clone_refs_with_unborn(
+        url,
+        server_options=server_options,
+    )
+    if discovery is None:
+        raise RuntimeError("shallow clone requires protocol version 2")
+
+    try:
+        empty = initialize_discovered_unborn_clone(
+            repo,
+            discovery.refs,
+            url=url,
+            branch_name=branch_name,
+            single_branch=single_branch,
+            depth=depth,
+        )
+    except Exception:
+        if discovery.refs.unborn:
+            _rollback_empty_clone_destination(
+                destination,
+                existed=destination_existed,
+            )
+        raise
+    if empty is not None:
+        return repo
 
     # Preserve the exact Phase204/206 constructor call shape unless transport
     # metadata is active; several established regressions replace this class.
@@ -187,9 +222,7 @@ def clone_shallow_repository(
         if server_options
         else SmartHttpV2FetchClient(url)
     )
-    advertisement = client.discover_refs()
-    if advertisement is None:
-        raise RuntimeError("shallow clone requires protocol version 2")
+    advertisement = discovery.refs.advertisement
 
     default_branch = _default_branch(repo, advertisement)
     target_branch = branch_name or default_branch or "main"
@@ -203,14 +236,17 @@ def clone_shallow_repository(
         capabilities=set(advertisement.capabilities),
         symrefs=dict(advertisement.symrefs),
     )
+    selected_discovery = CloneRefDiscovery(
+        ProtocolV2LsRefsResult(selected_advertisement, frozenset()),
+        discovery.capabilities,
+    )
 
-    result = client.fetch(
-        haves=[],
-        advertisement=selected_advertisement,
+    result = fetch_discovered_clone(
+        client,
+        selected_discovery,
+        haves=(),
         deepen=depth,
     )
-    if result is None:
-        raise RuntimeError("shallow clone requires protocol version 2")
 
     importer = StableShallowNativeImporter(repo.store, result.objects)
     imported = {
