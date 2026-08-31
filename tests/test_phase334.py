@@ -23,8 +23,7 @@ from pygit.protocol_v2_packfile_uri_stage import (
     StagedPackfileUriImport,
     stage_packfile_uri_import,
 )
-from pygit.protocol_v2_packfile_uri_transaction import PackfileUriFetchTransactionResult
-from pygit.protocol_v2_packfile_uris import V2PackfileUriFetchResult
+from pygit.protocol_v2_packfile_uri_uris import V2PackfileUriFetchResult
 from pygit.refs import ZERO_SHA
 from pygit.remote import Advertisement, NativeExporter, PackParser
 from pygit.repo import Repository
@@ -163,8 +162,6 @@ def test_refetched_native_object_must_agree_with_known_local_mapping(tmp_path: P
     exporter = NativeExporter(repo.store)
     new_local = repo.store.write(new)
     new_native = exporter.export_oid(new_local)
-    # Remove the correctly imported local copy so the stage still has work to do;
-    # the stale known mapping deliberately points at a different valid local blob.
     assert repo.store.delete(new_local)
 
     with pytest.raises(ValueError, match="contradicts its known"):
@@ -184,6 +181,7 @@ def test_incremental_transaction_passes_exact_known_map_to_stage(tmp_path: Path,
     publication = PackfileUriRefPublication(native, ZERO_SHA)
     batch = DownloadedPackfileUriBatch((), {}, 0)
     staged = StagedPackfileUriImport({native: "3" * 64}, ("3" * 64,))
+    object_map = object()
     certificate = object()
     captured = {}
 
@@ -194,6 +192,7 @@ def test_incremental_transaction_passes_exact_known_map_to_stage(tmp_path: Path,
         return staged
 
     monkeypatch.setattr(phase334, "stage_packfile_uri_import", fake_stage)
+    monkeypatch.setattr(phase334, "publish_staged_loose_object_map", lambda *a, **k: object_map)
     monkeypatch.setattr(phase334, "certify_packfile_uri_roots", lambda *a, **k: certificate)
     monkeypatch.setattr(phase334, "_acquire_publication_guard_locks", lambda repo: [])
     monkeypatch.setattr(phase334, "_assert_publication_state_unchanged", lambda *a, **k: None)
@@ -216,6 +215,7 @@ def test_incremental_transaction_passes_exact_known_map_to_stage(tmp_path: Path,
     assert captured["known"] is incremental.known_native_to_local
     assert result.batch is batch
     assert result.staged is staged
+    assert result.object_map is object_map
     assert result.certificate is certificate
 
 
