@@ -167,7 +167,7 @@ def test_download_packfile_uri_rejects_redirect_outside_http_schemes():
     def opener(request, timeout):
         return _Response(pack, url="file:///tmp/blob.pack")
 
-    with pytest.raises(ValueError, match="left the allowed HTTP\(S\) schemes"):
+    with pytest.raises(ValueError, match=r"left the allowed HTTP\(S\) schemes"):
         download_packfile_uri(descriptor, opener=opener)
 
 
