@@ -55,16 +55,22 @@ def _empty_clone_preflight_available(
     depth: Optional[int],
     server_options: Sequence[str],
 ) -> bool:
-    """Keep historical clone override seams free from hidden network preflights."""
+    """Return whether the CLI itself should own unborn discovery.
+
+    Phase358 moves partial/shallow unborn handling into their public Python APIs,
+    so the CLI must not preflight those paths a second time.  The historical
+    Repository.clone path still needs the Phase331 preflight because that legacy
+    API does not preserve protocol-v2 unborn metadata itself.
+    """
 
     if filter_spec is not None:
-        return clone_partial_repository is _ORIGINAL_CLONE_PARTIAL_FUNC
+        return False
 
     use_shallow = depth is not None and (
         bool(server_options) or not _repository_clone_overridden()
     )
     if use_shallow:
-        return clone_shallow_repository is _ORIGINAL_CLONE_SHALLOW_FUNC
+        return False
 
     return not _repository_clone_overridden()
 
