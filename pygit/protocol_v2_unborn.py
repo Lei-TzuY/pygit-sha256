@@ -150,6 +150,7 @@ class SmartHttpV2UnbornQueryClient(SmartHttpV2QueryClient):
         """Return refs plus unborn names, or ``None`` for a protocol-v0 fallback."""
 
         capabilities = self.discover_capabilities()
+        self._last_capabilities = capabilities
         if capabilities is None:
             return None
         return self._discover_refs_with_capabilities(
