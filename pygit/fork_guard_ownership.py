@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import MutableMapping
+from collections.abc import MutableMapping
 
 
 _REGISTRY_SPECS = (
