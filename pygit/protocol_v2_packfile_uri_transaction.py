@@ -9,6 +9,11 @@ canonical lockfiles across the final state comparison and ref transaction.
 Network descriptors are fully verified first, native objects are imported through
 the SHA-256 staging boundary, requested roots are certified, and compare-and-swap
 ref publication remains the final mutable step.
+
+Phase351 hardens publication-guard initialization against short or interrupted
+low-level writes. A guard is considered initialized only after its complete
+marker has been written and fsynced; zero-progress writes fail closed and reuse
+Phase349's transaction-owned lock cleanup.
 """
 
 from __future__ import annotations
@@ -37,6 +42,9 @@ from .protocol_v2_packfile_uri_stage import (
 from .protocol_v2_packfile_uris import PackfileUriDescriptor
 from .remote import NativeObject
 from .repo import Repository
+
+
+_PUBLICATION_GUARD_MARKER = b"packfile-uri publication guard\n"
 
 
 @dataclass(frozen=True)
@@ -163,6 +171,27 @@ def _publication_guard_lock_paths(repo: Repository) -> tuple[Path, ...]:
     )
 
 
+def _write_publication_guard_marker(fd: int) -> None:
+    """Write the complete guard marker, retrying interruption and short writes.
+
+    ``os.write`` is allowed to consume fewer bytes than requested. Guard
+    initialization must therefore not treat one successful call as proof that
+    the marker is complete. An interrupted call is retried; a zero-progress call
+    is treated as an I/O failure so the transaction-owned lock is cleaned up by
+    the caller rather than being accepted as initialized.
+    """
+
+    remaining = memoryview(_PUBLICATION_GUARD_MARKER)
+    while remaining:
+        try:
+            written = os.write(fd, remaining)
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise OSError("publication guard marker write made no progress")
+        remaining = remaining[written:]
+
+
 def _open_publication_guard_lock(lock: Path) -> int:
     """Exclusively create one guard lock with a non-inheritable descriptor."""
 
@@ -193,12 +222,13 @@ def _initialize_publication_guard_lock(lock: Path) -> None:
     The lock is removed on every failure after the exclusive create. Until this
     helper returns, the current path has not yet joined the caller's acquired
     lock set, so cleanup must happen here rather than only in the outer rollback.
+    The complete marker must be written before the fsync boundary is accepted.
     """
 
     fd = _open_publication_guard_lock(lock)
     initialized = False
     try:
-        os.write(fd, b"packfile-uri publication guard\n")
+        _write_publication_guard_marker(fd)
         os.fsync(fd)
         os.close(fd)
         fd = -1
@@ -219,10 +249,10 @@ def _initialize_publication_guard_lock(lock: Path) -> None:
 def _acquire_publication_guard_locks(repo: Repository) -> list[Path]:
     """Acquire canonical metadata locks without stealing an existing writer's lock.
 
-    A path is appended to ``acquired`` only after descriptor hardening, marker
-    write, fsync, and close have all succeeded. Failure while initializing the
-    current lock removes that transaction-owned path before previously completed
-    locks are rolled back.
+    A path is appended to ``acquired`` only after descriptor hardening, complete
+    marker write, fsync, and close have all succeeded. Failure while initializing
+    the current lock removes that transaction-owned path before previously
+    completed locks are rolled back.
     """
 
     acquired: list[Path] = []
