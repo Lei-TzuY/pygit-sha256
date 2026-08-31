@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from contextlib import contextmanager
 from typing import Sequence
 
 from .clone_partial import clone_partial_repository
 from .clone_remote import clone_default_branch, configure_clone_remote
 from .clone_shallow import clone_shallow_repository
+from .clone_unborn import try_clone_explicit_unborn_remote
 from .fetch_partial import _validate_filter_spec
 from .fetch_protocol_v2 import protocol_v2_transport
 from .repo import Repository
@@ -20,6 +22,8 @@ from .tracking import configure_clone_tracking
 # implementation so Phase204 can prefer true shallow transport in production
 # without silently bypassing an explicit test/caller override.
 _ORIGINAL_REPOSITORY_CLONE_FUNC = Repository.clone.__func__
+_ORIGINAL_CLONE_PARTIAL_FUNC = clone_partial_repository
+_ORIGINAL_CLONE_SHALLOW_FUNC = clone_shallow_repository
 
 
 def _repository_clone_overridden() -> bool:
@@ -43,6 +47,26 @@ def _filter_spec(value: str) -> str:
         return _validate_filter_spec(value)
     except (RuntimeError, ValueError) as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _empty_clone_preflight_available(
+    *,
+    filter_spec: str | None,
+    depth: int | None,
+    server_options: Sequence[str],
+) -> bool:
+    """Keep historical clone override seams free from hidden network preflights."""
+
+    if filter_spec is not None:
+        return clone_partial_repository is _ORIGINAL_CLONE_PARTIAL_FUNC
+
+    use_shallow = depth is not None and (
+        bool(server_options) or not _repository_clone_overridden()
+    )
+    if use_shallow:
+        return clone_shallow_repository is _ORIGINAL_CLONE_SHALLOW_FUNC
+
+    return not _repository_clone_overridden()
 
 
 @contextmanager
@@ -141,7 +165,25 @@ def run_clone(argv: Sequence[str]) -> int:
         else args.depth is not None
     )
 
-    if args.filter is not None:
+    empty_clone = None
+    if _empty_clone_preflight_available(
+        filter_spec=args.filter,
+        depth=args.depth,
+        server_options=server_options,
+    ):
+        empty_clone = try_clone_explicit_unborn_remote(
+            args.url,
+            args.directory,
+            branch_name=args.branch,
+            single_branch=single_branch,
+            server_options=server_options,
+            depth=args.depth,
+            filter_spec=args.filter,
+        )
+
+    if empty_clone is not None:
+        repo = empty_clone.repo
+    elif args.filter is not None:
         partial_kwargs = {
             "filter_spec": args.filter,
             "branch_name": args.branch,
@@ -203,7 +245,7 @@ def run_clone(argv: Sequence[str]) -> int:
                 )
 
     branch = repo.refs.current_branch()
-    if branch:
+    if branch and empty_clone is None:
         configure_clone_remote(
             repo,
             args.url,
@@ -213,5 +255,8 @@ def run_clone(argv: Sequence[str]) -> int:
             single_branch=single_branch,
         )
         configure_clone_tracking(repo, branch, remote="origin")
+
+    if empty_clone is not None:
+        print("warning: You appear to have cloned an empty repository.", file=sys.stderr)
     print(f"Cloned {args.url} into {repo.worktree}")
     return 0
