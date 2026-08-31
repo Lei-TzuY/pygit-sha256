@@ -8,7 +8,10 @@ are the resulting immutable local objects copied into the destination store.
 Phase334 additionally permits an explicit native-SHA-1 -> local-SHA-256 ``known``
 map for objects a server legitimately omitted because they were reachable from an
 advertised ``have``.  Known objects are validated in the destination store before
-they may satisfy dependencies in the staging importer.
+they may satisfy dependencies in the staging importer. Phase338 also permits a
+fully up-to-date response with no fetched objects, but only when at least one
+validated known mapping exists; the returned staged result remains empty so known
+objects are never misreported as newly imported objects.
 """
 
 from __future__ import annotations
@@ -143,6 +146,12 @@ def stage_packfile_uri_import(
     import succeeds and consists solely of immutable content-addressed SHA-256
     object writes. Refs, HEAD, reflogs, and promisor metadata remain outside this
     phase.
+
+    A fully up-to-date incremental response may legitimately contain no fetched
+    objects. That case is accepted only after a non-empty known map has passed the
+    same destination-object validation above. The returned ``StagedPackfileUriImport``
+    is intentionally empty: existing known objects are dependencies/evidence, not
+    objects newly staged or published by this invocation.
     """
 
     if not isinstance(store, ObjectStore):
@@ -166,6 +175,8 @@ def stage_packfile_uri_import(
             merged[oid] = obj
 
     if not merged:
+        if known:
+            return StagedPackfileUriImport({}, ())
         raise ValueError("protocol-v2 staged import requires at least one native object")
 
     # Fetched bytes are authoritative for any overlap. Known-only identities can
