@@ -12,13 +12,19 @@ race this publication path. The existing ref transaction still performs the
 object existence/type checks, compare-and-swap verification, reflog handling,
 and snapshot rollback.
 
-Phase348 upgrades packfile-URI ref publication with a durability boundary. The
-public publisher now fsyncs every live ref and written reflog before releasing
-the canonical target locks, then fsyncs the containing directory hierarchy
-after lock removal. Successful return therefore means the final reference
-namespace crossed an explicit durability fence instead of stopping at visible
+Phase350 upgrades packfile-URI ref publication with a durability boundary. The
+public publisher fsyncs every live ref and written reflog before releasing the
+canonical target locks, then fsyncs the containing directory hierarchy after
+lock removal. Successful return therefore means the final reference namespace
+crossed an explicit durability fence instead of stopping at visible
 ``os.replace()``. The explicit ``*_durable`` spelling remains available for
 callers that want to make that contract self-documenting.
+
+Phase360 gives those canonical target-ref locks the same retained-descriptor,
+inode-aware ownership discipline as the outer publication guards. Marker writes
+are completed before fsync, ownership descriptors remain non-inheritable and
+open through the ref/reflog durability fence, and cleanup unlinks a pathname only
+when it still names the inode acquired by this publisher.
 """
 
 from __future__ import annotations
@@ -35,6 +41,17 @@ from .refs import ZERO_SHA
 from .repo import Repository
 
 _HEX = frozenset("0123456789abcdef")
+_REF_LOCK_MARKER = b"packfile-uri ref transaction\n"
+
+
+@dataclass(frozen=True)
+class _RefLockOwnership:
+    fd: int
+    device: int
+    inode: int
+
+
+_REF_LOCK_OWNERSHIP: dict[Path, _RefLockOwnership] = {}
 
 
 @dataclass(frozen=True)
@@ -85,28 +102,98 @@ def _lock_path(repo: Repository, refname: str) -> Path:
     return target.with_name(target.name + ".lock")
 
 
+def _write_ref_lock_marker(fd: int) -> None:
+    """Completely write the target-ref lock marker before durability is claimed."""
+
+    remaining = memoryview(_REF_LOCK_MARKER)
+    while remaining:
+        try:
+            written = os.write(fd, remaining)
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise OSError("packfile-URI ref lock marker write made no progress")
+        remaining = remaining[written:]
+
+
+def _initialize_ref_lock(lock: Path) -> _RefLockOwnership:
+    """Exclusively create, initialize, fsync, and retain one target-ref lock."""
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+
+    fd = os.open(lock, flags, 0o666)
+    initialized = False
+    try:
+        os.set_inheritable(fd, False)
+        _write_ref_lock_marker(fd)
+        os.fsync(fd)
+        stat_result = os.fstat(fd)
+        ownership = _RefLockOwnership(
+            fd=fd,
+            device=stat_result.st_dev,
+            inode=stat_result.st_ino,
+        )
+        initialized = True
+        return ownership
+    finally:
+        if not initialized:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                lock.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _release_locks(locks: Sequence[Path]) -> None:
+    """Release only target-ref lock pathnames that still name owned inodes."""
+
+    for lock in reversed(tuple(locks)):
+        ownership = _REF_LOCK_OWNERSHIP.pop(lock, None)
+        if ownership is None:
+            continue
+        try:
+            try:
+                stat_result = os.stat(lock, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            current = (stat_result.st_dev, stat_result.st_ino)
+            expected = (ownership.device, ownership.inode)
+            if current != expected:
+                continue
+            try:
+                lock.unlink()
+            except FileNotFoundError:
+                pass
+        finally:
+            try:
+                os.close(ownership.fd)
+            except OSError:
+                pass
+
+
 def _acquire_locks(repo: Repository, refnames: list[str]) -> list[Path]:
     acquired: list[Path] = []
     try:
         for refname in sorted(refnames):
             lock = _lock_path(repo, refname)
             lock.parent.mkdir(parents=True, exist_ok=True)
+            if lock in _REF_LOCK_OWNERSHIP:
+                raise RuntimeError(f"cannot lock ref {refname!r}: lock file already exists")
             try:
-                fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                ownership = _initialize_ref_lock(lock)
             except FileExistsError as exc:
                 raise RuntimeError(f"cannot lock ref {refname!r}: lock file already exists") from exc
-            try:
-                os.write(fd, b"packfile-uri ref transaction\n")
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            _REF_LOCK_OWNERSHIP[lock] = ownership
             acquired.append(lock)
     except Exception:
-        for lock in reversed(acquired):
-            try:
-                lock.unlink()
-            except FileNotFoundError:
-                pass
+        _release_locks(acquired)
         raise
     return acquired
 
@@ -266,20 +353,18 @@ def _publish_packfile_uri_refs(
         if durable:
             # Ref files are written through already-fsynced temporary files by the
             # generic transaction, but reflogs are append writes. Fsync all live
-            # publication files while the canonical target locks are still held.
+            # publication files while the canonical target locks and their retained
+            # ownership descriptors are still held.
             publication_paths = _fsync_publication_files(repo, tuple(result))
     finally:
-        for lock in reversed(locks):
-            try:
-                lock.unlink()
-            except FileNotFoundError:
-                pass
+        _release_locks(locks)
 
     if durable:
-        # Fsync directories only after lock removal. This single leaf-to-root
-        # fence persists both the ref/reflog directory entries and the absence of
-        # the temporary canonical lock files. A later writer may legitimately
-        # begin after lock release; that is a subsequent ref transaction.
+        # Fsync directories only after owner-aware lock removal. This single
+        # leaf-to-root fence persists both the ref/reflog directory entries and
+        # the absence of transaction-owned canonical lock pathnames. A pathname
+        # replaced by another actor is deliberately preserved and is therefore
+        # not represented as this transaction's removed lock.
         for directory in _publication_directories(repo, publication_paths):
             _fsync_directory(directory)
 
@@ -295,10 +380,11 @@ def publish_packfile_uri_refs(
 ) -> Dict[str, str]:
     """Durably publish certified roots as one compare-and-swap ref transaction.
 
-    Phase348 strengthens the historical Phase323 API in place so every existing
-    packfile-URI caller, including the Phase347 incremental transaction and its
+    Phase350 strengthens the historical Phase323 API in place so every existing
+    packfile-URI caller, including the Phase359 incremental transaction and its
     established monkeypatch seam, receives the same success-after-durability
-    guarantee without a parallel publication path.
+    guarantee without a parallel publication path. Phase360 additionally pins
+    canonical target-lock ownership through that durability boundary.
     """
 
     return _publish_packfile_uri_refs(
@@ -317,13 +403,14 @@ def publish_packfile_uri_refs_durable(
     *,
     message: str = "fetch: durably publish certified packfile-uri refs",
 ) -> Dict[str, str]:
-    """Explicit spelling for the Phase348 durable publication contract.
+    """Explicit spelling for the durable publication contract.
 
-    The target ref lockfiles remain held through ref/reflog file fsync. They are
-    then removed before the directory hierarchy is fsynced, so successful return
-    persists both the new ref namespace and lock cleanup. If a file or directory
-    fsync fails after the generic ref transaction became visible, the exception is
-    propagated. Complete new refs/reflogs may remain visible; callers must not
+    The target ref lockfiles and retained ownership descriptors remain held
+    through ref/reflog file fsync. Owned pathnames are then removed before the
+    directory hierarchy is fsynced, so successful return persists both the new
+    ref namespace and transaction-owned lock cleanup. If a file or directory
+    fsync fails after the generic ref transaction became visible, the exception
+    is propagated. Complete new refs/reflogs may remain visible; callers must not
     represent that operation as durably successful or perform later mutable steps.
     """
 
