@@ -50,6 +50,7 @@ from .protocol_v2_packfile_uri_refs import (
 from .protocol_v2_packfile_uris import (
     SmartHttpV2PackfileUriClient,
     V2PackfileUriFetchResult,
+    normalize_packfile_uri_protocols,
 )
 from .remote import Advertisement, NativeObject
 from .repo import Repository
@@ -100,10 +101,10 @@ def execute_incremental_packfile_uri_fetch_transaction(
 
     ``download -> stage -> immutable LMAP -> certify -> guard/CAS refs``.
 
-    The LMAP file is content-addressed immutable compatibility metadata.  Publishing
+    The LMAP file is content-addressed immutable compatibility metadata. Publishing
     it before root certification/ref CAS is safe: a later failure can leave only a
     verified mapping for already-published content-addressed local objects, never a
-    partially advanced ref.  Conversely, if LMAP publication itself fails, no ref
+    partially advanced ref. Conversely, if LMAP publication itself fails, no ref
     publication is attempted, so a successfully advanced tracking ref always has
     durable native SHA-1 compatibility identity available for the next incremental
     negotiation.
@@ -187,13 +188,13 @@ def fetch_named_remote_incrementally_with_packfile_uris(
 
     The exact resulting ``haves`` are sent to Phase318's protocol-v2 request and
     the paired ``known_native_to_local`` mapping is kept attached to the same
-    transaction.  Every newly fetched mapping is persisted as immutable Git LMAP
+    transaction. Every newly fetched mapping is persisted as immutable Git LMAP
     metadata before refs are advanced, so the next invocation can use the new tip
     and its reachable known-object closure without guessing native identity.
 
     Missing map coverage simply yields no have for that ref and therefore preserves
-    full-fetch behavior.  ``None`` is returned only when initial discovery proves
-    that the remote is not speaking protocol v2.  A downgrade after successful v2
+    full-fetch behavior. ``None`` is returned only when initial discovery proves
+    that the remote is not speaking protocol v2. A downgrade after successful v2
     discovery fails closed.
     """
 
