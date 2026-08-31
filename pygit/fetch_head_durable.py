@@ -4,7 +4,8 @@ Phase344 added the durability boundary for replace-style FETCH_HEAD writes used
 by the mapped incremental packfile-URI path. Phase345 aligns that boundary with
 Git's lockfile discipline: one canonical ``FETCH_HEAD.lock`` is acquired with
 exclusive creation, populated and fsynced, then atomically renamed to the live
-metadata path.
+metadata path. Phase346 also makes the lock descriptor explicitly non-inheritable
+so child processes cannot accidentally prolong or mutate an in-flight writer.
 """
 
 from __future__ import annotations
@@ -72,13 +73,29 @@ def _acquire_fetch_head_lock(pygit_dir: Path) -> tuple[int, Path]:
     concurrent writers fail rather than overwrite one another. Keep the raw
     ``FileExistsError`` contract: callers get an unambiguous contention signal
     and the existing lock remains untouched.
+
+    The returned descriptor is explicitly non-inheritable. Python normally
+    creates descriptors this way already, but making the boundary explicit
+    prevents a future runtime/platform change from leaking an in-flight lock
+    into a child process spawned by the fetch path.
     """
 
     lock_path = pygit_dir / "FETCH_HEAD.lock"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
     fd = os.open(lock_path, flags, 0o666)
+    try:
+        os.set_inheritable(fd, False)
+    except Exception:
+        os.close(fd)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     return fd, lock_path
 
 
