@@ -45,7 +45,11 @@ def test_fsync_failure_cleans_current_and_previously_acquired_guards(
     with pytest.raises(OSError, match="injected publication guard fsync failure"):
         phase349._acquire_publication_guard_locks(repo)
 
-    assert calls == 2
+    # Phase365 routes rollback through the durable owned-lock primitive. On
+    # POSIX, removing the previously acquired guard therefore adds one parent
+    # directory fsync after the second initialization fsync fails. Windows keeps
+    # the established no-directory-fsync boundary.
+    assert calls == (2 if os.name == "nt" else 3)
     assert all(not path.exists() for path in _guard_paths(repo))
 
 
