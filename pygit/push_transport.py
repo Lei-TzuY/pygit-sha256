@@ -21,6 +21,7 @@ from .push_options import (
     PushOptionSmartHttpPushClient,
     require_push_options_capability,
 )
+from .push_tracking import update_tracking_after_push
 from .remote import NativeExporter, SmartHttpPushClient
 from .repo import Repository
 
@@ -124,8 +125,7 @@ def push_ref(
         result = client.push(target_ref, new_native, exporter.objects, advertisement=advertisement)
     native_map.update(exporter.converted)
     repo._write_native_map(native_map, remote)
-    if target_ref.startswith("refs/heads/"):
-        repo.refs.set_remote(remote, target_ref[len("refs/heads/") :], source_sha)
+    update_tracking_after_push(repo, remote, target_ref, source_sha)
     return {
         "status": "pushed",
         "remote": remote,
@@ -179,8 +179,7 @@ def delete_remote_ref(
         )
     else:
         result = client.push(target_ref, _ZERO_NATIVE_OID, [], advertisement=advertisement)
-    if target_ref.startswith("refs/heads/"):
-        repo.refs.delete_remote(remote, target_ref[len("refs/heads/") :])
+    update_tracking_after_push(repo, remote, target_ref, None)
     return {
         "status": "deleted",
         "remote": remote,
@@ -378,11 +377,12 @@ def push_atomic_specs(
     for item in prepared:
         target_ref = str(item["target_ref"])
         if target_ref.startswith("refs/heads/"):
-            branch = target_ref[len("refs/heads/") :]
-            if item["delete"]:
-                repo.refs.delete_remote(remote, branch)
-            else:
-                repo.refs.set_remote(remote, branch, str(item["source_sha"]))
+            update_tracking_after_push(
+                repo,
+                remote,
+                target_ref,
+                None if item["delete"] else str(item["source_sha"]),
+            )
 
     first_command_index = int(command_items[0]["index"]) if command_items else -1
     for item in command_items:
