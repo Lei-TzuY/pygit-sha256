@@ -40,17 +40,29 @@ def _validate_native_oid(oid: str) -> None:
         raise ValueError("protocol-v2 root id must be hexadecimal") from exc
 
 
-def _validate_local_oid(oid: object, *, source: str) -> str:
+def _validate_staged_local_oid(oid: object) -> str:
+    """Preserve Phase322's established staged-root validation contract."""
+
+    if not isinstance(oid, str) or len(oid) != 64:
+        raise ValueError("protocol-v2 staged local root id must be a full SHA-256")
+    try:
+        bytes.fromhex(oid)
+    except ValueError as exc:
+        raise ValueError("protocol-v2 staged local root id must be hexadecimal") from exc
+    return oid
+
+
+def _validate_known_local_oid(oid: object) -> str:
+    """Validate a Phase333/334 known identity without normalizing it."""
+
     if not isinstance(oid, str) or len(oid) != 64 or oid != oid.lower():
         raise ValueError(
-            f"protocol-v2 {source} local root id must be a full lowercase SHA-256"
+            "protocol-v2 known local root id must be a full lowercase SHA-256"
         )
     try:
         bytes.fromhex(oid)
     except ValueError as exc:
-        raise ValueError(
-            f"protocol-v2 {source} local root id must be hexadecimal"
-        ) from exc
+        raise ValueError("protocol-v2 known local root id must be hexadecimal") from exc
     return oid
 
 
@@ -119,11 +131,11 @@ def certify_packfile_uri_roots(
         known_local = known_native_to_local.get(native_oid)
 
         if staged_local is not None:
-            local_oid = _validate_local_oid(staged_local, source="staged")
+            local_oid = _validate_staged_local_oid(staged_local)
             if local_oid not in published:
                 raise ValueError("protocol-v2 requested root was not published by the staged import")
             if known_local is not None:
-                known_oid = _validate_local_oid(known_local, source="known")
+                known_oid = _validate_known_local_oid(known_local)
                 if known_oid != local_oid:
                     raise ValueError(
                         "protocol-v2 staged root contradicts its known native-to-local mapping"
@@ -133,7 +145,7 @@ def certify_packfile_uri_roots(
                 raise ValueError(
                     "protocol-v2 requested root was not present in the staged import or known objects"
                 )
-            local_oid = _validate_local_oid(known_local, source="known")
+            local_oid = _validate_known_local_oid(known_local)
 
         obj = store.read(local_oid)
         if obj.hash() != local_oid:
