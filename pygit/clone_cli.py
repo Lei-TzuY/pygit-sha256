@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from contextlib import contextmanager
-from typing import Sequence
+from typing import Optional, Sequence
 
 from .clone_partial import clone_partial_repository
 from .clone_remote import clone_default_branch, configure_clone_remote
@@ -51,8 +51,8 @@ def _filter_spec(value: str) -> str:
 
 def _empty_clone_preflight_available(
     *,
-    filter_spec: str | None,
-    depth: int | None,
+    filter_spec: Optional[str],
+    depth: Optional[int],
     server_options: Sequence[str],
 ) -> bool:
     """Keep historical clone override seams free from hidden network preflights."""
