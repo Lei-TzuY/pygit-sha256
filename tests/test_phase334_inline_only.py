@@ -62,6 +62,7 @@ def test_incremental_transaction_stages_inline_objects_without_uri_descriptors(
     incremental = PackfileUriIncrementalState((), {}, ())
     publication = PackfileUriRefPublication(native, ZERO_SHA)
     staged = StagedPackfileUriImport({native: local}, (local,))
+    object_map = object()
     certificate = object()
     captured = {}
 
@@ -72,6 +73,11 @@ def test_incremental_transaction_stages_inline_objects_without_uri_descriptors(
         return staged
 
     monkeypatch.setattr(phase334, "stage_packfile_uri_import", fake_stage)
+    monkeypatch.setattr(
+        phase334,
+        "publish_staged_loose_object_map",
+        lambda repo_arg, staged_arg: object_map,
+    )
     monkeypatch.setattr(phase334, "certify_packfile_uri_roots", lambda *a, **k: certificate)
     monkeypatch.setattr(phase334, "_acquire_publication_guard_locks", lambda repo: [])
     monkeypatch.setattr(phase334, "_assert_publication_state_unchanged", lambda *a, **k: None)
@@ -99,4 +105,5 @@ def test_incremental_transaction_stages_inline_objects_without_uri_descriptors(
     assert captured["known"] == {}
     assert result.batch is captured["batch"]
     assert result.staged is staged
+    assert result.object_map is object_map
     assert result.certificate is certificate
