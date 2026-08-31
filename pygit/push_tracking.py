@@ -53,6 +53,11 @@ def _match_refspec(source_ref: str, spec: str) -> Optional[str]:
 def tracking_branch_for_push(repo, remote: str, target_ref: str) -> Optional[str]:
     """Return the local ``refs/remotes/<remote>/...`` branch mapped by fetch.
 
+    Modern Git-style remotes obey ``remote.<name>.fetch`` exactly.  Historical
+    pygit repositories created only through ``Repository.add_remote()`` predate
+    that config surface; preserve their established same-name tracking behavior
+    until they acquire an explicit Git-style ``remote.<name>.url`` entry.
+
     Only mappings inside the named remote-tracking namespace are accepted.  This
     keeps post-push bookkeeping within the RefStore API and refuses surprising
     custom destinations rather than mutating unrelated local refs.
@@ -60,8 +65,18 @@ def tracking_branch_for_push(repo, remote: str, target_ref: str) -> Optional[str
 
     if not target_ref.startswith("refs/heads/"):
         return None
+    source_branch = target_ref[len("refs/heads/") :]
+    if not source_branch:
+        return None
+
     fetch_spec = repo.config_get("remote", f"{remote}.fetch")
     if not fetch_spec:
+        # Compatibility boundary: old repositories may have only the legacy
+        # ``remotes`` JSON entry.  Phase331+ clone orchestration writes the
+        # Git-style URL key, so an absent fetch refspec there is intentional and
+        # must not synthesize a tracking ref.
+        if repo.config_get("remote", f"{remote}.url") is None:
+            return source_branch
         return None
     destination = _match_refspec(target_ref, fetch_spec)
     if destination is None:
