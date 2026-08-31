@@ -26,6 +26,10 @@ Phase343 upgrades the Phase336 LMAP step to Phase342's durable publication
 boundary. A transaction that stages new objects cannot proceed to root
 certification, FETCH_HEAD, or ref publication until the immutable compatibility
 map has passed its directory durability fences.
+
+Phase344 makes the two replace-style FETCH_HEAD writes crash-safe: each complete
+file is fsynced to a same-directory temporary, atomically replaced, and followed
+by a directory durability fence before the fetch may proceed.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping, Optional, Sequence
 
-from .fetch_head import write_fetch_head
+from .fetch_head_durable import write_fetch_head_durable as write_fetch_head
 from .loose_object_map import PublishedLooseObjectMap
 from .loose_object_map_durable import (
     publish_staged_loose_object_map_durable as publish_staged_loose_object_map,
