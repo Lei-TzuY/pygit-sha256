@@ -295,6 +295,8 @@ def test_pull_cli_short_circuits_generic_merge_after_initial_pull(tmp_path, monk
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("generic merge")),
     )
 
+    # Repository.init() is intentionally chatty; isolate the CLI invocation.
+    capsys.readouterr()
     assert module.run_pull([]) == 0
     assert capsys.readouterr().out == "Pull result: initial-pull\n"
 
