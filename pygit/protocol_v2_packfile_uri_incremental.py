@@ -2,9 +2,16 @@
 
 Phase333 connects Phase328's local remote-tracking CAS plan to Phase332's
 validated SHA-256/SHA-1 loose-object maps without performing network or repository
-mutation.  A local tracking tip is advertised as a native ``have`` only when its
+mutation. A local tracking tip is advertised as a native ``have`` only when its
 entire currently reachable local object closure exists, is readable, and has an
 explicit validated compatibility mapping.
+
+Phase339 additionally content-authenticates every candidate LMAP-backed closure
+before its native tip can cross the negotiation boundary. The local SHA-256 graph
+is exported through the ordinary native Git serializer and every recomputed SHA-1
+must agree with the explicit LMAP mapping. A checksummed but semantically forged
+LMAP therefore falls back to a full fetch instead of manufacturing a false
+``have``.
 
 The returned native-to-local closure is intended for a later importer bridge so
 objects omitted because they are reachable from a ``have`` can be resolved to
@@ -22,6 +29,7 @@ from .objects.commit import CommitObject
 from .objects.tree import TreeObject
 from .protocol_v2_packfile_uri_tracking import PackfileUriRemoteTrackingPlan
 from .refs import ZERO_SHA
+from .remote import NativeExporter
 from .repo import Repository
 
 
@@ -59,7 +67,7 @@ def _mapped_local_closure(
 
     ``None`` means the closure is valid local state but not fully represented in
     the compatibility map, so the caller must fall back to a non-incremental
-    fetch for that tracking ref.  Missing/corrupt objects referenced by an
+    fetch for that tracking ref. Missing/corrupt objects referenced by an
     already-mapped object are repository corruption and fail closed instead.
     """
 
@@ -103,7 +111,7 @@ def _mapped_local_closure(
 
         if isinstance(obj, CommitObject):
             # Imported shallow commits intentionally retain native parents which
-            # may not exist locally.  Do not auto-advertise them as complete
+            # may not exist locally. Do not auto-advertise them as complete
             # haves unless a later phase explicitly composes shallow negotiation.
             if obj.native_parents is not None:
                 return None
@@ -124,6 +132,30 @@ def _mapped_local_closure(
     return known
 
 
+def _closure_matches_native_content(
+    exporter: NativeExporter,
+    tip: str,
+    native_tip: str,
+    closure: Mapping[str, str],
+) -> bool:
+    """Prove an LMAP closure agrees with content-derived native Git SHA-1 ids.
+
+    ``NativeExporter`` is deliberately reused here rather than duplicating Git
+    commit/tree/blob serialization. It recursively reconstructs the native SHA-1
+    graph from the actual local SHA-256 objects. Every local object in the planned
+    closure must therefore acquire exactly the SHA-1 claimed by LMAP before the
+    tip can be advertised as a ``have``.
+    """
+
+    computed_tip = exporter.export_oid(tip)
+    if computed_tip != native_tip:
+        return False
+    for native, local in closure.items():
+        if exporter.converted.get(local) != native:
+            return False
+    return True
+
+
 def plan_packfile_uri_incremental_state(
     repo: Repository,
     plan: PackfileUriRemoteTrackingPlan,
@@ -131,8 +163,14 @@ def plan_packfile_uri_incremental_state(
     """Derive safe native ``have`` tips and importer-known mappings.
 
     New tracking refs and existing tips without a complete validated LMAP-backed
-    closure are listed in ``fallback_refs`` and contribute no ``have``.  This is
+    closure are listed in ``fallback_refs`` and contribute no ``have``. This is
     a normal full-fetch fallback, not an identity guess.
+
+    Before an otherwise-complete mapped tip is advertised, Phase339 re-exports
+    its actual local SHA-256 graph through ``NativeExporter`` and requires every
+    resulting content-derived native SHA-1 to agree with the LMAP closure. A map
+    file can therefore be structurally valid and checksummed yet still be refused
+    as negotiation evidence when its cross-hash identities are semantically false.
 
     If an LMAP claims a local object that is missing/corrupt, or an existing
     tracking tip is not a commit, the function fails closed because advertising
@@ -149,6 +187,8 @@ def plan_packfile_uri_incremental_state(
     known: Dict[str, str] = {}
     fallback_refs: list[str] = []
     closure_cache: Dict[str, Optional[Dict[str, str]]] = {}
+    authenticated_cache: Dict[str, bool] = {}
+    exporter = NativeExporter(repo.store)
 
     for refname in sorted(plan.publications):
         publication = plan.publications[refname]
@@ -169,6 +209,17 @@ def plan_packfile_uri_incremental_state(
             continue
 
         native_tip = local_to_native[old_local]
+        if old_local not in authenticated_cache:
+            authenticated_cache[old_local] = _closure_matches_native_content(
+                exporter,
+                old_local,
+                native_tip,
+                closure,
+            )
+        if not authenticated_cache[old_local]:
+            fallback_refs.append(refname)
+            continue
+
         haves.add(native_tip)
         for native, local in closure.items():
             previous = known.get(native)
