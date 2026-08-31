@@ -13,6 +13,10 @@ Quick start::
     print(repo.log())
 """
 
+from .fork_guard_ownership import install_fork_guard_ownership_cleanup
+
+install_fork_guard_ownership_cleanup()
+
 from .repo import Repository
 from .merge_index_stages import install_repository_merge_stage_support
 from .replay_index_stages import install_repository_replay_stage_support
