@@ -147,6 +147,72 @@ def _rollback_empty_clone_destination(destination: Path, *, existed: bool) -> No
         shutil.rmtree(destination)
 
 
+def discover_clone_refs_with_unborn(
+    url: str,
+    *,
+    server_options: Sequence[str] = (),
+) -> Optional[ProtocolV2LsRefsResult]:
+    """Perform one unborn-aware protocol-v2 clone discovery.
+
+    The result deliberately preserves Phase315's explicit unborn sidecar while
+    also carrying the ordinary :class:`Advertisement`.  Programmatic clone
+    helpers can therefore make one discovery request sequence and either take
+    the metadata-only empty path or reuse the same advertisement for their
+    existing fetch/import pipeline.
+    """
+
+    client = SmartHttpV2UnbornQueryClient(
+        url,
+        server_options=tuple(server_options),
+    )
+    return client.discover_refs_with_unborn()
+
+
+def initialize_discovered_unborn_clone(
+    repo: Repository,
+    result: ProtocolV2LsRefsResult,
+    *,
+    url: str,
+    branch_name: Optional[str],
+    single_branch: bool,
+    depth: Optional[int] = None,
+    filter_spec: Optional[str] = None,
+) -> Optional[EmptyRemoteCloneResult]:
+    """Apply one already-discovered explicit unborn result to *repo*.
+
+    ``None`` means the discovery was an ordinary non-empty v2 advertisement and
+    the caller should continue its established object-fetch pipeline.  This
+    helper performs no network I/O and never invents an object identity.
+    """
+
+    unborn_branch = _explicit_unborn_branch(result)
+    if unborn_branch is None:
+        return None
+
+    # Native Git treats --branch as a request for a concrete remote ref.  An
+    # unborn symref target is not such a ref, even when the spelling matches.
+    if branch_name is not None:
+        raise RuntimeError(
+            f"Remote branch {branch_name} not found in upstream origin"
+        )
+
+    _record_historical_remote_default(
+        repo,
+        url=url,
+        branch=unborn_branch,
+    )
+    branch = initialize_empty_remote_head(repo, result)
+    _configure_empty_clone_metadata(
+        repo,
+        url=url,
+        branch=branch,
+        single_branch=single_branch,
+        depth=depth,
+        filter_spec=filter_spec,
+    )
+    return EmptyRemoteCloneResult(repo=repo, branch=branch)
+
+
 def try_clone_explicit_unborn_remote(
     url: str,
     path: Optional[str],
@@ -168,20 +234,18 @@ def try_clone_explicit_unborn_remote(
     destination = _clone_destination(url, path)
     destination_existed = destination.exists()
 
-    client = SmartHttpV2UnbornQueryClient(
+    result = discover_clone_refs_with_unborn(
         url,
-        server_options=tuple(server_options),
+        server_options=server_options,
     )
-    result = client.discover_refs_with_unborn()
     if result is None:
         return None
 
+    # Validate/identify the result before creating repository state.  Ordinary
+    # non-empty v2 advertisements remain a pure compatibility fallback.
     unborn_branch = _explicit_unborn_branch(result)
     if unborn_branch is None:
         return None
-
-    # Native Git treats --branch as a request for a concrete remote ref.  An
-    # unborn symref target is not such a ref, even when the spelling matches.
     if branch_name is not None:
         raise RuntimeError(
             f"Remote branch {branch_name} not found in upstream origin"
@@ -191,20 +255,17 @@ def try_clone_explicit_unborn_remote(
     try:
         repo = Repository.init(str(destination))
         repo.add_remote("origin", url)
-        _record_historical_remote_default(
+        initialized = initialize_discovered_unborn_clone(
             repo,
+            result,
             url=url,
-            branch=unborn_branch,
-        )
-        branch = initialize_empty_remote_head(repo, result)
-        _configure_empty_clone_metadata(
-            repo,
-            url=url,
-            branch=branch,
+            branch_name=None,
             single_branch=single_branch,
             depth=depth,
             filter_spec=filter_spec,
         )
+        if initialized is None:
+            raise RuntimeError("explicit unborn clone discovery lost unborn metadata")
     except Exception:
         _rollback_empty_clone_destination(
             destination,
@@ -212,4 +273,4 @@ def try_clone_explicit_unborn_remote(
         )
         raise
 
-    return EmptyRemoteCloneResult(repo=repo, branch=branch)
+    return initialized
