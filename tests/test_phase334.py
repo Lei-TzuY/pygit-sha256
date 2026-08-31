@@ -23,7 +23,7 @@ from pygit.protocol_v2_packfile_uri_stage import (
     StagedPackfileUriImport,
     stage_packfile_uri_import,
 )
-from pygit.protocol_v2_packfile_uri_uris import V2PackfileUriFetchResult
+from pygit.protocol_v2_packfile_uris import V2PackfileUriFetchResult
 from pygit.refs import ZERO_SHA
 from pygit.remote import Advertisement, NativeExporter, PackParser
 from pygit.repo import Repository
