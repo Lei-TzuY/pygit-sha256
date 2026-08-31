@@ -25,6 +25,13 @@ def _unborn_upstream_refspec(repo, remote: str) -> Optional[FetchRefspec]:
     branch has no local tip, the branch explicitly tracks *remote*, and the
     historical clone metadata still names that branch as the remote default.
     A configured fetch refspec always wins before this helper is consulted.
+
+    Persistent partial-clone remotes are excluded here. Native Git automatically
+    reuses their configured object filter on later fetches; the established pygit
+    fetch stack currently requires an explicit ``--filter`` to enter that
+    transport. Silently taking this ordinary fallback would therefore over-fetch
+    promised content. A later phase can compose this selection with the persisted
+    filter safely.
     """
 
     branch = repo.refs.current_branch()
@@ -41,6 +48,13 @@ def _unborn_upstream_refspec(repo, remote: str) -> Optional[FetchRefspec]:
 
     historical = repo._read_config().get("remotes", {}).get(remote, {})
     if historical.get("default_branch") != branch:
+        return None
+
+    if (
+        repo.config_get("remote", f"{remote}.partialCloneFilter") is not None
+        or (repo.config_get("remote", f"{remote}.promisor") or "").strip().lower()
+        in {"true", "yes", "on", "1"}
+    ):
         return None
 
     # No destination is deliberate: native Git's first fetch after an empty
