@@ -7,7 +7,7 @@ parsing remain delegated to the established protocol-v2 fetch implementation.
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Optional
 
 from .clone_unborn import CloneRefDiscovery
 from .fetch_partial import _build_filtered_fetch_request, _filtered_v2_fetch
@@ -25,7 +25,7 @@ def fetch_discovered_clone(
     discovery: CloneRefDiscovery,
     *,
     haves: Iterable[str] = (),
-    deepen: int | None = None,
+    deepen: Optional[int] = None,
 ) -> V2FetchResult:
     """Fetch using the exact capabilities/refs already discovered for clone.
 
