@@ -6,10 +6,15 @@ the inode it acquired, and a successful namespace removal is followed by a
 parent-directory durability fence on POSIX.
 
 Phase362 adds a batch cleanup boundary for callers that own several lockfiles at
-once.  Cleanup proceeds in reverse acquisition order and is best-effort across
+once. Cleanup proceeds in reverse acquisition order and is best-effort across
 all owned locks: the first error is preserved and re-raised only after every
-remaining ownership descriptor has had a chance to close/release.  This avoids
+remaining ownership descriptor has had a chance to close/release. This avoids
 turning one durability failure into stranded sibling locks.
+
+Phase366 makes the directory durability fence resilient to POSIX EINTR. A signal
+that interrupts ``fsync(2)`` does not by itself mean the durability operation
+failed, so the helper retries ``InterruptedError`` while preserving every other
+I/O error as a hard failure.
 """
 
 from __future__ import annotations
@@ -29,12 +34,27 @@ class OwnedLockIdentity:
     inode: int
 
 
+def _fsync_retry(fd: int) -> None:
+    """Retry an interrupted fsync while preserving non-EINTR failures."""
+
+    while True:
+        try:
+            os.fsync(fd)
+            return
+        except InterruptedError:
+            continue
+
+
 def fsync_directory(path: Path) -> None:
     """Durably fence one directory namespace on POSIX.
 
     Python/Windows does not expose the same directory-fd fsync contract used by
     the POSIX implementation, so Windows deliberately keeps the existing atomic
     lock semantics without claiming a power-loss durability guarantee.
+
+    POSIX ``fsync`` may be interrupted by a signal before completion. Such an
+    ``InterruptedError`` is retried; all other failures still propagate so a
+    caller cannot report durable cleanup without a successful directory fence.
     """
 
     directory = Path(path)
@@ -46,7 +66,7 @@ def fsync_directory(path: Path) -> None:
         flags |= os.O_DIRECTORY
     fd = os.open(directory, flags)
     try:
-        os.fsync(fd)
+        _fsync_retry(fd)
     finally:
         os.close(fd)
 
@@ -54,14 +74,14 @@ def fsync_directory(path: Path) -> None:
 def release_owned_lock_durably(path: Path, ownership: OwnedLockIdentity) -> bool:
     """Release an owned lock without unlinking a replacement pathname.
 
-    The retained descriptor pins the original inode.  The live pathname is
+    The retained descriptor pins the original inode. The live pathname is
     inspected without following symlinks and is removed only when its
     ``(st_dev, st_ino)`` pair still matches the descriptor-derived identity.
-    Missing/replaced paths are preserved.  If this call removes the pathname, it
+    Missing/replaced paths are preserved. If this call removes the pathname, it
     fsyncs the parent directory before reporting success.
 
     The ownership descriptor is closed on every path, including directory-fsync
-    failure.  A post-unlink fsync error propagates: the lock may already be gone,
+    failure. A post-unlink fsync error propagates: the lock may already be gone,
     but the caller must not report durable cleanup success.
     """
 
@@ -97,14 +117,14 @@ def release_owned_locks_durably(
     """Durably release several owned locks without stranding siblings on error.
 
     Callers normally acquire several lockfiles in forward order and release them
-    in reverse order.  Each item keeps the single-lock success-after-durability
+    in reverse order. Each item keeps the single-lock success-after-durability
     contract: an owned pathname is removed only when its live inode still matches,
     and a successful removal is followed by a parent-directory fsync on POSIX.
 
     A release or durability failure for one lock does *not* stop cleanup of locks
-    that were acquired earlier.  The first exception is remembered, every later
+    that were acquired earlier. The first exception is remembered, every later
     item is still processed (therefore closing every retained descriptor), and the
-    original exception is re-raised after cleanup completes.  The returned tuple
+    original exception is re-raised after cleanup completes. The returned tuple
     contains only pathnames whose owned namespace entries were durably removed.
     """
 
