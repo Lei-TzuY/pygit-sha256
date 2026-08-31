@@ -14,6 +14,11 @@ Phase351 hardens publication-guard initialization against short or interrupted
 low-level writes. A guard is considered initialized only after its complete
 marker has been written and fsynced; zero-progress writes fail closed and reuse
 Phase349's transaction-owned lock cleanup.
+
+Phase353 records the filesystem identity of every successfully initialized guard
+and checks that identity again before unlinking it. If an external actor removes
+and recreates a guard pathname while this transaction is active, release leaves
+the replacement in place rather than deleting a lock it does not own.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from .repo import Repository
 
 
 _PUBLICATION_GUARD_MARKER = b"packfile-uri publication guard\n"
+_PUBLICATION_GUARD_OWNERSHIP: dict[Path, tuple[int, int]] = {}
 
 
 @dataclass(frozen=True)
@@ -216,13 +222,17 @@ def _open_publication_guard_lock(lock: Path) -> int:
     return fd
 
 
-def _initialize_publication_guard_lock(lock: Path) -> None:
-    """Create, initialize, and fsync one transaction-owned guard lock.
+def _initialize_publication_guard_lock(lock: Path) -> tuple[int, int]:
+    """Create, initialize, fsync, and identify one transaction-owned guard lock.
 
     The lock is removed on every failure after the exclusive create. Until this
     helper returns, the current path has not yet joined the caller's acquired
     lock set, so cleanup must happen here rather than only in the outer rollback.
     The complete marker must be written before the fsync boundary is accepted.
+
+    The returned ``(st_dev, st_ino)`` pair comes from the still-open descriptor,
+    so callers can later distinguish this inode from a pathname that was removed
+    and recreated by another actor while the transaction was active.
     """
 
     fd = _open_publication_guard_lock(lock)
@@ -230,9 +240,12 @@ def _initialize_publication_guard_lock(lock: Path) -> None:
     try:
         _write_publication_guard_marker(fd)
         os.fsync(fd)
+        stat_result = os.fstat(fd)
+        ownership = (stat_result.st_dev, stat_result.st_ino)
         os.close(fd)
         fd = -1
         initialized = True
+        return ownership
     finally:
         if fd != -1:
             try:
@@ -252,7 +265,8 @@ def _acquire_publication_guard_locks(repo: Repository) -> list[Path]:
     A path is appended to ``acquired`` only after descriptor hardening, complete
     marker write, fsync, and close have all succeeded. Failure while initializing
     the current lock removes that transaction-owned path before previously
-    completed locks are rolled back.
+    completed locks are rolled back. The descriptor-derived inode identity is
+    retained until release so a replaced pathname is never treated as owned.
     """
 
     acquired: list[Path] = []
@@ -260,13 +274,14 @@ def _acquire_publication_guard_locks(repo: Repository) -> list[Path]:
         for lock in sorted(_publication_guard_lock_paths(repo)):
             lock.parent.mkdir(parents=True, exist_ok=True)
             try:
-                _initialize_publication_guard_lock(lock)
+                ownership = _initialize_publication_guard_lock(lock)
             except FileExistsError as exc:
                 relative = lock.relative_to(repo.pygit_dir).as_posix()
                 raise RuntimeError(
                     f"cannot lock packfile-URI publication state {relative!r}: "
                     "lock file already exists"
                 ) from exc
+            _PUBLICATION_GUARD_OWNERSHIP[lock] = ownership
             acquired.append(lock)
     except Exception:
         _release_publication_guard_locks(acquired)
@@ -275,9 +290,27 @@ def _acquire_publication_guard_locks(repo: Repository) -> list[Path]:
 
 
 def _release_publication_guard_locks(locks: Iterable[Path]) -> None:
-    """Release only locks acquired by this transaction."""
+    """Release only guard pathnames that still name this transaction's inode.
+
+    Git-style lockfiles rely on cooperative ownership. An external actor may
+    nevertheless remove a lock pathname and create a new lock before the original
+    owner reaches cleanup. A path-only ``unlink`` would then delete the new lock.
+    Phase353 records the descriptor identity at acquisition and compares it with
+    the current non-following stat before unlinking. A missing or replaced path is
+    left alone. Ownership records are always consumed exactly once.
+    """
 
     for lock in reversed(tuple(locks)):
+        ownership = _PUBLICATION_GUARD_OWNERSHIP.pop(lock, None)
+        if ownership is None:
+            continue
+        try:
+            stat_result = os.stat(lock, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        current = (stat_result.st_dev, stat_result.st_ino)
+        if current != ownership:
+            continue
         try:
             lock.unlink()
         except FileNotFoundError:
