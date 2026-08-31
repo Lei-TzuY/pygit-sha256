@@ -1,10 +1,10 @@
 """Fetch transition for clones whose local branch is still unborn.
 
 Phase331 can clone an explicitly empty protocol-v2 remote without fabricating an
-object id.  Native Git's ``--single-branch`` empty clone intentionally has no
+object id. Native Git's ``--single-branch`` empty clone intentionally has no
 ``remote.<name>.fetch`` refspec, yet a later plain ``fetch`` still requests the
 unborn branch's configured upstream into FETCH_HEAD once that remote branch is
-born.  This module supplies that command-scoped source selection while leaving
+born. This module supplies that command-scoped source selection while leaving
 the persisted empty fetch-refspec state unchanged.
 """
 
@@ -18,20 +18,35 @@ from .fetch_partial import run_fetch as _run_fetch
 from .fetch_policy import FetchRefspec, parse_fetch_refspec
 
 
-def _unborn_upstream_refspec(repo, remote: str) -> Optional[FetchRefspec]:
+_TRUE = {"true", "yes", "on", "1"}
+
+
+def _is_persistent_partial_remote(repo, remote: str) -> bool:
+    return (
+        repo.config_get("remote", f"{remote}.partialCloneFilter") is not None
+        or (repo.config_get("remote", f"{remote}.promisor") or "").strip().lower()
+        in _TRUE
+    )
+
+
+def _unborn_upstream_refspec(
+    repo,
+    remote: str,
+    *,
+    allow_persistent_partial: bool = False,
+) -> Optional[FetchRefspec]:
     """Return the Phase331 unborn upstream as a source-only fetch refspec.
 
-    The fallback is intentionally narrow.  It applies only when the current
+    The fallback is intentionally narrow. It applies only when the current
     branch has no local tip, the branch explicitly tracks *remote*, and the
     historical clone metadata still names that branch as the remote default.
     A configured fetch refspec always wins before this helper is consulted.
 
-    Persistent partial-clone remotes are excluded here. Native Git automatically
-    reuses their configured object filter on later fetches; the established pygit
-    fetch stack currently requires an explicit ``--filter`` to enter that
-    transport. Silently taking this ordinary fallback would therefore over-fetch
-    promised content. A later phase can compose this selection with the persisted
-    filter safely.
+    Persistent partial-clone remotes are excluded by default. Native Git
+    automatically reuses their configured object filter on later fetches, so an
+    ordinary caller must never synthesize this source-only selection and then
+    enter an unfiltered transport. Phase352's filter-aware wrapper opts in only
+    while the persisted/explicit filter transport is already active.
     """
 
     branch = repo.refs.current_branch()
@@ -50,11 +65,7 @@ def _unborn_upstream_refspec(repo, remote: str) -> Optional[FetchRefspec]:
     if historical.get("default_branch") != branch:
         return None
 
-    if (
-        repo.config_get("remote", f"{remote}.partialCloneFilter") is not None
-        or (repo.config_get("remote", f"{remote}.promisor") or "").strip().lower()
-        in {"true", "yes", "on", "1"}
-    ):
+    if _is_persistent_partial_remote(repo, remote) and not allow_persistent_partial:
         return None
 
     # No destination is deliberate: native Git's first fetch after an empty
@@ -67,8 +78,14 @@ def _unborn_upstream_refspec(repo, remote: str) -> Optional[FetchRefspec]:
 
 
 @contextmanager
-def unborn_fetch_selection() -> Iterator[None]:
-    """Install the command-scoped unborn-upstream selection fallback."""
+def unborn_fetch_selection(*, allow_persistent_partial: bool = False) -> Iterator[None]:
+    """Install the command-scoped unborn-upstream selection fallback.
+
+    ``allow_persistent_partial`` is a trust-boundary switch, not a convenience
+    option. It is intended only for callers that have already selected a real
+    filtered protocol-v2 transport. The default preserves Phase335's fail-closed
+    protection against accidental unfiltered fetches from promisor remotes.
+    """
 
     original = fetch_configured._parsed_fetch_refspecs
 
@@ -76,7 +93,11 @@ def unborn_fetch_selection() -> Iterator[None]:
         configured = original(repo, remote)
         if configured:
             return configured
-        implicit = _unborn_upstream_refspec(repo, remote)
+        implicit = _unborn_upstream_refspec(
+            repo,
+            remote,
+            allow_persistent_partial=allow_persistent_partial,
+        )
         return [implicit] if implicit is not None else configured
 
     fetch_configured._parsed_fetch_refspecs = parsed
