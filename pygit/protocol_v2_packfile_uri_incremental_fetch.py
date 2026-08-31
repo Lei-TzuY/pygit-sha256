@@ -16,7 +16,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional, Sequence
 
-from .protocol_v2_packfile_uri_batch import download_packfile_uris
+from .protocol_v2_packfile_uri_batch import (
+    DownloadedPackfileUriBatch,
+    _positive_integer,
+    download_packfile_uris,
+)
 from .protocol_v2_packfile_uri_connectivity import certify_packfile_uri_roots
 from .protocol_v2_packfile_uri_incremental import (
     PackfileUriIncrementalState,
@@ -63,6 +67,46 @@ class IncrementalNamedRemotePackfileUriFetchResult:
     transaction: PackfileUriFetchTransactionResult
 
 
+def _download_optional_packfile_uris(
+    descriptors,
+    *,
+    timeout: int,
+    max_pack_bytes: int,
+    max_total_bytes: int,
+    max_packs: int,
+    opener,
+) -> DownloadedPackfileUriBatch:
+    """Download an external batch, or represent a valid inline-only response.
+
+    Advertising/requesting ``packfile-uris`` does not require the server to
+    offload any pack.  A normal inline ``packfile`` section with zero URI
+    descriptors is therefore a valid protocol-v2 result.  Preserve the same
+    resource-option validation as the ordinary downloader even when no network
+    descriptor exists, then return an explicit empty verified batch for staging.
+    """
+
+    try:
+        items = tuple(descriptors)
+    except TypeError as exc:
+        raise TypeError("protocol-v2 packfile URI descriptors must be iterable") from exc
+
+    if items:
+        return download_packfile_uris(
+            items,
+            timeout=timeout,
+            max_pack_bytes=max_pack_bytes,
+            max_total_bytes=max_total_bytes,
+            max_packs=max_packs,
+            opener=opener,
+        )
+
+    _positive_integer(timeout, "timeout")
+    _positive_integer(max_pack_bytes, "max_pack_bytes")
+    _positive_integer(max_total_bytes, "max_total_bytes")
+    _positive_integer(max_packs, "max_packs")
+    return DownloadedPackfileUriBatch((), {}, 0)
+
+
 def execute_incremental_packfile_uri_fetch_transaction(
     repo: Repository,
     descriptors,
@@ -81,9 +125,10 @@ def execute_incremental_packfile_uri_fetch_transaction(
     """Run the existing guarded repository transaction with mapped known objects.
 
     This deliberately mirrors Phase324-326's ordering and reuses its exact
-    preflight/snapshot/lock helpers.  The only semantic difference is the staging
-    call: Phase333's validated ``known_native_to_local`` closure is supplied to
-    Phase334's known-aware staging importer.
+    preflight/snapshot/lock helpers.  The only semantic differences are that
+    Phase333's validated ``known_native_to_local`` closure is supplied to the
+    known-aware staging importer and a server may keep the complete pack inline
+    instead of returning any external URI descriptor.
     """
 
     if not isinstance(repo, Repository):
@@ -100,7 +145,7 @@ def execute_incremental_packfile_uri_fetch_transaction(
     _preflight_publication_plan(expected_roots, publications)
     mutable_state = _snapshot_publication_state(repo, publications)
 
-    batch = download_packfile_uris(
+    batch = _download_optional_packfile_uris(
         descriptors,
         timeout=timeout,
         max_pack_bytes=max_pack_bytes,
@@ -163,7 +208,9 @@ def fetch_named_remote_incrementally_with_packfile_uris(
     The exact resulting ``haves`` are sent to Phase318's protocol-v2 request and
     the paired ``known_native_to_local`` mapping is kept attached to the same
     transaction.  Missing map coverage simply yields no have for that ref and
-    therefore preserves full-fetch behavior.  No SHA-1 identity is synthesized.
+    therefore preserves full-fetch behavior.  The server may either offload packs
+    through URI descriptors or keep the terminating pack entirely inline.  No
+    SHA-1 identity is synthesized in either path.
 
     ``None`` is returned only when initial discovery proves that the remote is not
     speaking protocol v2.  A downgrade after successful v2 discovery fails closed.
