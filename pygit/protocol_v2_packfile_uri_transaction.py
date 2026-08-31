@@ -302,7 +302,7 @@ def execute_packfile_uri_fetch_transaction(
     if not isinstance(inline_objects, Mapping):
         raise TypeError("packfile-URI inline objects must be a mapping")
     if not isinstance(message, str) or not message.strip():
-        raise ValueError("packfile-URI transaction message must be non-empty")
+        raise ValueError("packfile-URI fetch transaction message must be non-empty")
 
     _preflight_publication_plan(expected_roots, publications)
     mutable_state = _snapshot_publication_state(repo, publications)
