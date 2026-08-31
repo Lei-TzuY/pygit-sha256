@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
+from .protocol_v2 import ProtocolV2Capabilities
 from .protocol_v2_unborn import (
     ProtocolV2LsRefsResult,
     SmartHttpV2UnbornQueryClient,
@@ -27,6 +28,14 @@ class EmptyRemoteCloneResult:
 
     repo: Repository
     branch: str
+
+
+@dataclass(frozen=True)
+class CloneRefDiscovery:
+    """One unborn-aware clone discovery plus reusable v2 capabilities."""
+
+    refs: ProtocolV2LsRefsResult
+    capabilities: Optional[ProtocolV2Capabilities]
 
 
 def _clone_destination(url: str, path: Optional[str]) -> Path:
@@ -151,21 +160,25 @@ def discover_clone_refs_with_unborn(
     url: str,
     *,
     server_options: Sequence[str] = (),
-) -> Optional[ProtocolV2LsRefsResult]:
+) -> Optional[CloneRefDiscovery]:
     """Perform one unborn-aware protocol-v2 clone discovery.
 
-    The result deliberately preserves Phase315's explicit unborn sidecar while
-    also carrying the ordinary :class:`Advertisement`.  Programmatic clone
-    helpers can therefore make one discovery request sequence and either take
-    the metadata-only empty path or reuse the same advertisement for their
-    existing fetch/import pipeline.
+    The real client retains the exact capabilities used for its ``ls-refs``
+    request so a later fetch can reuse them without another discovery GET.  Test
+    doubles from older phases may expose only ``discover_refs_with_unborn``;
+    those remain supported with ``capabilities=None`` and callers naturally fall
+    back to the established fetch-side discovery behavior.
     """
 
     client = SmartHttpV2UnbornQueryClient(
         url,
         server_options=tuple(server_options),
     )
-    return client.discover_refs_with_unborn()
+    result = client.discover_refs_with_unborn()
+    if result is None:
+        return None
+    capabilities = getattr(client, "_last_capabilities", None)
+    return CloneRefDiscovery(result, capabilities)
 
 
 def initialize_discovered_unborn_clone(
@@ -234,12 +247,13 @@ def try_clone_explicit_unborn_remote(
     destination = _clone_destination(url, path)
     destination_existed = destination.exists()
 
-    result = discover_clone_refs_with_unborn(
+    discovery = discover_clone_refs_with_unborn(
         url,
         server_options=server_options,
     )
-    if result is None:
+    if discovery is None:
         return None
+    result = discovery.refs
 
     # Validate/identify the result before creating repository state.  Ordinary
     # non-empty v2 advertisements remain a pure compatibility fallback.
