@@ -163,26 +163,80 @@ def _publication_guard_lock_paths(repo: Repository) -> tuple[Path, ...]:
     )
 
 
+def _open_publication_guard_lock(lock: Path) -> int:
+    """Exclusively create one guard lock with a non-inheritable descriptor."""
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+
+    fd = os.open(lock, flags, 0o666)
+    try:
+        os.set_inheritable(fd, False)
+    except BaseException:
+        try:
+            os.close(fd)
+        finally:
+            try:
+                lock.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+    return fd
+
+
+def _initialize_publication_guard_lock(lock: Path) -> None:
+    """Create, initialize, and fsync one transaction-owned guard lock.
+
+    The lock is removed on every failure after the exclusive create. Until this
+    helper returns, the current path has not yet joined the caller's acquired
+    lock set, so cleanup must happen here rather than only in the outer rollback.
+    """
+
+    fd = _open_publication_guard_lock(lock)
+    initialized = False
+    try:
+        os.write(fd, b"packfile-uri publication guard\n")
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        initialized = True
+    finally:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if not initialized:
+            try:
+                lock.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def _acquire_publication_guard_locks(repo: Repository) -> list[Path]:
-    """Acquire canonical metadata locks without stealing an existing writer's lock."""
+    """Acquire canonical metadata locks without stealing an existing writer's lock.
+
+    A path is appended to ``acquired`` only after descriptor hardening, marker
+    write, fsync, and close have all succeeded. Failure while initializing the
+    current lock removes that transaction-owned path before previously completed
+    locks are rolled back.
+    """
 
     acquired: list[Path] = []
     try:
         for lock in sorted(_publication_guard_lock_paths(repo)):
             lock.parent.mkdir(parents=True, exist_ok=True)
             try:
-                fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                _initialize_publication_guard_lock(lock)
             except FileExistsError as exc:
                 relative = lock.relative_to(repo.pygit_dir).as_posix()
                 raise RuntimeError(
                     f"cannot lock packfile-URI publication state {relative!r}: "
                     "lock file already exists"
                 ) from exc
-            try:
-                os.write(fd, b"packfile-uri publication guard\n")
-                os.fsync(fd)
-            finally:
-                os.close(fd)
             acquired.append(lock)
     except Exception:
         _release_publication_guard_locks(acquired)
@@ -248,7 +302,7 @@ def execute_packfile_uri_fetch_transaction(
     if not isinstance(inline_objects, Mapping):
         raise TypeError("packfile-URI inline objects must be a mapping")
     if not isinstance(message, str) or not message.strip():
-        raise ValueError("packfile-URI fetch transaction message must be non-empty")
+        raise ValueError("packfile-URI transaction message must be non-empty")
 
     _preflight_publication_plan(expected_roots, publications)
     mutable_state = _snapshot_publication_state(repo, publications)
