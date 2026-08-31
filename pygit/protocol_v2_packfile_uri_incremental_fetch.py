@@ -18,7 +18,6 @@ from typing import Iterable, Mapping, Optional, Sequence
 
 from .protocol_v2_packfile_uri_batch import (
     DownloadedPackfileUriBatch,
-    _positive_integer,
     download_packfile_uris,
 )
 from .protocol_v2_packfile_uri_connectivity import certify_packfile_uri_roots
@@ -80,9 +79,12 @@ def _download_optional_packfile_uris(
 
     Advertising/requesting ``packfile-uris`` does not require the server to
     offload any pack.  A normal inline ``packfile`` section with zero URI
-    descriptors is therefore a valid protocol-v2 result.  Preserve the same
-    resource-option validation as the ordinary downloader even when no network
-    descriptor exists, then return an explicit empty verified batch for staging.
+    descriptors is therefore a valid protocol-v2 result.
+
+    The existing batch downloader remains authoritative for iterable/type and
+    resource-bound validation.  Phase334 translates only its exact empty-batch
+    rejection into an explicit verified empty batch; every other error is
+    preserved unchanged.
     """
 
     try:
@@ -90,7 +92,7 @@ def _download_optional_packfile_uris(
     except TypeError as exc:
         raise TypeError("protocol-v2 packfile URI descriptors must be iterable") from exc
 
-    if items:
+    try:
         return download_packfile_uris(
             items,
             timeout=timeout,
@@ -99,12 +101,10 @@ def _download_optional_packfile_uris(
             max_packs=max_packs,
             opener=opener,
         )
-
-    _positive_integer(timeout, "timeout")
-    _positive_integer(max_pack_bytes, "max_pack_bytes")
-    _positive_integer(max_total_bytes, "max_total_bytes")
-    _positive_integer(max_packs, "max_packs")
-    return DownloadedPackfileUriBatch((), {}, 0)
+    except ValueError as exc:
+        if items or str(exc) != "protocol-v2 packfile URI batch must contain at least one descriptor":
+            raise
+        return DownloadedPackfileUriBatch((), {}, 0)
 
 
 def execute_incremental_packfile_uri_fetch_transaction(
