@@ -60,12 +60,13 @@ def _worktree_conflicts(repo, target_paths: set[str]) -> list[str]:
             conflicts.add(relative)
             continue
 
-        # A file/symlink in an ancestor position prevents creating a directory
-        # needed by the target tree (for example local ``dir`` vs target
-        # ``dir/file``).  Existing directories themselves are harmless.
+        # A file or symlink in an ancestor position prevents safely creating a
+        # directory needed by the target tree (for example local ``dir`` vs
+        # target ``dir/file``).  A symlink-to-directory is still a conflict: the
+        # checkout must never follow it outside the repository worktree.
         parent = path.parent
         while parent != repo.worktree:
-            if _path_exists(parent) and not parent.is_dir():
+            if parent.is_symlink() or (_path_exists(parent) and not parent.is_dir()):
                 conflicts.add(parent.relative_to(repo.worktree).as_posix())
                 break
             parent = parent.parent
