@@ -47,7 +47,12 @@ transaction's guarded populated-FETCH_HEAD + tracking-ref commit window.
 Phase354 hardens that state-lock initialization against short writes, EINTR,
 zero-progress writes, descriptor-hardening failures, and close failures. The
 state guard is considered initialized only after its complete marker is written,
-fsynced, and the owned descriptor closes successfully.
+fsynced, and the setup descriptor closes successfully.
+
+Phase356 pins the initialized state-lock inode through a retained non-inheritable
+descriptor. Release unlinks the canonical pathname only when it still names that
+exact inode, so cleanup cannot deliberately delete a replacement lock created
+after the original pathname was removed.
 """
 
 from __future__ import annotations
@@ -103,6 +108,16 @@ from .repo import Repository
 
 _FETCH_HEAD_STATE_GUARD = "FETCH_HEAD.state.lock"
 _FETCH_HEAD_STATE_GUARD_MARKER = b"packfile-uri FETCH_HEAD state guard\n"
+
+
+@dataclass(frozen=True)
+class _FetchHeadStateGuardOwnership:
+    fd: int
+    device: int
+    inode: int
+
+
+_FETCH_HEAD_STATE_GUARD_OWNERSHIP: dict[Path, _FetchHeadStateGuardOwnership] = {}
 
 
 @dataclass(frozen=True)
@@ -188,15 +203,21 @@ def _acquire_fetch_head_state_guard(pygit_dir: Path) -> Path:
     replacement, while this guard correlates two separate replacement moments:
     the early stale clear and the final populated publication/ref-CAS window.
 
-    A transaction owns the path from successful exclusive creation onward. It is
-    accepted as initialized only after descriptor hardening, complete marker
-    write, fsync, and close have all succeeded. Any failure before then removes
-    only the path created by this call.
+    The setup descriptor is still closed before this function returns, preserving
+    Phase354's acquisition contract. Before that close, Phase356 duplicates the
+    descriptor, hardens the duplicate as non-inheritable, records its filesystem
+    identity, and retains it until release. The retained descriptor pins the
+    original inode even if an external actor removes the canonical pathname.
     """
 
     root = Path(pygit_dir)
     root.mkdir(parents=True, exist_ok=True)
     lock = _fetch_head_state_guard_path(root)
+    if lock in _FETCH_HEAD_STATE_GUARD_OWNERSHIP:
+        raise RuntimeError(
+            "cannot lock incremental FETCH_HEAD state: lock file already exists"
+        )
+
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
@@ -210,18 +231,36 @@ def _acquire_fetch_head_state_guard(pygit_dir: Path) -> Path:
             "cannot lock incremental FETCH_HEAD state: lock file already exists"
         ) from exc
 
+    ownership_fd = -1
     committed = False
     try:
         os.set_inheritable(fd, False)
         _write_fetch_head_state_guard_marker(fd)
         os.fsync(fd)
+
+        ownership_fd = os.dup(fd)
+        os.set_inheritable(ownership_fd, False)
+        stat_result = os.fstat(ownership_fd)
+        ownership = _FetchHeadStateGuardOwnership(
+            fd=ownership_fd,
+            device=stat_result.st_dev,
+            inode=stat_result.st_ino,
+        )
+
         os.close(fd)
         fd = -1
+        _FETCH_HEAD_STATE_GUARD_OWNERSHIP[lock] = ownership
+        ownership_fd = -1
         committed = True
     finally:
         if fd != -1:
             try:
                 os.close(fd)
+            except OSError:
+                pass
+        if ownership_fd != -1:
+            try:
+                os.close(ownership_fd)
             except OSError:
                 pass
         if not committed:
@@ -233,12 +272,31 @@ def _acquire_fetch_head_state_guard(pygit_dir: Path) -> Path:
 
 
 def _release_fetch_head_state_guard(lock: Path) -> None:
-    """Release only the state guard owned by the current fetch boundary."""
+    """Release only a pathname that still names this transaction's state lock."""
+
+    path = Path(lock)
+    ownership = _FETCH_HEAD_STATE_GUARD_OWNERSHIP.pop(path, None)
+    if ownership is None:
+        return
 
     try:
-        Path(lock).unlink()
-    except FileNotFoundError:
-        pass
+        try:
+            stat_result = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        current = (stat_result.st_dev, stat_result.st_ino)
+        expected = (ownership.device, ownership.inode)
+        if current != expected:
+            return
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    finally:
+        try:
+            os.close(ownership.fd)
+        except OSError:
+            pass
 
 
 def _clear_fetch_head_for_fetch(repo: Repository, *, source: str) -> None:
