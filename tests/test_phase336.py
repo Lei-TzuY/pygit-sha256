@@ -178,6 +178,6 @@ def test_ref_publication_failure_can_leave_only_valid_immutable_lmap(tmp_path: P
             incremental,
         )
 
-    assert repo.refs.get("refs/remotes/origin/main") is None
+    assert repo.refs.get_remote("origin", "main") is None
     assert lookup_local_sha256(repo, native_tip) == local_tip
     assert lookup_native_sha1(repo, local_tip) == native_tip
