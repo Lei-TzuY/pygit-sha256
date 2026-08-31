@@ -6,10 +6,15 @@ the inode it acquired, and a successful namespace removal is followed by a
 parent-directory durability fence on POSIX.
 
 Phase362 adds a batch cleanup boundary for callers that own several lockfiles at
-once.  Cleanup proceeds in reverse acquisition order and is best-effort across
-all owned locks: the first error is preserved and re-raised only after every
-remaining ownership descriptor has had a chance to close/release.  This avoids
-turning one durability failure into stranded sibling locks.
+once. Cleanup proceeds in reverse acquisition order and is best-effort across all
+owned locks: the first error is preserved and re-raised only after every remaining
+ownership descriptor has had a chance to close/release.
+
+Phase363 makes the batch boundary directory-aware. All owned pathnames are first
+released in reverse acquisition order, then each affected parent directory is
+fsynced at most once. This preserves success-after-durability semantics while
+avoiding redundant directory fences for sibling lockfiles such as the repository
+publication guards that all live directly under ``.pygit``.
 """
 
 from __future__ import annotations
@@ -51,18 +56,12 @@ def fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
-def release_owned_lock_durably(path: Path, ownership: OwnedLockIdentity) -> bool:
-    """Release an owned lock without unlinking a replacement pathname.
+def _unlink_owned_lock(path: Path, ownership: OwnedLockIdentity) -> bool:
+    """Remove one still-owned pathname and always close its retained descriptor.
 
-    The retained descriptor pins the original inode.  The live pathname is
-    inspected without following symlinks and is removed only when its
-    ``(st_dev, st_ino)`` pair still matches the descriptor-derived identity.
-    Missing/replaced paths are preserved.  If this call removes the pathname, it
-    fsyncs the parent directory before reporting success.
-
-    The ownership descriptor is closed on every path, including directory-fsync
-    failure.  A post-unlink fsync error propagates: the lock may already be gone,
-    but the caller must not report durable cleanup success.
+    No directory durability fence is performed here. The helper exists so the
+    batch release path can coalesce multiple sibling namespace mutations behind a
+    single parent-directory fsync without weakening inode-aware ownership checks.
     """
 
     lock = Path(path)
@@ -82,7 +81,6 @@ def release_owned_lock_durably(path: Path, ownership: OwnedLockIdentity) -> bool
             lock.unlink()
         except FileNotFoundError:
             return False
-        fsync_directory(lock.parent)
         return True
     finally:
         try:
@@ -91,35 +89,84 @@ def release_owned_lock_durably(path: Path, ownership: OwnedLockIdentity) -> bool
             pass
 
 
+def release_owned_lock_durably(path: Path, ownership: OwnedLockIdentity) -> bool:
+    """Release an owned lock without unlinking a replacement pathname.
+
+    The retained descriptor pins the original inode. The live pathname is
+    inspected without following symlinks and is removed only when its
+    ``(st_dev, st_ino)`` pair still matches the descriptor-derived identity.
+    Missing/replaced paths are preserved. If this call removes the pathname, it
+    fsyncs the parent directory before reporting success.
+
+    The ownership descriptor is closed on every path, including directory-fsync
+    failure. A post-unlink fsync error propagates: the lock may already be gone,
+    but the caller must not report durable cleanup success.
+    """
+
+    lock = Path(path)
+    removed = _unlink_owned_lock(lock, ownership)
+    if not removed:
+        return False
+    fsync_directory(lock.parent)
+    return True
+
+
 def release_owned_locks_durably(
     locks: Iterable[tuple[Path, OwnedLockIdentity]],
 ) -> tuple[Path, ...]:
-    """Durably release several owned locks without stranding siblings on error.
+    """Durably release several owned locks with one fence per changed directory.
 
-    Callers normally acquire several lockfiles in forward order and release them
-    in reverse order.  Each item keeps the single-lock success-after-durability
-    contract: an owned pathname is removed only when its live inode still matches,
-    and a successful removal is followed by a parent-directory fsync on POSIX.
+    Pathname ownership is checked in reverse acquisition order. Missing or
+    replaced pathnames are preserved, and every retained ownership descriptor is
+    closed even if another release fails.
 
-    A release or durability failure for one lock does *not* stop cleanup of locks
-    that were acquired earlier.  The first exception is remembered, every later
-    item is still processed (therefore closing every retained descriptor), and the
-    original exception is re-raised after cleanup completes.  The returned tuple
-    contains only pathnames whose owned namespace entries were durably removed.
+    Successfully unlinked pathnames are grouped by parent directory. After all
+    unlink attempts complete, each affected parent is fsynced at most once, in
+    first-mutation order. This is sufficient to durably fence all sibling
+    removals in that directory and avoids redundant fsyncs for lock groups that
+    share a parent.
+
+    Failures remain best-effort. The first unlink or directory-fsync exception is
+    preserved, later locks and directories are still processed, and the first
+    exception is re-raised only after cleanup is exhausted. The returned tuple
+    contains only pathnames whose parent-directory fence completed successfully;
+    if the function raises, callers must not infer durable success for removals in
+    the failing directory.
     """
 
     items = tuple(locks)
-    removed: list[Path] = []
+    removed_by_parent: dict[Path, list[Path]] = {}
+    parent_order: list[Path] = []
     first_error: BaseException | None = None
 
     for path, ownership in reversed(items):
+        lock = Path(path)
         try:
-            if release_owned_lock_durably(path, ownership):
-                removed.append(Path(path))
+            removed = _unlink_owned_lock(lock, ownership)
         except BaseException as exc:
             if first_error is None:
                 first_error = exc
+            continue
+
+        if not removed:
+            continue
+
+        parent = lock.parent
+        if parent not in removed_by_parent:
+            removed_by_parent[parent] = []
+            parent_order.append(parent)
+        removed_by_parent[parent].append(lock)
+
+    durably_removed: list[Path] = []
+    for parent in parent_order:
+        try:
+            fsync_directory(parent)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+        durably_removed.extend(removed_by_parent[parent])
 
     if first_error is not None:
         raise first_error
-    return tuple(removed)
+    return tuple(durably_removed)
