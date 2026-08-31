@@ -1,9 +1,11 @@
 """Repository-level orchestration for verified protocol-v2 packfile-URI fetches.
 
 Phase324 composes the already isolated Phase320-323 boundaries into one explicit
-transaction pipeline. Phase325 additionally snapshots the small mutable
-publication surface before any network/repository work and verifies that no
-pre-publication stage (or concurrent writer) changed it before refs are committed.
+transaction pipeline. Phase325 snapshots the small mutable publication surface
+before any network/repository work and verifies that no pre-publication stage (or
+concurrent writer) changed it before refs are committed. Phase326 closes the
+remaining check-to-publication window for Git-managed mutable metadata by holding
+canonical lockfiles across the final state comparison and ref transaction.
 Network descriptors are fully verified first, native objects are imported through
 the SHA-256 staging boundary, requested roots are certified, and compare-and-swap
 ref publication remains the final mutable step.
@@ -11,6 +13,7 @@ ref publication remains the final mutable step.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -142,6 +145,61 @@ def _assert_publication_state_unchanged(
         )
 
 
+def _publication_guard_lock_paths(repo: Repository) -> tuple[Path, ...]:
+    """Return non-ref lockfiles held across final validation and publication.
+
+    Target refs are intentionally absent here: Phase323 acquires their canonical
+    ``<ref>.lock`` files and performs expected-old CAS while publishing.  These
+    additional locks protect mutable repository-wide metadata that Phase325
+    snapshots but that a target-ref CAS alone cannot serialize.
+    """
+
+    base = repo.pygit_dir
+    return (
+        base / "HEAD.lock",
+        base / "packed-refs.lock",
+        base / "promisor.json.lock",
+        base / "shallow.lock",
+    )
+
+
+def _acquire_publication_guard_locks(repo: Repository) -> list[Path]:
+    """Acquire canonical metadata locks without stealing an existing writer's lock."""
+
+    acquired: list[Path] = []
+    try:
+        for lock in sorted(_publication_guard_lock_paths(repo)):
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            except FileExistsError as exc:
+                relative = lock.relative_to(repo.pygit_dir).as_posix()
+                raise RuntimeError(
+                    f"cannot lock packfile-URI publication state {relative!r}: "
+                    "lock file already exists"
+                ) from exc
+            try:
+                os.write(fd, b"packfile-uri publication guard\n")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            acquired.append(lock)
+    except Exception:
+        _release_publication_guard_locks(acquired)
+        raise
+    return acquired
+
+
+def _release_publication_guard_locks(locks: Iterable[Path]) -> None:
+    """Release only locks acquired by this transaction."""
+
+    for lock in reversed(tuple(locks)):
+        try:
+            lock.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def execute_packfile_uri_fetch_transaction(
     repo: Repository,
     descriptors: Iterable[PackfileUriDescriptor],
@@ -167,10 +225,15 @@ def execute_packfile_uri_fetch_transaction(
        objects may be published to the destination store.
     3. Re-read and certify every requested native root through Phase322, proving it
        maps to a published content-derived SHA-256 object of the required Git type.
-    4. Verify that the bounded mutable publication surface is byte-for-byte
-       unchanged since preflight, then publish all refs through Phase323's canonical
-       lock + expected-old CAS transaction.  This is intentionally the final mutable
-       commit point.
+    4. Acquire repository-wide metadata locks, verify that the bounded mutable
+       publication surface is byte-for-byte unchanged since preflight, then publish
+       all target refs through Phase323's canonical per-ref lock + expected-old CAS
+       transaction.  This is intentionally the final mutable commit point.
+
+    The Phase326 locks are acquired only after the expensive network/import work,
+    minimizing contention.  Any writer that changed metadata before the locks were
+    acquired is caught by the Phase325 byte snapshot; compliant Git-style writers
+    are then excluded until the target-ref transaction completes.
 
     A failure before step 4 publishes no refs.  Valid immutable objects staged in
     step 2 may remain unreachable.  Any concurrent or accidental mutation of HEAD,
@@ -201,13 +264,17 @@ def execute_packfile_uri_fetch_transaction(
     staged = stage_packfile_uri_import(repo.store, inline_objects, batch)
     certificate = certify_packfile_uri_roots(repo.store, staged, expected_roots)
 
-    _assert_publication_state_unchanged(repo, publications, mutable_state)
-    published_refs = publish_packfile_uri_refs(
-        repo,
-        certificate,
-        publications,
-        message=message,
-    )
+    guard_locks = _acquire_publication_guard_locks(repo)
+    try:
+        _assert_publication_state_unchanged(repo, publications, mutable_state)
+        published_refs = publish_packfile_uri_refs(
+            repo,
+            certificate,
+            publications,
+            message=message,
+        )
+    finally:
+        _release_publication_guard_locks(guard_locks)
 
     return PackfileUriFetchTransactionResult(
         batch=batch,
