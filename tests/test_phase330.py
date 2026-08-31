@@ -40,15 +40,18 @@ def test_lmap_v1_header_offsets_tables_and_sha256_trailer_match_git_format():
     storage_offset = _u64(data, 28)
     compat_offset = _u64(data, 44)
     trailer_offset = _u64(data, 52)
-    assert storage_offset % 4 == 0
-    assert compat_offset % 4 == 0
+    storage_short = _u32(data, 24)
+    compat_short = _u32(data, 40)
+    # Git aligns the full-name / metadata tables, not the shortened-name
+    # table's starting offset itself.
+    assert (storage_offset + 2 * storage_short) % 4 == 0
+    assert (compat_offset + 2 * compat_short) % 4 == 0
     assert trailer_offset % 4 == 0
     assert trailer_offset + 32 == len(data)
     assert hashlib.sha256(data[:trailer_offset]).digest() == data[trailer_offset:]
 
     # First-format full names are SHA-256-sorted and metadata type 1 means
     # "loose object" in Git's LMAP format.
-    storage_short = _u32(data, 24)
     storage_full = storage_offset + 2 * storage_short
     assert data[storage_full : storage_full + 32] == bytes.fromhex("10" * 32)
     assert data[storage_full + 32 : storage_full + 64] == bytes.fromhex("20" * 32)
