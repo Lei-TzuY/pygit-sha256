@@ -1,14 +1,15 @@
-"""Crash-safe FETCH_HEAD replacement for SHA-256-native fetches.
+"""Crash-safe, serialized FETCH_HEAD replacement for SHA-256-native fetches.
 
-Phase344 adds a durability boundary for the replace-style FETCH_HEAD writes used
-by the mapped incremental packfile-URI path.  The existing formatter remains
-authoritative; this module only strengthens publication ordering.
+Phase344 added the durability boundary for replace-style FETCH_HEAD writes used
+by the mapped incremental packfile-URI path. Phase345 aligns that boundary with
+Git's lockfile discipline: one canonical ``FETCH_HEAD.lock`` is acquired with
+exclusive creation, populated and fsynced, then atomically renamed to the live
+metadata path.
 """
 
 from __future__ import annotations
 
 import os
-import tempfile
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -64,6 +65,23 @@ def _render_fetch_head(
     return "".join(lines).encode("utf-8")
 
 
+def _acquire_fetch_head_lock(pygit_dir: Path) -> tuple[int, Path]:
+    """Acquire the canonical FETCH_HEAD writer lock without stealing it.
+
+    Git's lockfile API creates ``<filename>.lock`` with ``O_CREAT|O_EXCL`` so
+    concurrent writers fail rather than overwrite one another. Keep the raw
+    ``FileExistsError`` contract: callers get an unambiguous contention signal
+    and the existing lock remains untouched.
+    """
+
+    lock_path = pygit_dir / "FETCH_HEAD.lock"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    fd = os.open(lock_path, flags, 0o666)
+    return fd, lock_path
+
+
 def write_fetch_head_durable(
     pygit_dir: Path,
     refs: Mapping[str, str],
@@ -71,17 +89,21 @@ def write_fetch_head_durable(
     source: str,
     mergeable: Sequence[str] = (),
 ) -> None:
-    """Atomically replace FETCH_HEAD and fence the directory before success.
+    """Serialize, atomically replace, and durably publish ``FETCH_HEAD``.
 
-    The replacement is written to a same-directory temporary file, flushed with
-    ``fsync()``, atomically installed with ``os.replace()``, and followed by a
-    directory ``fsync`` on POSIX.  Empty ``refs`` therefore durably truncates a
-    stale FETCH_HEAD through the same crash-safe sequence.
+    The entire replacement is rendered before lock acquisition. Publication
+    then follows Git-style lockfile ownership: create ``FETCH_HEAD.lock`` with
+    exclusive creation, write and ``fsync()`` it, atomically rename that exact
+    lockfile to ``FETCH_HEAD``, and finally fsync the repository metadata
+    directory on POSIX. Empty ``refs`` therefore durably truncates a stale file
+    through the same serialized path.
 
-    If the final directory fsync fails, the new FETCH_HEAD may already be
-    visible.  The exception is propagated and callers must not advance mutable
-    tracking refs.  Retrying is safe because the whole file is replaced from a
-    deterministic rendering.
+    A pre-existing ``FETCH_HEAD.lock`` is never overwritten, unlinked, or
+    treated as stale. If writing or replacement fails after this call acquires
+    the lock, only this call's lockfile is rolled back. If the final directory
+    fsync fails after replacement, the new complete FETCH_HEAD may already be
+    visible; the exception propagates and callers must not advance mutable
+    tracking refs.
     """
 
     if not isinstance(pygit_dir, Path):
@@ -90,20 +112,19 @@ def write_fetch_head_durable(
 
     pygit_dir.mkdir(parents=True, exist_ok=True)
     destination = pygit_dir / "FETCH_HEAD"
-    fd, tmp_name = tempfile.mkstemp(prefix="FETCH_HEAD.", suffix=".lock", dir=pygit_dir)
-    tmp_path = Path(tmp_name)
-    installed = False
+    fd, lock_path = _acquire_fetch_head_lock(pygit_dir)
+    committed = False
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp_path, destination)
-        installed = True
+        os.replace(lock_path, destination)
+        committed = True
         _fsync_directory(pygit_dir)
     finally:
-        if not installed:
+        if not committed:
             try:
-                tmp_path.unlink()
+                lock_path.unlink()
             except FileNotFoundError:
                 pass
