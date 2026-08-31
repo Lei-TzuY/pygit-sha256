@@ -5,10 +5,10 @@ boundary at once: native SHA-1 ``have`` tips go to the protocol-v2 request, whil
 the exact same plan's validated native->local closure goes to the staging
 ``NativeImporter`` as known existing objects.
 
-Keeping those two values inseparable is the core safety property.  A server may
-legitimately omit any object reachable from a ``have``; advertising a have
-without giving the importer the corresponding local identities would turn a
-valid incremental response into an incomplete graph.
+Phase336 additionally persists every newly staged native->local identity set as
+Git-compatible LMAP v1 compatibility metadata before any mutable ref publication.
+This makes repeated incremental fetches self-feeding without synthesizing remote
+SHA-1 identity from local SHA-256 object ids.
 """
 
 from __future__ import annotations
@@ -16,24 +16,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional, Sequence
 
+from .loose_object_map import PublishedLooseObjectMap, publish_staged_loose_object_map
 from .protocol_v2_packfile_uri_batch import (
     DownloadedPackfileUriBatch,
     download_packfile_uris,
 )
-from .protocol_v2_packfile_uri_connectivity import certify_packfile_uri_roots
+from .protocol_v2_packfile_uri_connectivity import (
+    PackfileUriRootCertificate,
+    certify_packfile_uri_roots,
+)
 from .protocol_v2_packfile_uri_incremental import (
     PackfileUriIncrementalState,
     plan_packfile_uri_incremental_state,
 )
 from .protocol_v2_packfile_uri_remote_fetch import _configured_remote_url
 from .protocol_v2_packfile_uri_repository import _validate_transport_publication_binding
-from .protocol_v2_packfile_uri_stage import stage_packfile_uri_import
+from .protocol_v2_packfile_uri_stage import StagedPackfileUriImport, stage_packfile_uri_import
 from .protocol_v2_packfile_uri_tracking import (
     PackfileUriRemoteTrackingPlan,
     plan_packfile_uri_remote_tracking_publication,
 )
 from .protocol_v2_packfile_uri_transaction import (
-    PackfileUriFetchTransactionResult,
     _acquire_publication_guard_locks,
     _assert_publication_state_unchanged,
     _preflight_publication_plan,
@@ -54,6 +57,17 @@ from .repo import Repository
 
 
 @dataclass(frozen=True)
+class IncrementalPackfileUriFetchTransactionResult:
+    """Successful incremental transaction including immutable LMAP publication."""
+
+    batch: DownloadedPackfileUriBatch
+    staged: StagedPackfileUriImport
+    object_map: PublishedLooseObjectMap
+    certificate: PackfileUriRootCertificate
+    published_refs: dict[str, str]
+
+
+@dataclass(frozen=True)
 class IncrementalNamedRemotePackfileUriFetchResult:
     """Successful mapped incremental named-remote fetch and ref publication."""
 
@@ -63,7 +77,7 @@ class IncrementalNamedRemotePackfileUriFetchResult:
     plan: PackfileUriRemoteTrackingPlan
     incremental: PackfileUriIncrementalState
     transport: V2PackfileUriFetchResult
-    transaction: PackfileUriFetchTransactionResult
+    transaction: IncrementalPackfileUriFetchTransactionResult
 
 
 def _download_optional_packfile_uris(
@@ -78,11 +92,11 @@ def _download_optional_packfile_uris(
     """Download an external batch, or represent a valid inline-only response.
 
     Advertising/requesting ``packfile-uris`` does not require the server to
-    offload any pack.  A normal inline ``packfile`` section with zero URI
+    offload any pack. A normal inline ``packfile`` section with zero URI
     descriptors is therefore a valid protocol-v2 result.
 
     The existing batch downloader remains authoritative for iterable/type and
-    resource-bound validation.  Phase334 translates only its exact empty-batch
+    resource-bound validation. Phase334 translates only its exact empty-batch
     rejection into an explicit verified empty batch; every other error is
     preserved unchanged.
     """
@@ -121,14 +135,19 @@ def execute_incremental_packfile_uri_fetch_transaction(
     max_total_bytes: int = 512 * 1024 * 1024,
     max_packs: int = 64,
     opener=None,
-) -> PackfileUriFetchTransactionResult:
-    """Run the existing guarded repository transaction with mapped known objects.
+) -> IncrementalPackfileUriFetchTransactionResult:
+    """Run the guarded mapped-incremental repository transaction.
 
-    This deliberately mirrors Phase324-326's ordering and reuses its exact
-    preflight/snapshot/lock helpers.  The only semantic differences are that
-    Phase333's validated ``known_native_to_local`` closure is supplied to the
-    known-aware staging importer and a server may keep the complete pack inline
-    instead of returning any external URI descriptor.
+    Ordering is intentionally strict:
+
+    ``download -> stage -> immutable LMAP -> certify -> guard/CAS refs``.
+
+    The server may either offload packs through URI descriptors or keep the
+    terminating pack entirely inline. The LMAP file is content-addressed immutable
+    compatibility metadata. Publishing it before root certification/ref CAS is safe:
+    a later failure can leave only a verified mapping for already-published immutable
+    SHA-256 objects, never a partially advanced ref. If LMAP publication itself
+    fails, no certification or ref publication is attempted.
     """
 
     if not isinstance(repo, Repository):
@@ -159,6 +178,7 @@ def execute_incremental_packfile_uri_fetch_transaction(
         batch,
         known_native_to_local=incremental.known_native_to_local,
     )
+    object_map = publish_staged_loose_object_map(repo, staged)
     certificate = certify_packfile_uri_roots(repo.store, staged, expected_roots)
 
     guard_locks = _acquire_publication_guard_locks(repo)
@@ -173,9 +193,10 @@ def execute_incremental_packfile_uri_fetch_transaction(
     finally:
         _release_publication_guard_locks(guard_locks)
 
-    return PackfileUriFetchTransactionResult(
+    return IncrementalPackfileUriFetchTransactionResult(
         batch=batch,
         staged=staged,
+        object_map=object_map,
         certificate=certificate,
         published_refs=dict(published_refs),
     )
@@ -207,13 +228,16 @@ def fetch_named_remote_incrementally_with_packfile_uris(
 
     The exact resulting ``haves`` are sent to Phase318's protocol-v2 request and
     the paired ``known_native_to_local`` mapping is kept attached to the same
-    transaction.  Missing map coverage simply yields no have for that ref and
-    therefore preserves full-fetch behavior.  The server may either offload packs
-    through URI descriptors or keep the terminating pack entirely inline.  No
-    SHA-1 identity is synthesized in either path.
+    transaction. Missing map coverage simply yields no have for that ref and
+    therefore preserves full-fetch behavior. The server may either offload packs
+    through URI descriptors or keep the terminating pack entirely inline.
+
+    Every newly fetched mapping is persisted as immutable Git LMAP metadata before
+    refs advance, allowing the next invocation to reuse the newly published tip
+    without guessing native identity. No SHA-1 identity is synthesized.
 
     ``None`` is returned only when initial discovery proves that the remote is not
-    speaking protocol v2.  A downgrade after successful v2 discovery fails closed.
+    speaking protocol v2. A downgrade after successful v2 discovery fails closed.
     """
 
     if not isinstance(repo, Repository):
