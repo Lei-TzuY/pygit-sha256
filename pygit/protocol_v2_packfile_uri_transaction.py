@@ -14,6 +14,12 @@ Phase351 hardens publication-guard initialization against short or interrupted
 low-level writes. A guard is considered initialized only after its complete
 marker has been written and fsynced; zero-progress writes fail closed and reuse
 Phase349's transaction-owned lock cleanup.
+
+Phase353 retains a non-inheritable descriptor for every acquired publication
+guard and records its filesystem identity. Release checks that the pathname still
+names that exact inode before unlinking it. If an external actor removes and
+recreates a guard pathname while this transaction is active, cleanup closes the
+old descriptor but leaves the replacement lock in place.
 """
 
 from __future__ import annotations
@@ -45,6 +51,16 @@ from .repo import Repository
 
 
 _PUBLICATION_GUARD_MARKER = b"packfile-uri publication guard\n"
+
+
+@dataclass(frozen=True)
+class _PublicationGuardOwnership:
+    fd: int
+    device: int
+    inode: int
+
+
+_PUBLICATION_GUARD_OWNERSHIP: dict[Path, _PublicationGuardOwnership] = {}
 
 
 @dataclass(frozen=True)
@@ -219,10 +235,10 @@ def _open_publication_guard_lock(lock: Path) -> int:
 def _initialize_publication_guard_lock(lock: Path) -> None:
     """Create, initialize, and fsync one transaction-owned guard lock.
 
-    The lock is removed on every failure after the exclusive create. Until this
-    helper returns, the current path has not yet joined the caller's acquired
-    lock set, so cleanup must happen here rather than only in the outer rollback.
-    The complete marker must be written before the fsync boundary is accepted.
+    This compatibility helper preserves Phase349/351's standalone boundary: the
+    descriptor is closed on success and the caller owns the initialized pathname.
+    The transaction acquisition path below uses the retaining variant so inode
+    ownership remains pinned for the complete critical section.
     """
 
     fd = _open_publication_guard_lock(lock)
@@ -246,13 +262,41 @@ def _initialize_publication_guard_lock(lock: Path) -> None:
                 pass
 
 
+def _initialize_owned_publication_guard_lock(lock: Path) -> _PublicationGuardOwnership:
+    """Initialize one guard and retain its descriptor until transaction release."""
+
+    fd = _open_publication_guard_lock(lock)
+    initialized = False
+    try:
+        _write_publication_guard_marker(fd)
+        os.fsync(fd)
+        stat_result = os.fstat(fd)
+        ownership = _PublicationGuardOwnership(
+            fd=fd,
+            device=stat_result.st_dev,
+            inode=stat_result.st_ino,
+        )
+        initialized = True
+        return ownership
+    finally:
+        if not initialized:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                lock.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def _acquire_publication_guard_locks(repo: Repository) -> list[Path]:
     """Acquire canonical metadata locks without stealing an existing writer's lock.
 
     A path is appended to ``acquired`` only after descriptor hardening, complete
-    marker write, fsync, and close have all succeeded. Failure while initializing
-    the current lock removes that transaction-owned path before previously
-    completed locks are rolled back.
+    marker write, fsync, and descriptor-derived identity capture have succeeded.
+    The retained non-inheritable descriptor pins the owned inode until release so
+    unlink/recreate cannot recycle that identity underneath this transaction.
     """
 
     acquired: list[Path] = []
@@ -260,13 +304,14 @@ def _acquire_publication_guard_locks(repo: Repository) -> list[Path]:
         for lock in sorted(_publication_guard_lock_paths(repo)):
             lock.parent.mkdir(parents=True, exist_ok=True)
             try:
-                _initialize_publication_guard_lock(lock)
+                ownership = _initialize_owned_publication_guard_lock(lock)
             except FileExistsError as exc:
                 relative = lock.relative_to(repo.pygit_dir).as_posix()
                 raise RuntimeError(
                     f"cannot lock packfile-URI publication state {relative!r}: "
                     "lock file already exists"
                 ) from exc
+            _PUBLICATION_GUARD_OWNERSHIP[lock] = ownership
             acquired.append(lock)
     except Exception:
         _release_publication_guard_locks(acquired)
@@ -275,13 +320,38 @@ def _acquire_publication_guard_locks(repo: Repository) -> list[Path]:
 
 
 def _release_publication_guard_locks(locks: Iterable[Path]) -> None:
-    """Release only locks acquired by this transaction."""
+    """Release only guard pathnames that still name this transaction's inode.
+
+    Git-style lockfiles rely on cooperative ownership. An external actor may
+    nevertheless remove a lock pathname and create a new lock before the original
+    owner reaches cleanup. A path-only ``unlink`` would then delete the new lock.
+    Phase353 compares the current non-following path identity with the still-open
+    transaction-owned descriptor. A missing or replaced path is left alone, and
+    the retained descriptor is always closed exactly once.
+    """
 
     for lock in reversed(tuple(locks)):
+        ownership = _PUBLICATION_GUARD_OWNERSHIP.pop(lock, None)
+        if ownership is None:
+            continue
         try:
-            lock.unlink()
-        except FileNotFoundError:
-            pass
+            try:
+                stat_result = os.stat(lock, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            current = (stat_result.st_dev, stat_result.st_ino)
+            expected = (ownership.device, ownership.inode)
+            if current != expected:
+                continue
+            try:
+                lock.unlink()
+            except FileNotFoundError:
+                pass
+        finally:
+            try:
+                os.close(ownership.fd)
+            except OSError:
+                pass
 
 
 def execute_packfile_uri_fetch_transaction(
