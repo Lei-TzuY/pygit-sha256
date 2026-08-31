@@ -6,7 +6,7 @@ import argparse
 from typing import Sequence
 
 from .fetch_configured import fetch_configured
-from .pull_unborn_transition import try_pull_unborn_upstream
+from .pull_unborn_partial_transition import try_pull_unborn_upstream
 from .remote_ops import resolve_pull_source
 from .tracking import find_repo
 
