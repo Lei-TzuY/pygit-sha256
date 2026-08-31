@@ -4,6 +4,12 @@ This module factors the common release boundary needed by the packfile-URI
 publication stack: a transaction may unlink only the pathname that still names
 the inode it acquired, and a successful namespace removal is followed by a
 parent-directory durability fence on POSIX.
+
+Phase362 adds a batch cleanup boundary for callers that own several lockfiles at
+once.  Cleanup proceeds in reverse acquisition order and is best-effort across
+all owned locks: the first error is preserved and re-raised only after every
+remaining ownership descriptor has had a chance to close/release.  This avoids
+turning one durability failure into stranded sibling locks.
 """
 
 from __future__ import annotations
@@ -11,6 +17,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 
 @dataclass(frozen=True)
@@ -59,7 +66,6 @@ def release_owned_lock_durably(path: Path, ownership: OwnedLockIdentity) -> bool
     """
 
     lock = Path(path)
-    removed = False
     try:
         try:
             stat_result = os.stat(lock, follow_symlinks=False)
@@ -76,7 +82,6 @@ def release_owned_lock_durably(path: Path, ownership: OwnedLockIdentity) -> bool
             lock.unlink()
         except FileNotFoundError:
             return False
-        removed = True
         fsync_directory(lock.parent)
         return True
     finally:
@@ -84,3 +89,37 @@ def release_owned_lock_durably(path: Path, ownership: OwnedLockIdentity) -> bool
             os.close(ownership.fd)
         except OSError:
             pass
+
+
+def release_owned_locks_durably(
+    locks: Iterable[tuple[Path, OwnedLockIdentity]],
+) -> tuple[Path, ...]:
+    """Durably release several owned locks without stranding siblings on error.
+
+    Callers normally acquire several lockfiles in forward order and release them
+    in reverse order.  Each item keeps the single-lock success-after-durability
+    contract: an owned pathname is removed only when its live inode still matches,
+    and a successful removal is followed by a parent-directory fsync on POSIX.
+
+    A release or durability failure for one lock does *not* stop cleanup of locks
+    that were acquired earlier.  The first exception is remembered, every later
+    item is still processed (therefore closing every retained descriptor), and the
+    original exception is re-raised after cleanup completes.  The returned tuple
+    contains only pathnames whose owned namespace entries were durably removed.
+    """
+
+    items = tuple(locks)
+    removed: list[Path] = []
+    first_error: BaseException | None = None
+
+    for path, ownership in reversed(items):
+        try:
+            if release_owned_lock_durably(path, ownership):
+                removed.append(Path(path))
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+
+    if first_error is not None:
+        raise first_error
+    return tuple(removed)
