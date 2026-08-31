@@ -29,6 +29,10 @@ _REGISTRY_SPECS = (
         "pygit.protocol_v2_packfile_uri_incremental_fetch",
         "_FETCH_HEAD_STATE_GUARD_OWNERSHIP",
     ),
+    (
+        "pygit.protocol_v2_packfile_uri_refs",
+        "_REF_LOCK_OWNERSHIP",
+    ),
 )
 _REGISTERED = False
 
