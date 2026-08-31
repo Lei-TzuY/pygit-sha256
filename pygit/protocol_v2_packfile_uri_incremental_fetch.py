@@ -30,6 +30,13 @@ map has passed its directory durability fences.
 Phase344 makes the two replace-style FETCH_HEAD writes crash-safe: each complete
 file is fsynced to a same-directory temporary, atomically replaced, and followed
 by a directory durability fence before the fetch may proceed.
+
+Phase347 moves the populated FETCH_HEAD hook inside the repository publication
+guard. Concurrent incremental fetches may still stage immutable objects and LMAP
+generations independently, but only a transaction that owns the final metadata
+guards may publish its certified FETCH_HEAD and attempt the corresponding ref
+CAS. This prevents a losing concurrent transaction from overwriting FETCH_HEAD
+before discovering that it cannot commit the associated tracking refs.
 """
 
 from __future__ import annotations
@@ -180,13 +187,19 @@ def execute_incremental_packfile_uri_fetch_transaction(
 
     Ordering is intentionally strict:
 
-    ``download -> stage -> [new durable immutable LMAP] -> certify -> [fetch metadata] -> guard/CAS refs``.
+    ``download -> stage -> [new durable immutable LMAP] -> certify -> guard -> [fetch metadata] -> CAS refs``.
 
     Newly staged native/local identities are durably published as one
     content-addressed immutable LMAP before root certification. A durability
     failure therefore aborts before FETCH_HEAD or mutable refs can advance. A
     fully up-to-date response may contain no new objects; in that case no new
     LMAP generation or durability fence is needed.
+
+    Populated FETCH_HEAD publication occurs only after the repository-wide
+    publication guards are owned and the pre-fetch mutable-state snapshot still
+    matches. A competing transaction that loses those guards cannot overwrite
+    FETCH_HEAD and then fail its tracking-ref CAS, keeping the two mutable
+    metadata surfaces correlated at the final publication boundary.
     """
 
     if not isinstance(repo, Repository):
@@ -231,12 +244,11 @@ def execute_incremental_packfile_uri_fetch_transaction(
         known_native_to_local=incremental.known_native_to_local,
     )
 
-    if before_ref_publication is not None:
-        before_ref_publication(certificate)
-
     guard_locks = _acquire_publication_guard_locks(repo)
     try:
         _assert_publication_state_unchanged(repo, publications, mutable_state)
+        if before_ref_publication is not None:
+            before_ref_publication(certificate)
         published_refs = publish_packfile_uri_refs(
             repo,
             certificate,
