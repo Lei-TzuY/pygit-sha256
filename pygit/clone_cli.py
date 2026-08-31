@@ -172,6 +172,7 @@ def run_clone(argv: Sequence[str]) -> int:
     )
 
     empty_clone = None
+    api_empty_clone = False
     if _empty_clone_preflight_available(
         filter_spec=args.filter,
         depth=args.depth,
@@ -190,6 +191,7 @@ def run_clone(argv: Sequence[str]) -> int:
     if empty_clone is not None:
         repo = empty_clone.repo
     elif args.filter is not None:
+        using_production_partial = clone_partial_repository is _ORIGINAL_CLONE_PARTIAL_FUNC
         partial_kwargs = {
             "filter_spec": args.filter,
             "branch_name": args.branch,
@@ -203,12 +205,18 @@ def run_clone(argv: Sequence[str]) -> int:
             args.directory,
             **partial_kwargs,
         )
+        api_empty_clone = bool(
+            using_production_partial
+            and repo.refs.current_branch()
+            and repo.refs.resolve_head() is None
+        )
     # A real depth clone always uses the Phase204+ truncated protocol-v2 path.
     # Preserve the historical Repository.clone override seam only when no new
     # Phase209 transport metadata is requested.
     elif args.depth is not None and (
         server_options or not _repository_clone_overridden()
     ):
+        using_production_shallow = clone_shallow_repository is _ORIGINAL_CLONE_SHALLOW_FUNC
         shallow_kwargs = {
             "depth": args.depth,
             "branch_name": args.branch,
@@ -222,6 +230,11 @@ def run_clone(argv: Sequence[str]) -> int:
             args.url,
             args.directory,
             **shallow_kwargs,
+        )
+        api_empty_clone = bool(
+            using_production_shallow
+            and repo.refs.current_branch()
+            and repo.refs.resolve_head() is None
         )
     else:
         # Preserve the historical Repository.clone call shape whenever a caller
@@ -251,7 +264,8 @@ def run_clone(argv: Sequence[str]) -> int:
                 )
 
     branch = repo.refs.current_branch()
-    if branch and empty_clone is None:
+    is_empty_clone = empty_clone is not None or api_empty_clone
+    if branch and not is_empty_clone:
         configure_clone_remote(
             repo,
             args.url,
@@ -262,7 +276,7 @@ def run_clone(argv: Sequence[str]) -> int:
         )
         configure_clone_tracking(repo, branch, remote="origin")
 
-    if empty_clone is not None:
+    if is_empty_clone:
         print("warning: You appear to have cloned an empty repository.", file=sys.stderr)
     print(f"Cloned {args.url} into {repo.worktree}")
     return 0
