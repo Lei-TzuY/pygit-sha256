@@ -6,6 +6,8 @@ Git's lockfile discipline: one canonical ``FETCH_HEAD.lock`` is acquired with
 exclusive creation, populated and fsynced, then atomically renamed to the live
 metadata path. Phase346 also makes the lock descriptor explicitly non-inheritable
 so child processes cannot accidentally prolong or mutate an in-flight writer.
+Phase367 makes both file and directory durability fences resilient to POSIX
+``EINTR`` without weakening non-EINTR failure propagation.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import os
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from .durable_owned_lock import _fsync_retry
 from .fetch_head import _description
 
 
@@ -31,7 +34,7 @@ def _fsync_directory(path: Path) -> None:
         flags |= os.O_DIRECTORY
     fd = os.open(path, flags)
     try:
-        os.fsync(fd)
+        _fsync_retry(fd)
     finally:
         os.close(fd)
 
@@ -120,7 +123,8 @@ def write_fetch_head_durable(
     the lock, only this call's lockfile is rolled back. If the final directory
     fsync fails after replacement, the new complete FETCH_HEAD may already be
     visible; the exception propagates and callers must not advance mutable
-    tracking refs.
+    tracking refs. Interrupted fsync calls are retried on the same descriptor;
+    every non-EINTR error remains a hard failure.
     """
 
     if not isinstance(pygit_dir, Path):
@@ -135,7 +139,7 @@ def write_fetch_head_durable(
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
-            os.fsync(fh.fileno())
+            _fsync_retry(fh.fileno())
         os.replace(lock_path, destination)
         committed = True
         _fsync_directory(pygit_dir)
