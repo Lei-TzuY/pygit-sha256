@@ -12,6 +12,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Set
 
+from .clone_unborn import (
+    _rollback_empty_clone_destination,
+    discover_clone_refs_with_unborn,
+    initialize_discovered_unborn_clone,
+)
+from .clone_v2_reuse import fetch_filtered_discovered_clone
 from .fetch_importer import PromisorFilteredNativeImporter
 from .fetch_partial import _filtered_v2_fetch, _validate_filter_spec
 from .objects import CommitObject, TreeObject
@@ -176,7 +182,7 @@ def clone_partial_repository(
     server_options: Sequence[str] = (),
     checkout: bool = True,
 ) -> Repository:
-    """Create a partial clone, optionally leaving its worktree unpopulated."""
+    """Create a partial clone, including an explicitly unborn empty remote."""
     filter_spec = _validate_filter_spec(filter_spec)
     if path is None:
         name = url.rstrip("/").rsplit("/", 1)[-1]
@@ -186,18 +192,43 @@ def clone_partial_repository(
     if destination.exists():
         if not destination.is_dir() or any(destination.iterdir()):
             raise RuntimeError(f"Destination path is not empty: {destination}")
+    destination_existed = destination.exists()
 
     repo = Repository.init(str(destination))
     repo.add_remote("origin", url)
+
+    discovery = discover_clone_refs_with_unborn(
+        url,
+        server_options=server_options,
+    )
+    if discovery is None:
+        raise RuntimeError("partial clone requires protocol version 2")
+
+    try:
+        empty = initialize_discovered_unborn_clone(
+            repo,
+            discovery.refs,
+            url=url,
+            branch_name=branch_name,
+            single_branch=single_branch,
+            filter_spec=filter_spec,
+        )
+    except Exception:
+        if discovery.refs.unborn:
+            _rollback_empty_clone_destination(
+                destination,
+                existed=destination_existed,
+            )
+        raise
+    if empty is not None:
+        return repo
 
     client = (
         SmartHttpV2FetchClient(url, server_options=server_options)
         if server_options
         else SmartHttpV2FetchClient(url)
     )
-    advertisement = client.discover_refs()
-    if advertisement is None:
-        raise RuntimeError("partial clone requires protocol version 2")
+    advertisement = discovery.refs.advertisement
 
     default_branch = _default_branch(repo, advertisement)
     target_branch = branch_name or default_branch or "main"
@@ -211,11 +242,15 @@ def clone_partial_repository(
         capabilities=set(advertisement.capabilities),
         symrefs=dict(advertisement.symrefs),
     )
+    selected_discovery = type(discovery)(
+        type(discovery.refs)(selected_advertisement, frozenset()),
+        discovery.capabilities,
+    )
 
-    result = _filtered_v2_fetch(
+    result = fetch_filtered_discovered_clone(
         client,
+        selected_discovery,
         haves=(),
-        advertisement=selected_advertisement,
         filter_spec=filter_spec,
     )
     if result.shallow or result.unshallow:
