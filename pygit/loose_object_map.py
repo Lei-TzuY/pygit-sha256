@@ -4,6 +4,11 @@ Git 2.54 documents ``$GIT_DIR/objects/object-map/map-*.map`` (LMAP v1) as
 the loose-object mapping format used with ``extensions.compatObjectFormat``.
 This module reads and writes that format with SHA-256 as the repository/storage
 format and SHA-1 as the compatibility/native-remote format.
+
+Phase341 serializes repository-level LMAP publication and preflights every new
+mapping against all previously published generations while holding the same
+exclusive lock. This prevents two individually valid generations from creating
+contradictory SHA-1 <-> SHA-256 identities through a publication race.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ _SHA256_FORMAT_ID = 0x73323536  # "s256"
 _SHA1_FORMAT_ID = 0x73686131  # "sha1"
 _HEADER_SIZE = 60
 _MAP_TYPE_LOOSE_OBJECT = 1
+_PUBLICATION_LOCK_NAME = "publish.lock"
 
 
 @dataclass(frozen=True)
@@ -306,11 +312,60 @@ def lookup_local_sha256(repo: Repository, native_sha1: str) -> str | None:
     return match
 
 
+def _acquire_object_map_publication_lock(directory: Path) -> Path:
+    """Acquire the repository-wide LMAP writer lock without stealing it."""
+
+    lock = directory / _PUBLICATION_LOCK_NAME
+    try:
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError("loose object map publication lock is already held") from exc
+    try:
+        os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return lock
+
+
+def _assert_candidate_mapping_compatible(
+    repo: Repository,
+    candidate: Mapping[str, str],
+) -> None:
+    """Reject a new generation that contradicts any existing validated LMAP."""
+
+    native_seen: dict[str, str] = {}
+    local_seen: dict[str, str] = {}
+    for object_map in read_loose_object_maps(repo):
+        for native, local in object_map.native_to_local.items():
+            native_seen[native] = local
+            local_seen[local] = native
+
+    for native, local in candidate.items():
+        previous_local = native_seen.get(native)
+        if previous_local is not None and previous_local != local:
+            raise ValueError(
+                "new loose object map conflicts with an existing native SHA-1 mapping"
+            )
+        previous_native = local_seen.get(local)
+        if previous_native is not None and previous_native != native:
+            raise ValueError(
+                "new loose object map conflicts with an existing local SHA-256 mapping"
+            )
+
+
 def publish_staged_loose_object_map(
     repo: Repository,
     staged: StagedPackfileUriImport,
 ) -> PublishedLooseObjectMap:
-    """Atomically publish Phase321's verified mapping as an immutable LMAP file."""
+    """Serialize and atomically publish one conflict-free immutable LMAP file.
+
+    Local object bytes are authenticated before lock acquisition. The repository
+    writer lock then covers the cross-generation compatibility preflight and the
+    content-addressed hard-link publication as one critical section. Readers do
+    not need the lock because completed map generations are immutable and become
+    visible atomically.
+    """
 
     if not isinstance(repo, Repository):
         raise TypeError("loose object map publication requires a Repository")
@@ -329,29 +384,35 @@ def publish_staged_loose_object_map(
 
     directory = repo.pygit_dir / "objects" / "object-map"
     directory.mkdir(parents=True, exist_ok=True)
-    target = directory / f"map-{checksum}.map"
-    if target.exists():
-        if target.read_bytes() != encoded:
-            raise RuntimeError("content-addressed loose object map path contains different bytes")
-        return PublishedLooseObjectMap(target, checksum, len(staged.native_to_local))
-
-    fd, temp_name = tempfile.mkstemp(prefix=".tmp-object-map-", dir=str(directory))
-    temp = Path(temp_name)
+    lock = _acquire_object_map_publication_lock(directory)
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.link(temp, target)
-        except FileExistsError:
+        _assert_candidate_mapping_compatible(repo, staged.native_to_local)
+
+        target = directory / f"map-{checksum}.map"
+        if target.exists():
             if target.read_bytes() != encoded:
-                raise RuntimeError(
-                    "content-addressed loose object map path contains different bytes"
-                )
+                raise RuntimeError("content-addressed loose object map path contains different bytes")
+            return PublishedLooseObjectMap(target, checksum, len(staged.native_to_local))
+
+        fd, temp_name = tempfile.mkstemp(prefix=".tmp-object-map-", dir=str(directory))
+        temp = Path(temp_name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temp, target)
+            except FileExistsError:
+                if target.read_bytes() != encoded:
+                    raise RuntimeError(
+                        "content-addressed loose object map path contains different bytes"
+                    )
+            finally:
+                temp.unlink(missing_ok=True)
         finally:
             temp.unlink(missing_ok=True)
-    finally:
-        temp.unlink(missing_ok=True)
 
-    return PublishedLooseObjectMap(target, checksum, len(staged.native_to_local))
+        return PublishedLooseObjectMap(target, checksum, len(staged.native_to_local))
+    finally:
+        lock.unlink(missing_ok=True)
