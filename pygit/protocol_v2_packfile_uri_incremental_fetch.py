@@ -43,6 +43,11 @@ populated publication through a dedicated short-lived ``FETCH_HEAD.state.lock``.
 The lock is not held across network, staging, or certification work; it only
 prevents a newly-started fetch from clearing FETCH_HEAD in the middle of another
 transaction's guarded populated-FETCH_HEAD + tracking-ref commit window.
+
+Phase354 hardens that state-lock initialization against short writes, EINTR,
+zero-progress writes, descriptor-hardening failures, and close failures. The
+state guard is considered initialized only after its complete marker is written,
+fsynced, and the owned descriptor closes successfully.
 """
 
 from __future__ import annotations
@@ -97,6 +102,7 @@ from .repo import Repository
 
 
 _FETCH_HEAD_STATE_GUARD = "FETCH_HEAD.state.lock"
+_FETCH_HEAD_STATE_GUARD_MARKER = b"packfile-uri FETCH_HEAD state guard\n"
 
 
 @dataclass(frozen=True)
@@ -160,6 +166,20 @@ def _fetch_head_state_guard_path(pygit_dir: Path) -> Path:
     return Path(pygit_dir) / _FETCH_HEAD_STATE_GUARD
 
 
+def _write_fetch_head_state_guard_marker(fd: int) -> None:
+    """Write the complete state-guard marker with short-write/EINTR handling."""
+
+    remaining = memoryview(_FETCH_HEAD_STATE_GUARD_MARKER)
+    while remaining:
+        try:
+            written = os.write(fd, remaining)
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise OSError("FETCH_HEAD state guard marker write made no progress")
+        remaining = remaining[written:]
+
+
 def _acquire_fetch_head_state_guard(pygit_dir: Path) -> Path:
     """Acquire the short-lived cross-fetch FETCH_HEAD state guard.
 
@@ -167,6 +187,11 @@ def _acquire_fetch_head_state_guard(pygit_dir: Path) -> Path:
     writer owns and atomically renames ``FETCH_HEAD.lock`` for one file
     replacement, while this guard correlates two separate replacement moments:
     the early stale clear and the final populated publication/ref-CAS window.
+
+    A transaction owns the path from successful exclusive creation onward. It is
+    accepted as initialized only after descriptor hardening, complete marker
+    write, fsync, and close have all succeeded. Any failure before then removes
+    only the path created by this call.
     """
 
     root = Path(pygit_dir)
@@ -188,11 +213,17 @@ def _acquire_fetch_head_state_guard(pygit_dir: Path) -> Path:
     committed = False
     try:
         os.set_inheritable(fd, False)
-        os.write(fd, b"packfile-uri FETCH_HEAD state guard\n")
+        _write_fetch_head_state_guard_marker(fd)
         os.fsync(fd)
+        os.close(fd)
+        fd = -1
         committed = True
     finally:
-        os.close(fd)
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         if not committed:
             try:
                 lock.unlink()
