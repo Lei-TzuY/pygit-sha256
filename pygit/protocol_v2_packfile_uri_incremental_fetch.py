@@ -14,13 +14,21 @@ Phase338 completes the fully up-to-date path: a response with no new objects may
 certify roots directly from the already-validated known mapping. No empty LMAP
 file is published and known objects remain existing evidence rather than being
 misreported as newly staged content.
+
+Phase340 publishes Git-compatible ``FETCH_HEAD`` metadata for the named-remote
+path. The file is truncated once protocol-v2 discovery succeeds, then populated
+from certified local SHA-256 roots immediately before tracking-ref publication.
+This mirrors native Git's distinction between fetched tips and successful local
+tracking-ref updates: a later ref lock/CAS failure may still leave the verified
+fetched tip in ``FETCH_HEAD``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Callable, Iterable, Mapping, Optional, Sequence
 
+from .fetch_head import write_fetch_head
 from .loose_object_map import PublishedLooseObjectMap, publish_staged_loose_object_map
 from .protocol_v2_packfile_uri_batch import (
     DownloadedPackfileUriBatch,
@@ -126,6 +134,37 @@ def _download_optional_packfile_uris(
         return DownloadedPackfileUriBatch((), {}, 0)
 
 
+def _fetch_head_refs(
+    remote: str,
+    plan: PackfileUriRemoteTrackingPlan,
+    certificate: PackfileUriRootCertificate,
+) -> dict[str, str]:
+    """Project certified tracking publications back to their source branch refs.
+
+    The Phase328 plan is deliberately keyed by local
+    ``refs/remotes/<remote>/...`` names while ``FETCH_HEAD`` describes source
+    ``refs/heads/...`` names. The publication's genuine transport-native SHA-1
+    identifies which certified local SHA-256 root belongs to each source ref;
+    no transport id is ever written into repository-native metadata.
+    """
+
+    prefix = f"refs/remotes/{remote}/"
+    result: dict[str, str] = {}
+    for local_ref, publication in plan.publications.items():
+        if not local_ref.startswith(prefix) or len(local_ref) == len(prefix):
+            raise RuntimeError(
+                "incremental packfile-URI FETCH_HEAD publication received a foreign tracking ref"
+            )
+        local_oid = certificate.native_to_local.get(publication.native_oid)
+        if local_oid is None:
+            raise RuntimeError(
+                "incremental packfile-URI FETCH_HEAD publication root was not certified"
+            )
+        source_ref = f"refs/heads/{local_ref[len(prefix):]}"
+        result[source_ref] = local_oid
+    return result
+
+
 def execute_incremental_packfile_uri_fetch_transaction(
     repo: Repository,
     descriptors,
@@ -140,12 +179,13 @@ def execute_incremental_packfile_uri_fetch_transaction(
     max_total_bytes: int = 512 * 1024 * 1024,
     max_packs: int = 64,
     opener=None,
+    before_ref_publication: Optional[Callable[[PackfileUriRootCertificate], None]] = None,
 ) -> IncrementalPackfileUriFetchTransactionResult:
     """Run the guarded mapped-incremental repository transaction.
 
     Ordering is intentionally strict:
 
-    ``download -> stage -> [new immutable LMAP] -> certify -> guard/CAS refs``.
+    ``download -> stage -> [new immutable LMAP] -> certify -> [fetch metadata] -> guard/CAS refs``.
 
     The server may either offload packs through URI descriptors or keep the
     terminating pack entirely inline. Newly staged native/local identities are
@@ -157,6 +197,12 @@ def execute_incremental_packfile_uri_fetch_transaction(
     exact same validated ``known_native_to_local`` mapping. CAS ref publication is
     still performed so concurrent ref movement remains detectable; an old==new
     update does not create a reflog entry in the existing ref backend.
+
+    ``before_ref_publication`` is a narrow post-certification hook used by the
+    named-remote adapter to publish ``FETCH_HEAD`` before tracking-ref updates.
+    Native Git preserves freshly fetched ``FETCH_HEAD`` data even when a later
+    local tracking-ref lock/update fails, so this metadata cannot be emitted only
+    after a successful CAS transaction.
     """
 
     if not isinstance(repo, Repository):
@@ -169,6 +215,8 @@ def execute_incremental_packfile_uri_fetch_transaction(
         )
     if not isinstance(message, str) or not message.strip():
         raise ValueError("incremental packfile-URI transaction message must be non-empty")
+    if before_ref_publication is not None and not callable(before_ref_publication):
+        raise TypeError("incremental packfile-URI pre-ref publication hook must be callable")
 
     _preflight_publication_plan(expected_roots, publications)
     mutable_state = _snapshot_publication_state(repo, publications)
@@ -198,6 +246,9 @@ def execute_incremental_packfile_uri_fetch_transaction(
         expected_roots,
         known_native_to_local=incremental.known_native_to_local,
     )
+
+    if before_ref_publication is not None:
+        before_ref_publication(certificate)
 
     guard_locks = _acquire_publication_guard_locks(repo)
     try:
@@ -255,6 +306,13 @@ def fetch_named_remote_incrementally_with_packfile_uris(
     refs advance. A fully known response creates no redundant empty LMAP and is
     certified from the existing validated mapping. No SHA-1 identity is synthesized.
 
+    Once protocol-v2 discovery succeeds, ``FETCH_HEAD`` is reset so any later
+    failure cannot expose stale data from an older fetch. After root certification,
+    the selected source branch names and their certified local SHA-256 roots are
+    written before local tracking refs advance. Explicit ``branches=...`` entries
+    are mergeable; default/refspec-style discovery entries are ``not-for-merge``,
+    matching native Git's FETCH_HEAD marker behavior.
+
     ``None`` is returned only when initial discovery proves that the remote is not
     speaking protocol v2. A downgrade after successful v2 discovery fails closed.
     """
@@ -276,6 +334,12 @@ def fetch_named_remote_incrementally_with_packfile_uris(
     if not isinstance(advertisement, Advertisement):
         raise TypeError("incremental packfile-URI ref discovery returned an unexpected type")
 
+    # Native Git truncates FETCH_HEAD for a real fetch before branch selection or
+    # later transport/ref errors are known. Defer this until v2 discovery succeeds
+    # so the adapter's documented v2-downgrade sentinel remains mutation-free.
+    write_fetch_head(repo.pygit_dir, {}, source=url)
+
+    explicit_branches = branches is not None
     plan = plan_packfile_uri_remote_tracking_publication(
         repo,
         advertisement,
@@ -305,6 +369,15 @@ def fetch_named_remote_incrementally_with_packfile_uris(
         plan.publications,
     )
 
+    def publish_certified_fetch_head(certificate: PackfileUriRootCertificate) -> None:
+        fetched = _fetch_head_refs(remote, plan, certificate)
+        write_fetch_head(
+            repo.pygit_dir,
+            fetched,
+            source=url,
+            mergeable=tuple(fetched) if explicit_branches else (),
+        )
+
     publication_message = message or (
         f"fetch: {remote} via verified incremental protocol-v2 packfile-uri"
     )
@@ -321,6 +394,7 @@ def fetch_named_remote_incrementally_with_packfile_uris(
         max_total_bytes=max_total_bytes,
         max_packs=max_packs,
         opener=opener,
+        before_ref_publication=publish_certified_fetch_head,
     )
 
     return IncrementalNamedRemotePackfileUriFetchResult(
