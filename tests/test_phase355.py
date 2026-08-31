@@ -38,6 +38,11 @@ def _repo(tmp_path: Path) -> tuple[Repository, str]:
     return repo, _commit(repo)
 
 
+def _modern_remote_without_fetch(repo: Repository) -> None:
+    repo.config_set("remote", "origin.url", "https://example.invalid/repo.git")
+    repo.config_unset("remote", "origin.fetch")
+
+
 class _SinglePushClient:
     refs = {}
 
@@ -103,8 +108,15 @@ def test_match_refspec_malformed_or_negative_fails_closed(spec):
     assert _match_refspec("refs/heads/topic", spec) is None
 
 
-def test_tracking_branch_requires_configured_remote_fetch(tmp_path):
+def test_legacy_remote_without_git_style_config_preserves_same_name_tracking(tmp_path):
     repo, _ = _repo(tmp_path)
+    assert repo.config_get("remote", "origin.url") is None
+    assert tracking_branch_for_push(repo, "origin", "refs/heads/main") == "main"
+
+
+def test_modern_remote_requires_configured_fetch_refspec(tmp_path):
+    repo, _ = _repo(tmp_path)
+    _modern_remote_without_fetch(repo)
     assert tracking_branch_for_push(repo, "origin", "refs/heads/main") is None
 
     repo.config_set("remote", "origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
@@ -120,12 +132,14 @@ def test_tracking_branch_requires_configured_remote_fetch(tmp_path):
 
 def test_tracking_branch_rejects_destinations_outside_remote_namespace(tmp_path):
     repo, _ = _repo(tmp_path)
+    repo.config_set("remote", "origin.url", "https://example.invalid/repo.git")
     repo.config_set("remote", "origin.fetch", "refs/heads/*:refs/heads/cache/*")
     assert tracking_branch_for_push(repo, "origin", "refs/heads/main") is None
 
 
 def test_update_tracking_after_push_only_mutates_mapped_ref(tmp_path):
     repo, oid = _repo(tmp_path)
+    _modern_remote_without_fetch(repo)
     assert update_tracking_after_push(repo, "origin", "refs/heads/main", oid) is None
     assert repo.refs.get_remote("origin", "main") is None
 
@@ -140,6 +154,7 @@ def test_update_tracking_after_push_only_mutates_mapped_ref(tmp_path):
 
 def test_repository_push_without_fetch_refspec_does_not_create_tracking_ref(tmp_path, monkeypatch):
     repo, oid = _repo(tmp_path)
+    _modern_remote_without_fetch(repo)
     import pygit.remote as remote_module
 
     monkeypatch.setattr(remote_module, "SmartHttpPushClient", _SinglePushClient)
@@ -153,8 +168,18 @@ def test_repository_push_without_fetch_refspec_does_not_create_tracking_ref(tmp_
     assert len(native_map[oid]) == 40
 
 
+def test_repository_push_legacy_remote_still_updates_same_name_tracking(tmp_path, monkeypatch):
+    repo, oid = _repo(tmp_path)
+    import pygit.remote as remote_module
+
+    monkeypatch.setattr(remote_module, "SmartHttpPushClient", _SinglePushClient)
+    assert repo.push("origin")["status"] == "pushed"
+    assert repo.refs.get_remote("origin", "main") == oid
+
+
 def test_repository_push_restores_stale_tracking_when_unmapped(tmp_path, monkeypatch):
     repo, oid = _repo(tmp_path)
+    _modern_remote_without_fetch(repo)
     stale = "a" * 64
     repo.refs.set_remote("origin", "main", stale)
     import pygit.remote as remote_module
@@ -167,6 +192,7 @@ def test_repository_push_restores_stale_tracking_when_unmapped(tmp_path, monkeyp
 
 def test_repository_push_updates_fetch_mapped_alias(tmp_path, monkeypatch):
     repo, oid = _repo(tmp_path)
+    repo.config_set("remote", "origin.url", "https://example.invalid/repo.git")
     repo.config_set(
         "remote",
         "origin.fetch",
@@ -182,6 +208,7 @@ def test_repository_push_updates_fetch_mapped_alias(tmp_path, monkeypatch):
 
 def test_push_ref_respects_missing_and_exact_fetch_refspec(tmp_path, monkeypatch):
     repo, oid = _repo(tmp_path)
+    _modern_remote_without_fetch(repo)
     import pygit.push_transport as transport
 
     monkeypatch.setattr(transport, "SmartHttpPushClient", _SinglePushClient)
@@ -202,6 +229,7 @@ def test_push_ref_respects_missing_and_exact_fetch_refspec(tmp_path, monkeypatch
 def test_atomic_push_updates_only_fetch_mapped_branch(tmp_path, monkeypatch):
     repo, oid = _repo(tmp_path)
     repo.refs.set_branch("other", oid)
+    repo.config_set("remote", "origin.url", "https://example.invalid/repo.git")
     repo.config_set(
         "remote",
         "origin.fetch",
@@ -226,6 +254,7 @@ def test_atomic_delete_preserves_unmapped_tracking_ref(tmp_path, monkeypatch):
     existing_native = "1" * 40
     repo.refs.set_remote("origin", "other", oid)
     repo._write_native_map({oid: existing_native}, "origin")
+    repo.config_set("remote", "origin.url", "https://example.invalid/repo.git")
     repo.config_set(
         "remote",
         "origin.fetch",
