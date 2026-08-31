@@ -109,16 +109,13 @@ def parse_ls_refs_response_with_unborn(
 class SmartHttpV2UnbornQueryClient(SmartHttpV2QueryClient):
     """Smart-HTTP v2 ref discovery that retains unborn metadata."""
 
-    def discover_refs_with_unborn(
+    def _discover_refs_with_capabilities(
         self,
+        capabilities: ProtocolV2Capabilities,
         *,
         prefixes: Sequence[str] = (),
-    ) -> Optional[ProtocolV2LsRefsResult]:
-        """Return refs plus unborn names, or ``None`` for a protocol-v0 fallback."""
-
-        capabilities = self.discover_capabilities()
-        if capabilities is None:
-            return None
+    ) -> ProtocolV2LsRefsResult:
+        """Run ``ls-refs`` using one already validated capability advertisement."""
 
         body = build_ls_refs_request(
             capabilities,
@@ -144,3 +141,18 @@ class SmartHttpV2UnbornQueryClient(SmartHttpV2QueryClient):
                 response.read(),
                 capabilities,
             )
+
+    def discover_refs_with_unborn(
+        self,
+        *,
+        prefixes: Sequence[str] = (),
+    ) -> Optional[ProtocolV2LsRefsResult]:
+        """Return refs plus unborn names, or ``None`` for a protocol-v0 fallback."""
+
+        capabilities = self.discover_capabilities()
+        if capabilities is None:
+            return None
+        return self._discover_refs_with_capabilities(
+            capabilities,
+            prefixes=prefixes,
+        )
