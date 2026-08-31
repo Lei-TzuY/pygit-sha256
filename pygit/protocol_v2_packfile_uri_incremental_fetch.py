@@ -9,6 +9,11 @@ Phase336 additionally persists every newly staged native->local identity set as
 Git-compatible LMAP v1 compatibility metadata before any mutable ref publication.
 This makes repeated incremental fetches self-feeding without synthesizing remote
 SHA-1 identity from local SHA-256 object ids.
+
+Phase338 completes the fully up-to-date path: a response with no new objects may
+certify roots directly from the already-validated known mapping. No empty LMAP
+file is published and known objects remain existing evidence rather than being
+misreported as newly staged content.
 """
 
 from __future__ import annotations
@@ -58,11 +63,11 @@ from .repo import Repository
 
 @dataclass(frozen=True)
 class IncrementalPackfileUriFetchTransactionResult:
-    """Successful incremental transaction including immutable LMAP publication."""
+    """Successful incremental transaction with optional new LMAP publication."""
 
     batch: DownloadedPackfileUriBatch
     staged: StagedPackfileUriImport
-    object_map: PublishedLooseObjectMap
+    object_map: Optional[PublishedLooseObjectMap]
     certificate: PackfileUriRootCertificate
     published_refs: dict[str, str]
 
@@ -140,14 +145,18 @@ def execute_incremental_packfile_uri_fetch_transaction(
 
     Ordering is intentionally strict:
 
-    ``download -> stage -> immutable LMAP -> certify -> guard/CAS refs``.
+    ``download -> stage -> [new immutable LMAP] -> certify -> guard/CAS refs``.
 
     The server may either offload packs through URI descriptors or keep the
-    terminating pack entirely inline. The LMAP file is content-addressed immutable
-    compatibility metadata. Publishing it before root certification/ref CAS is safe:
-    a later failure can leave only a verified mapping for already-published immutable
-    SHA-256 objects, never a partially advanced ref. If LMAP publication itself
-    fails, no certification or ref publication is attempted.
+    terminating pack entirely inline. Newly staged native/local identities are
+    persisted as one content-addressed immutable LMAP before refs advance.
+
+    A fully up-to-date response may contain no new objects at all. In that case
+    staging returns an intentionally empty result after validating the known map,
+    no new LMAP generation is created, and root certification falls back to the
+    exact same validated ``known_native_to_local`` mapping. CAS ref publication is
+    still performed so concurrent ref movement remains detectable; an old==new
+    update does not create a reflog entry in the existing ref backend.
     """
 
     if not isinstance(repo, Repository):
@@ -178,8 +187,17 @@ def execute_incremental_packfile_uri_fetch_transaction(
         batch,
         known_native_to_local=incremental.known_native_to_local,
     )
-    object_map = publish_staged_loose_object_map(repo, staged)
-    certificate = certify_packfile_uri_roots(repo.store, staged, expected_roots)
+    object_map = (
+        publish_staged_loose_object_map(repo, staged)
+        if staged.native_to_local
+        else None
+    )
+    certificate = certify_packfile_uri_roots(
+        repo.store,
+        staged,
+        expected_roots,
+        known_native_to_local=incremental.known_native_to_local,
+    )
 
     guard_locks = _acquire_publication_guard_locks(repo)
     try:
@@ -229,12 +247,13 @@ def fetch_named_remote_incrementally_with_packfile_uris(
     The exact resulting ``haves`` are sent to Phase318's protocol-v2 request and
     the paired ``known_native_to_local`` mapping is kept attached to the same
     transaction. Missing map coverage simply yields no have for that ref and
-    therefore preserves full-fetch behavior. The server may either offload packs
-    through URI descriptors or keep the terminating pack entirely inline.
+    therefore preserves full-fetch behavior. The server may either offload packs,
+    keep the terminating pack inline, or return a valid zero-object pack when the
+    requested tip is already fully known locally.
 
     Every newly fetched mapping is persisted as immutable Git LMAP metadata before
-    refs advance, allowing the next invocation to reuse the newly published tip
-    without guessing native identity. No SHA-1 identity is synthesized.
+    refs advance. A fully known response creates no redundant empty LMAP and is
+    certified from the existing validated mapping. No SHA-1 identity is synthesized.
 
     ``None`` is returned only when initial discovery proves that the remote is not
     speaking protocol v2. A downgrade after successful v2 discovery fails closed.
