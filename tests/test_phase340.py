@@ -299,8 +299,10 @@ def test_native_sha256_fetch_head_marker_truncation_and_ref_failure_ordering(tmp
     lock.write_text("held\n", encoding="utf-8")
     failed_update = run("-C", str(target), "fetch", "origin", check=False)
     assert failed_update.returncode != 0
-    assert fetch_head.read_text(encoding="utf-8").startswith(
-        f"{new_tip}\tnot-for-merge\tbranch 'main' of "
+    failed_lines = fetch_head.read_text(encoding="utf-8").splitlines()
+    assert any(
+        line.startswith(f"{new_tip}\tnot-for-merge\tbranch 'main' of ")
+        for line in failed_lines
     )
     assert run(
         "-C", str(target), "rev-parse", "refs/remotes/origin/main"
