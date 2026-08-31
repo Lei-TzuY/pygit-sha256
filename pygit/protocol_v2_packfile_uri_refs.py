@@ -1,16 +1,24 @@
 """Publish certified packfile-URI roots through a CAS ref transaction.
 
 Phase323 consumes the read-only Phase322 root certificate and makes refs the
-final mutable step of the external-pack fetch path.  Every publication carries
+final mutable step of the external-pack fetch path. Every publication carries
 an explicit expected old local SHA-256 value (or the all-zero local object id
 for creation), is revalidated against the destination object store, and is
 committed through pygit's existing transactional ``update-ref`` plumbing.
 
 Canonical ``<ref>.lock`` files are held for the duration of the transaction so
 native Git ref writers that follow the files backend locking convention cannot
-race this publication path.  The existing ref transaction still performs the
+race this publication path. The existing ref transaction still performs the
 object existence/type checks, compare-and-swap verification, reflog handling,
 and snapshot rollback.
+
+Phase348 upgrades packfile-URI ref publication with a durability boundary. The
+public publisher now fsyncs every live ref and written reflog before releasing
+the canonical target locks, then fsyncs the containing directory hierarchy
+after lock removal. Successful return therefore means the final reference
+namespace crossed an explicit durability fence instead of stopping at visible
+``os.replace()``. The explicit ``*_durable`` spelling remains available for
+callers that want to make that contract self-documenting.
 """
 
 from __future__ import annotations
@@ -18,7 +26,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Mapping
+from typing import Dict, Mapping, Sequence, Tuple
 
 from .protocol_v2_packfile_uri_connectivity import PackfileUriRootCertificate
 from .ref_query import check_ref_format
@@ -33,9 +41,9 @@ _HEX = frozenset("0123456789abcdef")
 class PackfileUriRefPublication:
     """One certified native root to publish at a local reference.
 
-    ``old_local_oid`` is mandatory.  Use :data:`pygit.refs.ZERO_SHA` when the
+    ``old_local_oid`` is mandatory. Use :data:`pygit.refs.ZERO_SHA` when the
     ref must not already exist; otherwise provide the exact current local
-    SHA-256 object id.  This makes every publication compare-and-swap rather
+    SHA-256 object id. This makes every publication compare-and-swap rather
     than a blind overwrite.
     """
 
@@ -103,27 +111,12 @@ def _acquire_locks(repo: Repository, refnames: list[str]) -> list[Path]:
     return acquired
 
 
-def publish_packfile_uri_refs(
+def _prepare_publications(
     repo: Repository,
     certificate: PackfileUriRootCertificate,
     publications: Mapping[str, PackfileUriRefPublication],
-    *,
-    message: str = "fetch: publish certified packfile-uri refs",
-) -> Dict[str, str]:
-    """Publish certified roots as one compare-and-swap ref transaction.
-
-    The function deliberately accepts only full local ref names and requires an
-    explicit old value for every update.  It re-reads every certified local
-    object immediately before locking/publishing, proving that the certificate
-    still names the same content-derived SHA-256 object and expected Git object
-    type.  Branch refs additionally require a certified commit root.
-
-    All canonical ref lock files are acquired in lexical order before the
-    existing :func:`pygit.ref_transaction.update_refs` transaction runs.  A CAS
-    mismatch, lock conflict, type failure, or I/O failure publishes no successful
-    result.  Immutable objects imported by Phase321 may remain unreachable,
-    which is the intended failure mode for a fetch transaction.
-    """
+) -> Tuple[list[RefUpdate], Dict[str, str]]:
+    """Validate one publication set and return its concrete local ref updates."""
 
     if not isinstance(repo, Repository):
         raise TypeError("packfile-URI ref publication requires a Repository")
@@ -133,8 +126,6 @@ def publish_packfile_uri_refs(
         raise TypeError("packfile-URI ref publications must be a mapping")
     if not publications:
         raise ValueError("packfile-URI ref publication requires at least one ref")
-    if not isinstance(message, str) or not message.strip():
-        raise ValueError("packfile-URI ref publication message must be non-empty")
 
     updates: list[RefUpdate] = []
     result: Dict[str, str] = {}
@@ -168,9 +159,115 @@ def publish_packfile_uri_refs(
         updates.append(RefUpdate("update", normalized_ref, local_oid, old_local))
         result[normalized_ref] = local_oid
 
+    return updates, result
+
+
+def _live_ref_path(repo: Repository, refname: str) -> Path:
+    path = (repo.pygit_dir / refname).resolve()
+    root = repo.pygit_dir.resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"invalid reference name: {refname!r}") from exc
+    return path
+
+
+def _reflog_path(repo: Repository, refname: str) -> Path:
+    path = (repo.pygit_dir / "logs" / refname).resolve()
+    root = repo.pygit_dir.resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"invalid reference name: {refname!r}") from exc
+    return path
+
+
+def _fsync_file(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Durably fence one directory where the platform exposes POSIX semantics."""
+
+    if os.name == "nt":
+        # Python does not expose a portable directory-fsync primitive on Windows.
+        # Match the explicit portability boundary used by the existing durable
+        # LMAP/FETCH_HEAD helpers instead of claiming a guarantee we cannot make.
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _publication_file_paths(repo: Repository, refnames: Sequence[str]) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for refname in sorted(refnames):
+        ref_path = _live_ref_path(repo, refname)
+        if not ref_path.is_file():
+            raise RuntimeError(f"published ref disappeared before durability fence: {refname}")
+        paths.append(ref_path)
+        log_path = _reflog_path(repo, refname)
+        if log_path.is_file():
+            paths.append(log_path)
+    return tuple(paths)
+
+
+def _publication_directories(repo: Repository, paths: Sequence[Path]) -> tuple[Path, ...]:
+    """Return containing directories leaf-first through ``.pygit`` exactly once."""
+
+    root = repo.pygit_dir.resolve()
+    directories: set[Path] = set()
+    for path in paths:
+        current = path.parent.resolve()
+        while True:
+            try:
+                current.relative_to(root)
+            except ValueError as exc:
+                raise RuntimeError("publication durability path escaped repository metadata") from exc
+            directories.add(current)
+            if current == root:
+                break
+            current = current.parent
+    return tuple(sorted(directories, key=lambda item: (-len(item.parts), str(item))))
+
+
+def _fsync_publication_files(repo: Repository, refnames: Sequence[str]) -> tuple[Path, ...]:
+    paths = _publication_file_paths(repo, refnames)
+    for path in paths:
+        _fsync_file(path)
+    return paths
+
+
+def _publish_packfile_uri_refs(
+    repo: Repository,
+    certificate: PackfileUriRootCertificate,
+    publications: Mapping[str, PackfileUriRefPublication],
+    *,
+    message: str,
+    durable: bool,
+) -> Dict[str, str]:
+    if not isinstance(message, str) or not message.strip():
+        raise ValueError("packfile-URI ref publication message must be non-empty")
+
+    updates, result = _prepare_publications(repo, certificate, publications)
     locks = _acquire_locks(repo, list(result))
+    publication_paths: tuple[Path, ...] = ()
     try:
         update_refs(repo, updates, message=message, deref=False)
+        if durable:
+            # Ref files are written through already-fsynced temporary files by the
+            # generic transaction, but reflogs are append writes. Fsync all live
+            # publication files while the canonical target locks are still held.
+            publication_paths = _fsync_publication_files(repo, tuple(result))
     finally:
         for lock in reversed(locks):
             try:
@@ -178,4 +275,62 @@ def publish_packfile_uri_refs(
             except FileNotFoundError:
                 pass
 
+    if durable:
+        # Fsync directories only after lock removal. This single leaf-to-root
+        # fence persists both the ref/reflog directory entries and the absence of
+        # the temporary canonical lock files. A later writer may legitimately
+        # begin after lock release; that is a subsequent ref transaction.
+        for directory in _publication_directories(repo, publication_paths):
+            _fsync_directory(directory)
+
     return result
+
+
+def publish_packfile_uri_refs(
+    repo: Repository,
+    certificate: PackfileUriRootCertificate,
+    publications: Mapping[str, PackfileUriRefPublication],
+    *,
+    message: str = "fetch: publish certified packfile-uri refs",
+) -> Dict[str, str]:
+    """Durably publish certified roots as one compare-and-swap ref transaction.
+
+    Phase348 strengthens the historical Phase323 API in place so every existing
+    packfile-URI caller, including the Phase347 incremental transaction and its
+    established monkeypatch seam, receives the same success-after-durability
+    guarantee without a parallel publication path.
+    """
+
+    return _publish_packfile_uri_refs(
+        repo,
+        certificate,
+        publications,
+        message=message,
+        durable=True,
+    )
+
+
+def publish_packfile_uri_refs_durable(
+    repo: Repository,
+    certificate: PackfileUriRootCertificate,
+    publications: Mapping[str, PackfileUriRefPublication],
+    *,
+    message: str = "fetch: durably publish certified packfile-uri refs",
+) -> Dict[str, str]:
+    """Explicit spelling for the Phase348 durable publication contract.
+
+    The target ref lockfiles remain held through ref/reflog file fsync. They are
+    then removed before the directory hierarchy is fsynced, so successful return
+    persists both the new ref namespace and lock cleanup. If a file or directory
+    fsync fails after the generic ref transaction became visible, the exception is
+    propagated. Complete new refs/reflogs may remain visible; callers must not
+    represent that operation as durably successful or perform later mutable steps.
+    """
+
+    return _publish_packfile_uri_refs(
+        repo,
+        certificate,
+        publications,
+        message=message,
+        durable=True,
+    )
