@@ -45,7 +45,8 @@ Phase324-326 repository transaction ordering and private guard helpers:
 
 1. preflight publication plan;
 2. snapshot bounded mutable state;
-3. download/verify all external packs;
+3. download/verify all external packs, or represent a valid inline-only response
+   as an explicit empty verified batch;
 4. known-aware isolated SHA-256 staging;
 5. root certification;
 6. acquire repository metadata guard locks;
@@ -53,8 +54,27 @@ Phase324-326 repository transaction ordering and private guard helpers:
 8. CAS-publish refs last;
 9. release locks.
 
-The only semantic difference from the established transaction is step 4's
-validated known-object closure.
+The semantic differences from the established transaction are step 3's support
+for a server that advertises `packfile-uris` but chooses to keep the terminating
+pack inline, and step 4's validated known-object closure.
+
+### Inline-only packfile fallback
+
+Requesting the `packfile-uris` fetch feature does not force a server to emit any
+URI descriptor. A valid response may contain only the ordinary inline `packfile`
+section.
+
+Phase334 therefore treats an empty descriptor tuple as an empty verified external
+batch instead of a transaction error. The existing batch downloader remains the
+single source of descriptor/resource validation: Phase334 translates only its
+specific empty-batch rejection after all timeout/size/count options have already
+been validated. Any non-empty descriptor failure is propagated unchanged.
+
+This fallback does **not** introduce a known-only/no-object completion path.
+`stage_packfile_uri_import()` still requires fetched native objects. Supporting a
+fully up-to-date response whose entire requested root is satisfied only from
+known mappings needs an explicit certification/publication design and is deferred
+rather than being hidden inside the URI fallback.
 
 ## Named-remote integration
 
@@ -115,9 +135,10 @@ Base: Phase333 / PR #309 exact-green head:
 Phase334 changes:
 
 - `pygit/protocol_v2_packfile_uri_stage.py` — validate and consume known mappings;
-- `pygit/protocol_v2_packfile_uri_incremental_fetch.py` — new guarded incremental
-  transaction + named-remote entry point;
+- `pygit/protocol_v2_packfile_uri_incremental_fetch.py` — guarded incremental
+  transaction, inline-only URI fallback, and named-remote entry point;
 - `tests/test_phase334.py` — native and orchestration regressions;
+- `tests/test_phase334_inline_only.py` — inline-only fallback/resource validation;
 - `PHASE334.md` — this document.
 
 Phase329's existing named-remote function and Phase324's existing full transaction
