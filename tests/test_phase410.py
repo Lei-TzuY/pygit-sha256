@@ -85,7 +85,7 @@ def test_application_routes_only_exact_detach_previous_selector(
     calls.clear()
     monkeypatch.setattr(sys, "argv", ["pygit", "checkout", "--detach", "-"])
     application.main()
-    assert calls == [("legacy", [])]
+    assert calls == [("previous", ["--detach", "-"])]
 
     calls.clear()
     monkeypatch.setattr(sys, "argv", ["pygit", "checkout", "--detach", "main"])
