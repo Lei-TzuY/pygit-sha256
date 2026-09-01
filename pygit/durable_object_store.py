@@ -14,11 +14,18 @@ publication is used instead. This lets a later ``write()`` truthfully recover
 from a prior post-replace durability failure instead of silently accepting the
 visible-but-not-yet-certified object.
 
+Phase375 makes that existing-object validation fsck-grade and bounded. The zlib
+stream is decompressed incrementally into at most one small output chunk at a
+time and compared byte-for-byte with the exact Git object envelope being written.
+Truncated streams, trailing bytes/concatenated streams, and output beyond the
+expected envelope are rejected and repaired through normal atomic publication.
+
 Phase376 closes the corresponding new-publication race. The temporary file's
 inode is pinned before atomic replacement and its descriptor is retained across
 the namespace fences. ``write()`` reports success only if the live object path
 still names that exact fsynced inode after both fences. If another writer wins a
-replacement race, the visible candidate is certified or publication is retried.
+replacement race, the visible candidate is certified through the same strict
+Phase375 validator or publication is retried.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from .store import ObjectStore
 
 _INSTALLED = False
 _READ_CHUNK = 1024 * 1024
+_OUTPUT_CHUNK = 1024 * 1024
 
 
 def _open_existing_loose_object(path: Path) -> int:
@@ -62,18 +70,65 @@ def _open_existing_loose_object(path: Path) -> int:
     return fd
 
 
-def _read_all_from_fd(fd: int) -> bytes:
-    """Read one descriptor to EOF while retrying interrupted reads."""
+def _read_fd_chunk(fd: int) -> bytes:
+    """Read one bounded compressed chunk, retrying interrupted reads."""
 
-    chunks: list[bytes] = []
     while True:
         try:
-            chunk = os.read(fd, _READ_CHUNK)
+            return os.read(fd, _READ_CHUNK)
         except InterruptedError:
             continue
-        if not chunk:
-            return b"".join(chunks)
-        chunks.append(chunk)
+
+
+def _matches_exact_zlib_stream(fd: int, expected: bytes) -> bool:
+    """Return whether *fd* is exactly one zlib stream for *expected*.
+
+    Output is capped to at most ``_OUTPUT_CHUNK`` bytes per decompressor call and
+    never permitted to exceed the expected object envelope by even one byte. A
+    valid result requires the zlib end marker, exact byte-for-byte output, and
+    physical EOF immediately after that stream. This deliberately rejects the
+    loose-object trailing-garbage shape that Git's strict fsck diagnoses as
+    corruption even though ordinary object reads may be permissive.
+    """
+
+    decompressor = zlib.decompressobj()
+    expected_view = memoryview(expected)
+    offset = 0
+
+    while True:
+        compressed = _read_fd_chunk(fd)
+        if not compressed:
+            break
+
+        while compressed:
+            if decompressor.eof:
+                return False
+
+            remaining = len(expected_view) - offset
+            max_output = min(_OUTPUT_CHUNK, remaining + 1)
+            before = len(compressed)
+            try:
+                output = decompressor.decompress(compressed, max_output)
+            except zlib.error:
+                return False
+
+            if len(output) > remaining:
+                return False
+            if output != expected_view[offset : offset + len(output)]:
+                return False
+            offset += len(output)
+
+            if decompressor.unused_data:
+                return False
+
+            tail = decompressor.unconsumed_tail
+            if tail and len(tail) == before and not output:
+                # A bounded decoder that cannot consume input or emit output has
+                # made no progress; fail closed rather than spin forever.
+                return False
+            compressed = tail
+
+    return decompressor.eof and offset == len(expected_view)
 
 
 def _path_still_names_inode(path: Path, device: int, inode: int) -> bool:
@@ -90,14 +145,19 @@ def _path_still_names_inode(path: Path, device: int, inode: int) -> bool:
     )
 
 
-def _certify_existing_loose_object(path: Path, sha: str, objects_root: Path) -> bool:
-    """Validate and durably certify an existing loose object.
+def _certify_existing_loose_object(
+    path: Path,
+    expected_store_bytes: bytes,
+    objects_root: Path,
+) -> bool:
+    """Validate and durably certify one exact existing loose object.
 
-    The descriptor pins the inode whose compressed payload is hashed. Success is
-    reported only after that inode has been fsynced, the pathname still names the
-    same inode, and both namespace durability fences have completed. A concurrent
-    pathname replacement returns ``False`` so the caller falls back to normal
-    atomic publication of the requested content.
+    The descriptor pins the inode whose zlib stream is validated. Success is
+    reported only after that exact stream matches ``expected_store_bytes``, the
+    inode has been fsynced, the pathname still names it, and both namespace
+    durability fences have completed. A concurrent pathname replacement or any
+    non-exact stream returns ``False`` so normal atomic publication repairs the
+    requested content.
     """
 
     try:
@@ -114,12 +174,7 @@ def _certify_existing_loose_object(path: Path, sha: str, objects_root: Path) -> 
         if not stat.S_ISREG(pinned.st_mode):
             return False
 
-        compressed = _read_all_from_fd(fd)
-        try:
-            store_bytes = zlib.decompress(compressed)
-        except zlib.error:
-            return False
-        if hashlib.new(HASH_ALGO, store_bytes).hexdigest() != sha:
+        if not _matches_exact_zlib_stream(fd, expected_store_bytes):
             return False
 
         _fsync_retry(fd)
@@ -186,7 +241,7 @@ def install_durable_object_store_support() -> None:
         sha = hashlib.new(HASH_ALGO, store_bytes).hexdigest()
         obj_path = self._path_for(sha)
 
-        if _certify_existing_loose_object(obj_path, sha, self.root):
+        if _certify_existing_loose_object(obj_path, store_bytes, self.root):
             return sha
 
         compressed = zlib.compress(store_bytes)
@@ -195,10 +250,10 @@ def install_durable_object_store_support() -> None:
                 return sha
 
             # Another writer replaced our fully durable inode before the final
-            # namespace correlation. Accept that winner only after independently
-            # certifying its content, inode, and durability. Otherwise retry our
-            # normal same-directory atomic publication.
-            if _certify_existing_loose_object(obj_path, sha, self.root):
+            # namespace correlation. Accept that winner only after strict,
+            # bounded validation plus inode and directory durability fencing.
+            # Otherwise retry our normal same-directory atomic publication.
+            if _certify_existing_loose_object(obj_path, store_bytes, self.root):
                 return sha
 
     ObjectStore.write = write
