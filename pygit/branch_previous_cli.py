@@ -15,6 +15,11 @@ def run_branch_previous(argv: Sequence[str]) -> int:
     Git accepts previous-checkout selectors as ordinary revision start points for
     branch creation.  A literal ``-`` is deliberately not treated as shorthand
     here: native ``git branch <name> -`` rejects ``-`` as an invalid object name.
+
+    ``Repository.branch`` historically switches HEAD to a newly-created branch,
+    which is useful to legacy pygit callers but differs from native ``git branch``.
+    This focused adapter therefore resolves the selected start point and writes
+    only the branch ref, leaving HEAD and the worktree untouched.
     """
 
     parser = argparse.ArgumentParser(
@@ -30,6 +35,10 @@ def run_branch_previous(argv: Sequence[str]) -> int:
     if expanded is None:
         raise ValueError(f"{args.start_point!r} is not a previous checkout selector")
 
-    repo.branch(args.branch, start_point=expanded)
-    print(f"Created branch '{args.branch}'.")
+    target_sha = repo._resolve_revision(expanded)
+    repo.refs.set_branch(
+        args.branch,
+        target_sha,
+        message=f"branch: created {args.branch}",
+    )
     return 0
