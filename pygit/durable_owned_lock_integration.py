@@ -1,9 +1,15 @@
-"""Install shared durable-owned-lock release boundaries.
+"""Install shared durable-owned-lock and lock-initialization boundaries.
 
 Phase361-362 provide reusable inode-aware, success-after-directory-fsync
-release primitives. This module binds those primitives to the three retained
+release primitives. Phase365 binds those primitives to the three retained
 ownership registries used by the protocol-v2 packfile-URI publication stack
 without changing their established Path-shaped acquire/release caller seams.
+
+Phase368 also routes the compact repository-publication-guard and target-ref
+lock initialization paths through the shared EINTR-safe fsync helper introduced
+in Phase366. This keeps transient signal interruption from turning a fully
+written lock marker into a spurious acquisition failure while preserving every
+non-EINTR error and the existing cleanup/ownership contracts.
 """
 
 from __future__ import annotations
@@ -13,6 +19,7 @@ from typing import Iterable, Sequence
 
 from .durable_owned_lock import (
     OwnedLockIdentity,
+    _fsync_retry,
     release_owned_lock_durably,
     release_owned_locks_durably,
 )
@@ -29,7 +36,7 @@ def _identity(ownership) -> OwnedLockIdentity:
 
 
 def install_durable_owned_lock_release_integration() -> None:
-    """Bind all packfile-URI retained lock registries to the shared primitive."""
+    """Bind packfile-URI retained lock registries to shared durability helpers."""
 
     global _INSTALLED
     if _INSTALLED:
@@ -38,6 +45,90 @@ def install_durable_owned_lock_release_integration() -> None:
     from . import protocol_v2_packfile_uri_incremental_fetch as incremental
     from . import protocol_v2_packfile_uri_refs as refs
     from . import protocol_v2_packfile_uri_transaction as transaction
+
+    def initialize_publication_guard_lock(lock: Path) -> None:
+        """Initialize one compatibility guard with EINTR-safe marker durability."""
+
+        fd = transaction._open_publication_guard_lock(lock)
+        initialized = False
+        try:
+            transaction._write_publication_guard_marker(fd)
+            _fsync_retry(fd)
+            transaction.os.close(fd)
+            fd = -1
+            initialized = True
+        finally:
+            if fd != -1:
+                try:
+                    transaction.os.close(fd)
+                except OSError:
+                    pass
+            if not initialized:
+                try:
+                    Path(lock).unlink()
+                except FileNotFoundError:
+                    pass
+
+    def initialize_owned_publication_guard_lock(lock: Path):
+        """Initialize and retain one publication guard with EINTR-safe fsync."""
+
+        fd = transaction._open_publication_guard_lock(lock)
+        initialized = False
+        try:
+            transaction._write_publication_guard_marker(fd)
+            _fsync_retry(fd)
+            stat_result = transaction.os.fstat(fd)
+            ownership = transaction._PublicationGuardOwnership(
+                fd=fd,
+                device=stat_result.st_dev,
+                inode=stat_result.st_ino,
+            )
+            initialized = True
+            return ownership
+        finally:
+            if not initialized:
+                try:
+                    transaction.os.close(fd)
+                except OSError:
+                    pass
+                try:
+                    Path(lock).unlink()
+                except FileNotFoundError:
+                    pass
+
+    def initialize_ref_lock(lock: Path):
+        """Initialize and retain one target-ref lock with EINTR-safe fsync."""
+
+        flags = refs.os.O_WRONLY | refs.os.O_CREAT | refs.os.O_EXCL
+        if hasattr(refs.os, "O_BINARY"):
+            flags |= refs.os.O_BINARY
+        if hasattr(refs.os, "O_CLOEXEC"):
+            flags |= refs.os.O_CLOEXEC
+
+        fd = refs.os.open(lock, flags, 0o666)
+        initialized = False
+        try:
+            refs.os.set_inheritable(fd, False)
+            refs._write_ref_lock_marker(fd)
+            _fsync_retry(fd)
+            stat_result = refs.os.fstat(fd)
+            ownership = refs._RefLockOwnership(
+                fd=fd,
+                device=stat_result.st_dev,
+                inode=stat_result.st_ino,
+            )
+            initialized = True
+            return ownership
+        finally:
+            if not initialized:
+                try:
+                    refs.os.close(fd)
+                except OSError:
+                    pass
+                try:
+                    Path(lock).unlink()
+                except FileNotFoundError:
+                    pass
 
     def release_publication_guard_locks(locks: Iterable[Path]) -> None:
         owned: list[tuple[Path, OwnedLockIdentity]] = []
@@ -64,6 +155,9 @@ def install_durable_owned_lock_release_integration() -> None:
                 owned.append((path, _identity(ownership)))
         release_owned_locks_durably(owned)
 
+    transaction._initialize_publication_guard_lock = initialize_publication_guard_lock
+    transaction._initialize_owned_publication_guard_lock = initialize_owned_publication_guard_lock
+    refs._initialize_ref_lock = initialize_ref_lock
     transaction._release_publication_guard_locks = release_publication_guard_locks
     incremental._release_publication_guard_locks = release_publication_guard_locks
     incremental._release_fetch_head_state_guard = release_fetch_head_state_guard
