@@ -105,6 +105,52 @@ def _display_line(line: str, prefix: str, *, full_name: bool) -> str:
     return f"{metadata}\t{relative}" if separator else relative
 
 
+def _index_lines(repo: Repository, args: argparse.Namespace, patterns: Sequence[str]) -> list[str]:
+    """Return index records while preserving selector-origin duplicates.
+
+    Git treats filename-only selectors as additive.  For example, a modified
+    tracked file selected by both ``--cached`` and ``--modified`` is printed
+    twice unless ``--deduplicate`` is requested.  The older combined helper
+    intentionally coalesces selectors by index key, so the CLI calls each
+    filename-only selector independently and then restores normal pathname
+    ordering.  Stage/unmerged output keeps the established combined path;
+    ``--deduplicate`` is documented to have no effect there.
+    """
+    if args.stage or args.unmerged:
+        return ls_files(
+            repo,
+            cached=args.cached,
+            stage=args.stage,
+            unmerged=args.unmerged,
+            deleted=args.deleted,
+            modified=args.modified,
+            patterns=patterns,
+            error_unmatch=False,
+        )
+
+    selectors: list[dict[str, bool]] = []
+    if args.cached:
+        selectors.append({"cached": True})
+    if args.deleted:
+        selectors.append({"deleted": True})
+    if args.modified:
+        selectors.append({"modified": True})
+    if not selectors:
+        selectors.append({})
+
+    lines: list[str] = []
+    for selector in selectors:
+        lines.extend(
+            ls_files(
+                repo,
+                patterns=patterns,
+                error_unmatch=False,
+                **selector,
+            )
+        )
+    return sorted(lines, key=_record_path)
+
+
 def run_ls_files(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pygit ls-files",
@@ -123,6 +169,7 @@ def run_ls_files(argv: Sequence[str]) -> int:
     parser.add_argument("--exclude-standard", action="store_true", help="apply .gitignore, .pygitignore, and .pygit/info/exclude rules")
     parser.add_argument("--directory", action="store_true", help="show wholly-untracked directories with a trailing slash")
     parser.add_argument("--no-empty-directory", action="store_true", help="with --directory, suppress trees containing no files")
+    parser.add_argument("--deduplicate", action="store_true", help="suppress duplicate filename-only records")
     parser.add_argument("--full-name", action="store_true", help="show paths relative to the repository root")
     parser.add_argument("--error-unmatch", action="store_true", help="fail if any supplied path pattern matches no selected file")
     parser.add_argument("-z", action="store_true", help="terminate records with NUL")
@@ -148,24 +195,11 @@ def run_ls_files(argv: Sequence[str]) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    lines = []
+    lines: list[str] = []
     index_selector_requested = any((args.cached, args.stage, args.unmerged, args.deleted, args.modified))
     worktree_selector_requested = args.others or args.killed
     if index_selector_requested or not worktree_selector_requested:
-        lines.extend(
-            ls_files(
-                repo,
-                cached=args.cached,
-                stage=args.stage,
-                unmerged=args.unmerged,
-                deleted=args.deleted,
-                modified=args.modified,
-                patterns=patterns,
-                # Validate after every selector has contributed so mixed
-                # index/worktree queries use the union of selected records.
-                error_unmatch=False,
-            )
-        )
+        lines.extend(_index_lines(repo, args, patterns))
     if args.others:
         lines.extend(
             other_files(
@@ -181,7 +215,8 @@ def run_ls_files(argv: Sequence[str]) -> int:
     if args.killed:
         lines.extend(killed_files(repo, patterns=patterns))
 
-    lines = list(dict.fromkeys(lines))
+    if args.deduplicate and not (args.stage or args.unmerged):
+        lines = list(dict.fromkeys(lines))
     if args.error_unmatch and patterns:
         _validate_error_unmatch(patterns, lines)
 
