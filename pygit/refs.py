@@ -30,6 +30,7 @@ from .packed_refs import (
 ZERO_SHA = "0" * 64
 _HEX = frozenset("0123456789abcdef")
 _MAX_SYMREF_DEPTH = 32
+_CHECKOUT_MOVING_TO_PREFIX = "checkout: moving to "
 
 
 @dataclass(frozen=True)
@@ -110,10 +111,34 @@ class RefStore:
         """Return HEAD content (symbolic or raw SHA)."""
         return self._head.read_text(encoding="utf-8").strip()
 
+    @staticmethod
+    def _native_checkout_message(
+        message: str,
+        old_head: str,
+        old_sha: Optional[str],
+    ) -> str:
+        """Upgrade historical ``moving to`` checkout messages at write time.
+
+        Old repositories may already contain the historical pygit spelling and
+        remain readable.  New HEAD checkout movements record the source before
+        HEAD is changed, matching native Git's ``moving from X to Y`` shape.
+        """
+        if not message.startswith(_CHECKOUT_MOVING_TO_PREFIX):
+            return message
+        target = message[len(_CHECKOUT_MOVING_TO_PREFIX) :]
+        if old_head.startswith("ref: refs/heads/"):
+            source = old_head[len("ref: refs/heads/") :]
+        else:
+            source = old_sha or old_head
+        if not source:
+            return message
+        return f"checkout: moving from {source} to {target}"
+
     def set_head_symbolic(self, branch: str, message: str = "checkout") -> None:
         """Point HEAD at a branch (e.g. ``main``)."""
         old_head = self.get_head()
         old_sha = self.resolve_head()
+        message = self._native_checkout_message(message, old_head, old_sha)
         self._head.write_text(f"ref: refs/heads/{branch}", encoding="utf-8")
         new_sha = self.resolve_head()
         if old_head != self.get_head() or old_sha != new_sha:
@@ -129,6 +154,7 @@ class RefStore:
         """Detach HEAD to a raw commit SHA."""
         old_head = self.get_head()
         old_sha = self.resolve_head()
+        message = self._native_checkout_message(message, old_head, old_sha)
         self._head.write_text(sha, encoding="utf-8")
         if old_head != sha or old_sha != sha:
             self._append_reflog("HEAD", old_sha, sha, message, force=old_head != sha)
