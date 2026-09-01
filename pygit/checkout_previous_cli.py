@@ -13,10 +13,11 @@ def run_checkout_previous(argv: Sequence[str]) -> int:
     """Handle focused previous-checkout compatibility forms.
 
     ``pygit checkout -`` is Git's shorthand for ``pygit checkout @{-1}``.
-    ``pygit checkout --detach @{-N}`` detaches at the selected branch/commit.
-    The legacy checkout parser remains authoritative for every other checkout
-    form. The top-level application router calls this adapter only for the
-    focused previous-checkout forms it owns.
+    ``pygit checkout --detach @{-N}`` detaches at the selected branch/commit,
+    and ``pygit checkout --detach -`` is the exact ``@{-1}`` shorthand for the
+    same detached operation. The legacy checkout parser remains authoritative
+    for every other checkout form. The top-level application router calls this
+    adapter only for the focused previous-checkout forms it owns.
     """
 
     parser = argparse.ArgumentParser(
