@@ -38,15 +38,9 @@ def _branch_for_oid(repo: Repository, oid: str) -> Optional[str]:
 def expand_previous_checkout(repo: Repository, value: str) -> Optional[str]:
     """Expand ``@{-N}`` using the HEAD checkout history.
 
-    ``None`` means *value* is not previous-checkout syntax.  Invalid or
-    unavailable selectors raise ``ValueError`` so callers can fail closed like
+    ``None`` means *value* is not previous-checkout syntax. Invalid or
+    unavailable selectors raise ``ValueError`` so callers fail closed like
     ``git check-ref-format --branch``.
-
-    Modern/native-style reflog messages containing ``moving from X to Y`` are
-    authoritative.  Pygit's older ``moving to Y`` records are also supported:
-    the previous checkout destination is used when it identifies the old HEAD,
-    otherwise the old OID is mapped to a unique local branch or retained as a
-    detached OID.
     """
 
     match = _PREVIOUS_CHECKOUT_RE.fullmatch(value)
@@ -74,9 +68,6 @@ def expand_previous_checkout(repo: Repository, value: str) -> Optional[str]:
             raise ValueError(f"malformed checkout reflog entry for {value!r}")
         return source
 
-    # Legacy pygit checkout records only stored the destination.  The next
-    # older checkout destination is the best symbolic source when it still
-    # names the entry's old OID.
     if index < len(checkout_entries):
         older_destination = _checkout_destination(checkout_entries[index].message)
         if older_destination:
@@ -96,11 +87,10 @@ def expand_previous_checkout(repo: Repository, value: str) -> Optional[str]:
 def _checkout_detached(repo: Repository, target: str, reflog_target: str) -> None:
     """Restore *target* while leaving HEAD detached and naming *reflog_target*.
 
-    This mirrors :meth:`Repository.checkout`'s sparse-checkout, index rebuild,
-    and post-checkout-hook behavior, but deliberately writes a detached HEAD.
-    Git keeps the expanded symbolic previous-checkout name in the reflog even
-    when ``--detach`` resolves that name to a commit, so the display target is
-    kept separate from the content-derived SHA-256 object identity.
+    The restore/index path intentionally mirrors :meth:`Repository.checkout`.
+    Native Git treats a detached commit switch as a checkout operation for the
+    post-checkout hook, so the hook's third argument is ``1`` even though HEAD
+    ends detached.
     """
 
     sha = repo.refs.resolve(target)
@@ -144,24 +134,13 @@ def _checkout_detached(repo: Repository, target: str, reflog_target: str) -> Non
         sha,
         message=f"checkout: moving to {reflog_target}",
     )
-    HookRunner(repo.pygit_dir).run_hook("post-checkout", [old_sha, sha, "0"])
+    HookRunner(repo.pygit_dir).run_hook("post-checkout", [old_sha, sha, "1"])
 
 
 def checkout_previous(
     repo: Repository, value: str = "@{-1}", *, detach: bool = False
 ) -> str:
-    """Checkout a Git-style previous-checkout selector and return its expansion.
-
-    This is the operation-level counterpart to :func:`expand_previous_checkout`.
-    Only ``@{-N}`` input is accepted; ordinary revision selection remains the
-    responsibility of :meth:`Repository.checkout`.
-
-    The selector is expanded *before* checkout.  Normal checkout therefore
-    records the concrete previous branch/commit rather than the literal
-    ``@{-N}`` token.  Detached checkout keeps the expanded symbolic destination
-    in the reflog while HEAD itself points directly at that destination's real
-    content-derived SHA-256 commit, matching native Git's observable behavior.
-    """
+    """Checkout a Git-style previous-checkout selector and return its expansion."""
 
     expanded = expand_previous_checkout(repo, value)
     if expanded is None:
