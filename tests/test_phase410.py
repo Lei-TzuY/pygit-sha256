@@ -42,7 +42,7 @@ def test_checkout_detach_previous_branch_uses_sha256_tip(
     assert reopened.refs.current_branch() is None
     assert reopened.refs.resolve_head() == base
     assert len(base) == 64
-    assert reopened.reflog("HEAD")[0].message == f"checkout: moving from main to {base}"
+    assert reopened.reflog("HEAD")[0].message == "checkout: moving from main to topic"
     assert capsys.readouterr().out == f"HEAD is now at {base[:12]}\n"
 
 
@@ -107,7 +107,7 @@ def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str
     )
 
 
-def test_native_git_and_pygit_detach_previous_match_head_and_reflog(
+def test_native_git_and_pygit_detach_previous_match_state_and_reflog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     native = tmp_path / "native"
@@ -123,10 +123,11 @@ def test_native_git_and_pygit_detach_previous_match_head_and_reflog(
     assert _git("checkout", "-q", "main", cwd=native).returncode == 0
     assert _git("checkout", "--detach", "@{-1}", cwd=native).returncode == 0
     native_head = _git("rev-parse", "HEAD", cwd=native)
+    native_topic = _git("rev-parse", "topic", cwd=native)
     native_symbolic = _git("symbolic-ref", "-q", "--short", "HEAD", cwd=native)
     native_message = _git("reflog", "-1", "--format=%gs", "HEAD", cwd=native)
 
-    repo, _ = _seed_repo(tmp_path / "pygit")
+    repo, base = _seed_repo(tmp_path / "pygit")
     capsys.readouterr()
     repo.checkout("topic")
     repo.checkout("main")
@@ -134,7 +135,13 @@ def test_native_git_and_pygit_detach_previous_match_head_and_reflog(
     assert run_checkout_previous(["--detach", "@{-1}"]) == 0
 
     reopened = Repository(str(repo.worktree))
+    pygit_head = reopened.refs.resolve_head()
+    pygit_topic = reopened.refs.get_branch("topic")
+
     assert native_symbolic.returncode != 0
     assert reopened.refs.current_branch() is None
-    assert reopened.refs.resolve_head() + "\n" == native_head.stdout
+    assert native_head.stdout == native_topic.stdout
+    assert pygit_head == pygit_topic == base
+    assert native_head.stdout.strip() and len(native_head.stdout.strip()) == 64
+    assert pygit_head is not None and len(pygit_head) == 64
     assert reopened.reflog("HEAD")[0].message + "\n" == native_message.stdout
