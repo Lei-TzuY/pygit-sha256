@@ -7,6 +7,11 @@ import sys
 from contextlib import contextmanager
 from typing import Optional, Sequence
 
+from .clone_origin import (
+    DEFAULT_CLONE_REMOTE,
+    retarget_completed_clone_remote,
+    validate_clone_remote_name,
+)
 from .clone_partial import clone_partial_repository
 from .clone_remote import clone_default_branch, configure_clone_remote
 from .clone_shallow import clone_shallow_repository
@@ -46,6 +51,15 @@ def _filter_spec(value: str) -> str:
     try:
         return _validate_filter_spec(value)
     except (RuntimeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _clone_remote_name(value: str) -> str:
+    """Validate ``clone -o/--origin`` before any network or filesystem work."""
+
+    try:
+        return validate_clone_remote_name(value)
+    except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
@@ -101,6 +115,14 @@ def run_clone(argv: Sequence[str]) -> int:
     )
     parser.add_argument("url", metavar="URL")
     parser.add_argument("directory", nargs="?", metavar="DIR")
+    parser.add_argument(
+        "-o",
+        "--origin",
+        default=DEFAULT_CLONE_REMOTE,
+        type=_clone_remote_name,
+        metavar="NAME",
+        help="use NAME instead of 'origin' for the upstream remote",
+    )
     parser.add_argument(
         "-b",
         "--branch",
@@ -179,6 +201,7 @@ def run_clone(argv: Sequence[str]) -> int:
             server_options=server_options,
             depth=args.depth,
             filter_spec=args.filter,
+            remote_name=args.origin,
         )
 
     if empty_clone is not None:
@@ -244,17 +267,20 @@ def run_clone(argv: Sequence[str]) -> int:
                     **clone_kwargs,
                 )
 
+    if empty_clone is None:
+        retarget_completed_clone_remote(repo, args.origin)
+
     branch = repo.refs.current_branch()
     if branch and empty_clone is None:
         configure_clone_remote(
             repo,
             args.url,
             branch,
-            remote="origin",
-            default_branch=clone_default_branch(repo, "origin"),
+            remote=args.origin,
+            default_branch=clone_default_branch(repo, args.origin),
             single_branch=single_branch,
         )
-        configure_clone_tracking(repo, branch, remote="origin")
+        configure_clone_tracking(repo, branch, remote=args.origin)
 
     if empty_clone is not None:
         print("warning: You appear to have cloned an empty repository.", file=sys.stderr)
