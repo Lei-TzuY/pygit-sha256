@@ -14,6 +14,7 @@ The `@{-N}` operand is expanded from HEAD checkout reflog history before mutatio
 For a successful move, pygit:
 
 - preserves the genuine local content-derived 64-hex SHA-256 branch tip;
+- validates the destination with the existing Git-style branch refname checker;
 - creates the destination branch without checking it out when the source is not current;
 - updates symbolic HEAD when the selected older checkout is the currently checked-out branch (for example `@{-2}` after `main -> topic -> main`);
 - preserves the source branch reflog history and appends Git's same-OID rename event;
@@ -27,6 +28,12 @@ The reflog subject follows native Git exactly:
 ```text
 Branch: renamed refs/heads/<old> to refs/heads/<new>
 ```
+
+## Fail-closed mutation boundary
+
+Before moving config, refs, HEAD, reflogs, or packed refs, the focused adapter snapshots the exact files it may mutate. Any exception during the move restores those bytes/existence states before returning the error. A fault injected after the ref move therefore cannot leave branch config under the new name, a destination ref without the old ref, or a partially-renamed HEAD/reflog state.
+
+Native Git also permits destination branch configuration to exist before the destination ref exists. Its config format can retain duplicate values after a rename; pygit's scalar config model cannot represent duplicates. Phase415 preserves the already-visible destination value for a colliding key, moves every non-colliding source key, and removes the old source keys. This matches native `git config --get` visibility without inventing a multivalue format change in this phase.
 
 ## Native Git differential
 
