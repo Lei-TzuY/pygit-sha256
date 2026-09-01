@@ -28,6 +28,11 @@ def test_clone_cli_explicit_tag_short_circuits_legacy_clone(tmp_path, monkeypatc
 
     monkeypatch.setattr(clone_cli, "try_clone_explicit_tag_remote", fake_tag)
     monkeypatch.setattr(Repository, "clone", classmethod(bomb_clone))
+    # The bomb above is only a call sentinel.  Phase331 correctly interprets an
+    # actual Repository.clone replacement as an opt-out from hidden preflights,
+    # so explicitly model the production availability predicate in this routing
+    # test instead of disabling the very path being asserted.
+    monkeypatch.setattr(clone_cli, "_repository_clone_overridden", lambda: False)
 
     destination = tmp_path / "requested"
     assert run_clone(["-b", "release", URL, str(destination)]) == 0
