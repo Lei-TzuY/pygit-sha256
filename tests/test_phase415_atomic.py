@@ -68,8 +68,14 @@ def test_partial_move_failure_restores_config_refs_head_reflogs_and_packed_refs(
     before = phase415._snapshot_paths(paths)
     real_move_ref = phase415._move_branch_ref
 
-    def move_then_fail(repo_arg: Repository, old: str, new: str) -> None:
-        real_move_ref(repo_arg, old, new)
+    def move_then_fail(
+        repo_arg: Repository,
+        old: str,
+        new: str,
+        *,
+        force: bool = False,
+    ) -> None:
+        real_move_ref(repo_arg, old, new, force=force)
         raise OSError("injected failure after ref move")
 
     monkeypatch.setattr(phase415, "_move_branch_ref", move_then_fail)
