@@ -10,6 +10,11 @@ lock initialization paths through the shared EINTR-safe fsync helper introduced
 in Phase366. This keeps transient signal interruption from turning a fully
 written lock marker into a spurious acquisition failure while preserving every
 non-EINTR error and the existing cleanup/ownership contracts.
+
+Phase369 completes that acquisition-side durability contract for the larger
+``FETCH_HEAD.state.lock`` state machine. Its marker fsync now uses the same
+shared retry helper without changing the Phase356 retained-descriptor ownership
+sequence or the setup-descriptor close contract.
 """
 
 from __future__ import annotations
@@ -130,6 +135,69 @@ def install_durable_owned_lock_release_integration() -> None:
                 except FileNotFoundError:
                     pass
 
+    def acquire_fetch_head_state_guard(pygit_dir: Path) -> Path:
+        """Acquire the retained FETCH_HEAD state guard with EINTR-safe fsync."""
+
+        root = Path(pygit_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        lock = incremental._fetch_head_state_guard_path(root)
+        if lock in incremental._FETCH_HEAD_STATE_GUARD_OWNERSHIP:
+            raise RuntimeError(
+                "cannot lock incremental FETCH_HEAD state: lock file already exists"
+            )
+
+        flags = incremental.os.O_WRONLY | incremental.os.O_CREAT | incremental.os.O_EXCL
+        if hasattr(incremental.os, "O_BINARY"):
+            flags |= incremental.os.O_BINARY
+        if hasattr(incremental.os, "O_CLOEXEC"):
+            flags |= incremental.os.O_CLOEXEC
+
+        try:
+            fd = incremental.os.open(lock, flags, 0o666)
+        except FileExistsError as exc:
+            raise RuntimeError(
+                "cannot lock incremental FETCH_HEAD state: lock file already exists"
+            ) from exc
+
+        ownership_fd = -1
+        committed = False
+        try:
+            incremental.os.set_inheritable(fd, False)
+            incremental._write_fetch_head_state_guard_marker(fd)
+            _fsync_retry(fd)
+
+            ownership_fd = incremental.os.dup(fd)
+            incremental.os.set_inheritable(ownership_fd, False)
+            stat_result = incremental.os.fstat(ownership_fd)
+            ownership = incremental._FetchHeadStateGuardOwnership(
+                fd=ownership_fd,
+                device=stat_result.st_dev,
+                inode=stat_result.st_ino,
+            )
+
+            incremental.os.close(fd)
+            fd = -1
+            incremental._FETCH_HEAD_STATE_GUARD_OWNERSHIP[lock] = ownership
+            ownership_fd = -1
+            committed = True
+        finally:
+            if fd != -1:
+                try:
+                    incremental.os.close(fd)
+                except OSError:
+                    pass
+            if ownership_fd != -1:
+                try:
+                    incremental.os.close(ownership_fd)
+                except OSError:
+                    pass
+            if not committed:
+                try:
+                    lock.unlink()
+                except FileNotFoundError:
+                    pass
+        return lock
+
     def release_publication_guard_locks(locks: Iterable[Path]) -> None:
         owned: list[tuple[Path, OwnedLockIdentity]] = []
         for lock in tuple(locks):
@@ -158,6 +226,7 @@ def install_durable_owned_lock_release_integration() -> None:
     transaction._initialize_publication_guard_lock = initialize_publication_guard_lock
     transaction._initialize_owned_publication_guard_lock = initialize_owned_publication_guard_lock
     refs._initialize_ref_lock = initialize_ref_lock
+    incremental._acquire_fetch_head_state_guard = acquire_fetch_head_state_guard
     transaction._release_publication_guard_locks = release_publication_guard_locks
     incremental._release_publication_guard_locks = release_publication_guard_locks
     incremental._release_fetch_head_state_guard = release_fetch_head_state_guard
