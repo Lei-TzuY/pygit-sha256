@@ -18,11 +18,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Optional, Sequence
 
+from .clone_unborn import try_clone_explicit_unborn_remote
 from .fetch_importer import StableShallowNativeImporter
 from .fetch_shallow import _apply_shallow_response
 from .protocol_v2_fetch import SmartHttpV2FetchClient
 from .remote import Advertisement
 from .repo import Repository
+
+
+_ORIGINAL_SMART_HTTP_V2_FETCH_CLIENT = SmartHttpV2FetchClient
 
 
 def _default_branch(repo: Repository, advertisement: Advertisement) -> Optional[str]:
@@ -168,6 +172,21 @@ def clone_shallow_repository(
     """Create a repository from a genuinely truncated protocol-v2 pack."""
     if depth <= 0:
         raise ValueError("shallow clone depth must be a positive integer")
+
+    # Keep direct library calls aligned with the Phase331 CLI without changing
+    # the long-standing client-replacement seam used by focused tests/callers.
+    if SmartHttpV2FetchClient is _ORIGINAL_SMART_HTTP_V2_FETCH_CLIENT:
+        empty = try_clone_explicit_unborn_remote(
+            url,
+            path,
+            branch_name=branch_name,
+            single_branch=single_branch,
+            server_options=server_options,
+            depth=depth,
+        )
+        if empty is not None:
+            return empty.repo
+
     if path is None:
         name = url.rstrip("/").rsplit("/", 1)[-1]
         path = name[:-4] if name.endswith(".git") else name
