@@ -14,15 +14,19 @@ import re
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 from .protocol_v2_bundle_uri import BundleUriEntry, BundleUriList
 
 
 DEFAULT_MAX_BUNDLE_URI_BYTES = 256 * 1024 * 1024
 _BUNDLE_ID_RE = re.compile(r"^[A-Za-z0-9-]+$")
+_BUNDLE_SECTION_RE = re.compile(r'^bundle "([A-Za-z0-9-]+)"$', re.IGNORECASE)
 _NATIVE_SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
+_CAPABILITY_KEY_BYTES = frozenset(
+    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+)
 _MAX_CREATION_TOKEN = (1 << 64) - 1
 
 
@@ -72,14 +76,19 @@ def resolve_bundle_uri(base_uri: str, advertised_uri: str) -> str:
     """Resolve one bundle-list URI using Git's documented base-URI model."""
 
     _validate_http_uri(base_uri, context="bundle-list base URI")
-    if not advertised_uri or "\x00" in advertised_uri or "\r" in advertised_uri or "\n" in advertised_uri:
+    if (
+        not advertised_uri
+        or "\x00" in advertised_uri
+        or "\r" in advertised_uri
+        or "\n" in advertised_uri
+    ):
         raise ValueError("bundle URI contains an invalid character")
 
     advertised = urllib.parse.urlsplit(advertised_uri)
     if advertised.scheme:
         resolved = advertised_uri
     else:
-        # A scheme-relative URL can silently replace the authority.  The bundle
+        # A scheme-relative URL can silently replace the authority. The bundle
         # protocol documents absolute HTTP(S) URLs and path-relative URLs, so
         # require an explicit scheme when changing hosts.
         if advertised_uri.startswith("//"):
@@ -143,9 +152,7 @@ def _read_bounded(response, max_bytes: int) -> bytes:
 def _parse_bundle_capability(line: bytes) -> Tuple[str, Optional[str]]:
     raw = line[1:]
     key, separator, value = raw.partition(b"=")
-    if not key or not all(
-        chr(byte).isalnum() or byte == ord("-") for byte in key
-    ):
+    if not key or any(byte not in _CAPABILITY_KEY_BYTES for byte in key):
         raise ValueError("invalid Git bundle capability")
     try:
         key_text = key.decode("ascii")
@@ -172,6 +179,8 @@ def _valid_bundle_refname(raw: bytes) -> str:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("invalid Git bundle refname encoding") from exc
+    if text == "HEAD":
+        return text
     if (
         not text.startswith("refs/")
         or text.endswith("/")
@@ -285,7 +294,7 @@ def _config_parser() -> configparser.RawConfigParser:
         inline_comment_prefixes=None,
         empty_lines_in_values=False,
     )
-    parser.optionxform = str
+    parser.optionxform = str.lower
     return parser
 
 
@@ -314,28 +323,31 @@ def parse_bundle_list_config(payload: bytes, *, base_uri: str) -> Optional[Bundl
     except (configparser.Error, ValueError):
         return None
 
-    if not parser.has_section("bundle"):
+    global_section = next(
+        (section for section in parser.sections() if section.lower() == "bundle"),
+        None,
+    )
+    if global_section is None:
         return None
     try:
-        version = parser.get("bundle", "version")
-        mode = parser.get("bundle", "mode")
+        version = parser.get(global_section, "version")
+        mode = parser.get(global_section, "mode")
     except (configparser.NoOptionError, configparser.NoSectionError):
         return None
     if version != "1" or mode.lower() not in {"all", "any"}:
         return None
 
-    heuristic_raw = parser.get("bundle", "heuristic", fallback=None)
+    heuristic_raw = parser.get(global_section, "heuristic", fallback=None)
     heuristic = "creationToken" if heuristic_raw == "creationToken" else None
     bundles = []
 
     for section in parser.sections():
-        if section == "bundle":
+        if section == global_section:
             continue
-        if not section.startswith('bundle "') or not section.endswith('"'):
+        match = _BUNDLE_SECTION_RE.fullmatch(section)
+        if match is None:
             continue
-        bundle_id = section[len('bundle "') : -1]
-        if not _BUNDLE_ID_RE.fullmatch(bundle_id):
-            return None
+        bundle_id = match.group(1)
         uri = parser.get(section, "uri", fallback=None)
         if not uri:
             return None
@@ -343,7 +355,7 @@ def parse_bundle_list_config(payload: bytes, *, base_uri: str) -> Optional[Bundl
             resolved = resolve_bundle_uri(base_uri, uri)
         except ValueError:
             return None
-        token_raw = parser.get(section, "creationToken", fallback=None)
+        token_raw = parser.get(section, "creationtoken", fallback=None)
         bundles.append(
             BundleUriEntry(
                 bundle_id=bundle_id,
@@ -410,7 +422,11 @@ def download_bundle_uri_payload(
         status = getattr(response, "status", 200)
         if status != 200:
             raise ValueError(f"bundle URI returned unexpected HTTP status {status}")
-        final_url = response.geturl() if callable(getattr(response, "geturl", None)) else resolved
+        final_url = (
+            response.geturl()
+            if callable(getattr(response, "geturl", None))
+            else resolved
+        )
         _validate_http_uri(final_url, context="bundle URI response URL")
         payload = _read_bounded(response, max_bytes)
     return classify_bundle_uri_payload(payload, source_uri=final_url)
