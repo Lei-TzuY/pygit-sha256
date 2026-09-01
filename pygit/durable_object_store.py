@@ -26,6 +26,13 @@ the namespace fences. ``write()`` reports success only if the live object path
 still names that exact fsynced inode after both fences. If another writer wins a
 replacement race, the visible candidate is certified through the same strict
 Phase375 validator or publication is retried.
+
+Phase380 pins the POSIX fanout and primary ``objects/`` directory inodes as well.
+The mature pathname-based directory fence remains as a compatibility seam, but
+success additionally requires fsync of retained directory descriptors plus
+before/after pathname-to-directory-inode correlation. A namespace rename or
+replacement during the durability window therefore forces retry/certification
+instead of letting a fence on the wrong directory inode justify success.
 """
 
 from __future__ import annotations
@@ -36,7 +43,9 @@ import os
 import stat
 import tempfile
 import zlib
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from .durable_owned_lock import _fsync_retry, fsync_directory
 from .objects.base import GitObject, HASH_ALGO
@@ -46,6 +55,16 @@ from .store import ObjectStore
 _INSTALLED = False
 _READ_CHUNK = 1024 * 1024
 _OUTPUT_CHUNK = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _PinnedDirectory:
+    """Retained POSIX identity for one directory durability boundary."""
+
+    fd: int
+    path: Path
+    device: int
+    inode: int
 
 
 def _open_existing_loose_object(path: Path) -> int:
@@ -68,6 +87,110 @@ def _open_existing_loose_object(path: Path) -> int:
         finally:
             raise
     return fd
+
+
+def _open_pinned_directory(path: Path) -> Optional[_PinnedDirectory]:
+    """Open and pin one directory inode on POSIX; return ``None`` on Windows.
+
+    Windows deliberately keeps the repository's existing atomic publication
+    semantics without claiming the POSIX directory-fsync contract that Python
+    does not expose there.
+    """
+
+    directory = Path(path)
+    if os.name == "nt":
+        return None
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+
+    fd = os.open(directory, flags)
+    try:
+        os.set_inheritable(fd, False)
+        pinned = os.fstat(fd)
+        if not stat.S_ISDIR(pinned.st_mode):
+            raise NotADirectoryError(str(directory))
+        return _PinnedDirectory(fd, directory, pinned.st_dev, pinned.st_ino)
+    except BaseException:
+        try:
+            os.close(fd)
+        finally:
+            raise
+
+
+def _close_pinned_directory(pinned: Optional[_PinnedDirectory]) -> None:
+    if pinned is not None:
+        os.close(pinned.fd)
+
+
+def _path_still_names_directory(pinned: Optional[_PinnedDirectory]) -> bool:
+    """Return whether a directory pathname still names its retained inode."""
+
+    if pinned is None:
+        return True
+    try:
+        live = os.stat(pinned.path, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return (
+        stat.S_ISDIR(live.st_mode)
+        and live.st_dev == pinned.device
+        and live.st_ino == pinned.inode
+    )
+
+
+def _fence_pinned_directory(pinned: Optional[_PinnedDirectory], path: Path) -> bool:
+    """Fence one namespace and verify that the pathname never changed inode.
+
+    ``fsync_directory(path)`` remains the established compatibility/test seam.
+    On POSIX the retained descriptor is the authoritative identity-aware fence;
+    pathname replacement before or after that fd fsync makes this attempt fail
+    closed so the caller can retry through its normal publication path.
+    """
+
+    try:
+        fsync_directory(path)
+    except FileNotFoundError:
+        return False
+
+    if pinned is None:
+        return True
+    if not _path_still_names_directory(pinned):
+        return False
+    _fsync_retry(pinned.fd)
+    return _path_still_names_directory(pinned)
+
+
+def _pin_loose_object_directories(
+    fanout: Path,
+    objects_root: Path,
+) -> tuple[Optional[_PinnedDirectory], Optional[_PinnedDirectory]]:
+    """Pin primary objects-root then fanout, closing the first on later failure."""
+
+    root_pin = _open_pinned_directory(objects_root)
+    try:
+        fanout_pin = _open_pinned_directory(fanout)
+    except BaseException:
+        _close_pinned_directory(root_pin)
+        raise
+    return fanout_pin, root_pin
+
+
+def _close_loose_object_directories(
+    fanout_pin: Optional[_PinnedDirectory],
+    root_pin: Optional[_PinnedDirectory],
+) -> None:
+    """Close both retained namespace descriptors without stranding the root fd."""
+
+    try:
+        _close_pinned_directory(fanout_pin)
+    finally:
+        _close_pinned_directory(root_pin)
 
 
 def _read_fd_chunk(fd: int) -> bytes:
@@ -152,12 +275,10 @@ def _certify_existing_loose_object(
 ) -> bool:
     """Validate and durably certify one exact existing loose object.
 
-    The descriptor pins the inode whose zlib stream is validated. Success is
-    reported only after that exact stream matches ``expected_store_bytes``, the
-    inode has been fsynced, the pathname still names it, and both namespace
-    durability fences have completed. A concurrent pathname replacement or any
-    non-exact stream returns ``False`` so normal atomic publication repairs the
-    requested content.
+    The object descriptor pins the inode whose zlib stream is validated. On
+    POSIX, retained fanout/root descriptors also pin the namespace inodes being
+    fenced. Success requires all three live pathnames to remain correlated with
+    those exact inodes through the durability boundary.
     """
 
     try:
@@ -169,7 +290,14 @@ def _certify_existing_loose_object(
             return False
         raise
 
+    fanout_pin: Optional[_PinnedDirectory] = None
+    root_pin: Optional[_PinnedDirectory] = None
     try:
+        try:
+            fanout_pin, root_pin = _pin_loose_object_directories(path.parent, objects_root)
+        except FileNotFoundError:
+            return False
+
         pinned = os.fstat(fd)
         if not stat.S_ISREG(pinned.st_mode):
             return False
@@ -180,12 +308,26 @@ def _certify_existing_loose_object(
         _fsync_retry(fd)
         if not _path_still_names_inode(path, pinned.st_dev, pinned.st_ino):
             return False
+        if not _path_still_names_directory(fanout_pin):
+            return False
+        if not _path_still_names_directory(root_pin):
+            return False
 
-        fsync_directory(path.parent)
-        fsync_directory(objects_root)
-        return _path_still_names_inode(path, pinned.st_dev, pinned.st_ino)
+        if not _fence_pinned_directory(fanout_pin, path.parent):
+            return False
+        if not _fence_pinned_directory(root_pin, objects_root):
+            return False
+
+        return (
+            _path_still_names_inode(path, pinned.st_dev, pinned.st_ino)
+            and _path_still_names_directory(fanout_pin)
+            and _path_still_names_directory(root_pin)
+        )
     finally:
-        os.close(fd)
+        try:
+            _close_loose_object_directories(fanout_pin, root_pin)
+        finally:
+            os.close(fd)
 
 
 def _publish_new_loose_object(
@@ -197,34 +339,53 @@ def _publish_new_loose_object(
     """Publish one new loose-object inode and durably certify its namespace.
 
     The temporary descriptor remains open after its contents are flushed and
-    fsynced. Its `(st_dev, st_ino)` identity is captured before `os.replace()`.
-    After the fanout and object-root namespace fences complete, success requires
-    the live object pathname to still name that exact inode. A competing writer
-    that replaced the pathname therefore causes a `False` result rather than a
-    false durability claim.
+    fsynced. POSIX fanout/root directory descriptors are retained across the
+    atomic replacement and namespace fences. Success requires both the live
+    object path and both directory pathnames to remain on their pinned inodes.
     """
 
     fanout = path.parent
     fanout.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f".tmp-{sha}-", dir=str(fanout))
-    temp_path = Path(temp_name)
+
     try:
-        os.set_inheritable(fd, False)
-        with os.fdopen(fd, "wb", closefd=False) as handle:
-            handle.write(compressed)
-            handle.flush()
-            _fsync_retry(fd)
-        pinned = os.fstat(fd)
-        os.replace(temp_path, path)
-        fsync_directory(fanout)
-        fsync_directory(objects_root)
-        return _path_still_names_inode(path, pinned.st_dev, pinned.st_ino)
-    finally:
+        fanout_pin, root_pin = _pin_loose_object_directories(fanout, objects_root)
+    except FileNotFoundError:
+        return False
+
+    try:
+        fd, temp_name = tempfile.mkstemp(prefix=f".tmp-{sha}-", dir=str(fanout))
+        temp_path = Path(temp_name)
         try:
-            os.close(fd)
+            os.set_inheritable(fd, False)
+            with os.fdopen(fd, "wb", closefd=False) as handle:
+                handle.write(compressed)
+                handle.flush()
+                _fsync_retry(fd)
+            pinned = os.fstat(fd)
+            os.replace(temp_path, path)
+
+            if not _path_still_names_directory(fanout_pin):
+                return False
+            if not _path_still_names_directory(root_pin):
+                return False
+            if not _fence_pinned_directory(fanout_pin, fanout):
+                return False
+            if not _fence_pinned_directory(root_pin, objects_root):
+                return False
+
+            return (
+                _path_still_names_inode(path, pinned.st_dev, pinned.st_ino)
+                and _path_still_names_directory(fanout_pin)
+                and _path_still_names_directory(root_pin)
+            )
         finally:
-            if temp_path.exists():
-                temp_path.unlink()
+            try:
+                os.close(fd)
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink()
+    finally:
+        _close_loose_object_directories(fanout_pin, root_pin)
 
 
 def install_durable_object_store_support() -> None:
@@ -249,9 +410,9 @@ def install_durable_object_store_support() -> None:
             if _publish_new_loose_object(obj_path, sha, compressed, self.root):
                 return sha
 
-            # Another writer replaced our fully durable inode before the final
-            # namespace correlation. Accept that winner only after strict,
-            # bounded validation plus inode and directory durability fencing.
+            # Another writer replaced our fully durable inode or namespace before
+            # final correlation. Accept the visible winner only after strict,
+            # bounded validation plus object/directory inode-aware durability.
             # Otherwise retry our normal same-directory atomic publication.
             if _certify_existing_loose_object(obj_path, store_bytes, self.root):
                 return sha
