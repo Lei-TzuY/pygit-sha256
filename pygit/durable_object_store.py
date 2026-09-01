@@ -2,9 +2,9 @@
 
 The core object store has always published loose objects through a same-directory
 temporary and atomic replacement. Phase370 completes the durability boundary:
-file fsync retries transient EINTR, and a successful namespace replacement is
-followed by a POSIX parent-directory durability fence before ``write()`` reports
-success.
+file fsync retries transient EINTR, a successful object replacement is followed
+by a POSIX fanout-directory fence, and creation of a new fanout directory is
+followed by an objects-root fence before ``write()`` reports success.
 """
 
 from __future__ import annotations
@@ -40,11 +40,13 @@ def install_durable_object_store_support() -> None:
         if obj_path.exists() and self._valid_loose_object(obj_path, sha):
             return sha
 
-        obj_path.parent.mkdir(parents=True, exist_ok=True)
+        fanout = obj_path.parent
+        fanout_preexisted = fanout.exists()
+        fanout.mkdir(parents=True, exist_ok=True)
         compressed = zlib.compress(store_bytes)
         fd, temp_name = tempfile.mkstemp(
             prefix=f".tmp-{sha}-",
-            dir=str(obj_path.parent),
+            dir=str(fanout),
         )
         temp_path = Path(temp_name)
         try:
@@ -53,7 +55,9 @@ def install_durable_object_store_support() -> None:
                 handle.flush()
                 _fsync_retry(handle.fileno())
             os.replace(temp_path, obj_path)
-            fsync_directory(obj_path.parent)
+            fsync_directory(fanout)
+            if not fanout_preexisted:
+                fsync_directory(self.root)
         finally:
             if temp_path.exists():
                 temp_path.unlink()
