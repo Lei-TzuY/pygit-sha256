@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Optional, Sequence
 
 from .branch_checkout import expand_previous_checkout
 from .entrypoint import _find_repo
+from .ref_query import check_ref_format
 from .repo import Repository
 
 
@@ -80,6 +81,58 @@ def _move_branch_ref(repo: Repository, old: str, new: str) -> None:
             parent = parent.parent
 
 
+def _branch_storage_path(repo: Repository, name: str) -> Path:
+    return repo.pygit_dir / "refs" / "heads" / Path(*name.split("/"))
+
+
+def _rename_mutation_paths(repo: Repository, old: str, new: str) -> tuple[Path, ...]:
+    return (
+        repo.pygit_dir / "config",
+        repo.pygit_dir / "packed-refs",
+        repo.pygit_dir / "HEAD",
+        repo.pygit_dir / "logs" / "HEAD",
+        _branch_storage_path(repo, old),
+        _branch_storage_path(repo, new),
+        repo.refs._log_path(f"refs/heads/{old}"),
+        repo.refs._log_path(f"refs/heads/{new}"),
+    )
+
+
+def _snapshot_paths(paths: Sequence[Path]) -> dict[Path, Optional[bytes]]:
+    """Capture exact file bytes/existence for focused rename rollback."""
+
+    snapshots: dict[Path, Optional[bytes]] = {}
+    for path in paths:
+        snapshots[path] = path.read_bytes() if path.is_file() else None
+    return snapshots
+
+
+def _restore_paths(snapshots: Mapping[Path, Optional[bytes]]) -> None:
+    """Restore the pre-rename file state after any partial mutation failure."""
+
+    for path, content in snapshots.items():
+        if content is None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
+def _move_branch_atomically(repo: Repository, old: str, new: str) -> None:
+    """Move config/ref/reflog/HEAD state as one fail-closed focused operation."""
+
+    snapshots = _snapshot_paths(_rename_mutation_paths(repo, old, new))
+    try:
+        _move_branch_config(repo, old, new)
+        _move_branch_ref(repo, old, new)
+    except Exception:
+        _restore_paths(snapshots)
+        raise
+
+
 def run_branch_move_previous(argv: Sequence[str]) -> int:
     """Handle ``branch -m/--move @{-N} <new>`` exactly."""
 
@@ -102,9 +155,9 @@ def run_branch_move_previous(argv: Sequence[str]) -> int:
     if repo.refs.get_branch(expanded) is None:
         raise ValueError(f"no branch named {args.old!r}")
 
-    if expanded == args.new or repo.refs.get_branch(args.new) is not None:
-        raise ValueError(f"a branch named {args.new!r} already exists")
+    new_name = check_ref_format(args.new, branch=True)
+    if expanded == new_name or repo.refs.get_branch(new_name) is not None:
+        raise ValueError(f"a branch named {new_name!r} already exists")
 
-    _move_branch_config(repo, expanded, args.new)
-    _move_branch_ref(repo, expanded, args.new)
+    _move_branch_atomically(repo, expanded, new_name)
     return 0
