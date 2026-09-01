@@ -6,11 +6,13 @@ modern nested/custom grammar are handled here before the legacy argparse stack.
 
 from __future__ import annotations
 
+import re
 import sys
 from typing import Sequence
 
 from .cat_file_cli import run_cat_file
 from .checkout_index_cli import run_checkout_index
+from .checkout_previous_cli import run_checkout_previous
 from .commit_graph_cli import run_commit_graph
 from .count_objects_cli import run_count_objects
 from .for_each_ref_cli import run_for_each_ref
@@ -41,6 +43,8 @@ _ERRORS = (
     OSError,
 )
 
+_PREVIOUS_CHECKOUT_SELECTOR = re.compile(r"^@\{-\d+\}$")
+
 
 def _finish(code: int) -> None:
     if code:
@@ -58,6 +62,14 @@ def _run_safe(handler, argv: Sequence[str]) -> None:
 
 def main() -> None:
     argv = sys.argv[1:]
+    if (
+        len(argv) == 2
+        and argv[0] == "checkout"
+        and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[1]) is not None
+    ):
+        _run_safe(run_checkout_previous, argv[1:])
+        return
+
     if argv and argv[0] == "reflog":
         if len(argv) >= 2 and argv[1] == "expire":
             _run_safe(run_reflog_expire, argv[2:])
