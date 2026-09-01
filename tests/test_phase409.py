@@ -84,7 +84,7 @@ def test_application_routes_only_exact_checkout_dash(
     calls.clear()
     monkeypatch.setattr(sys, "argv", ["pygit", "checkout", "--detach", "-"])
     application.main()
-    assert calls == [("legacy", [])]
+    assert calls == [("previous", ["--detach", "-"])]
 
     calls.clear()
     monkeypatch.setattr(sys, "argv", ["pygit", "checkout", "--", "-"])
