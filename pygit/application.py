@@ -20,6 +20,7 @@ from .fetch_partial import run_fetch
 from .for_each_ref_cli import run_for_each_ref
 from .fsck_cli import run_fsck
 from .gc_cli import run_gc
+from .init_cli import run_init
 from .launcher import main as launcher_main
 from .ls_files_cli import run_ls_files
 from .ls_tree_cli import run_ls_tree
@@ -65,6 +66,10 @@ def _run_safe(handler, argv: Sequence[str]) -> None:
 
 def main() -> None:
     argv = sys.argv[1:]
+    if argv and argv[0] == "init":
+        _run_safe(run_init, argv[1:])
+        return
+
     if argv and argv[0] == "reflog":
         if len(argv) >= 2 and argv[1] == "expire":
             _run_safe(run_reflog_expire, argv[2:])
