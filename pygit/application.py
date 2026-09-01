@@ -10,6 +10,7 @@ import re
 import sys
 from typing import Sequence
 
+from .branch_move_previous_cli import run_branch_move_previous
 from .branch_previous_cli import run_branch_previous
 from .cat_file_cli import run_cat_file
 from .checkout_create_previous_cli import run_checkout_create_previous
@@ -79,6 +80,15 @@ def main() -> None:
         and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[3]) is not None
     ):
         _run_safe(run_branch_previous, argv[1:])
+        return
+
+    if (
+        len(argv) == 4
+        and argv[0] == "branch"
+        and argv[1] in {"-m", "--move"}
+        and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
+    ):
+        _run_safe(run_branch_move_previous, argv[1:])
         return
 
     if (
