@@ -188,7 +188,10 @@ def test_native_sha256_v3_bundle_is_rejected_at_remote_identity_boundary(tmp_pat
     data = _create_bundle(repo, tmp_path / "sha256.bundle", 3, "main")
 
     assert b"@object-format=sha256\n" in data
-    with pytest.raises(RuntimeError, match="Unsupported bundle object format: sha256"):
+    # The 64-hex advertised tip crosses the unsupported remote hash domain
+    # before pack parsing, so the earliest fail-closed diagnostic is the native
+    # OID-width check rather than the later capability check.
+    with pytest.raises(ValueError, match="40-hex SHA-1"):
         parse_git_bundle(data)
 
 
