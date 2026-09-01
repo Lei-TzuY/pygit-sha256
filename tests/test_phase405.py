@@ -28,6 +28,9 @@ def test_branch_previous_checkout_expands_legacy_pygit_history(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
     _seed_checkout_history(tmp_path)
+    # Repository.init() intentionally reports initialization on stdout.  Clear
+    # that fixture output before asserting the command's Git-compatible output.
+    capsys.readouterr()
     monkeypatch.chdir(tmp_path)
 
     assert dispatch(["check-ref-format", "--branch", "@{-1}"]) == 0
