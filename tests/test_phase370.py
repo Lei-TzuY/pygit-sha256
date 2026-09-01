@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
 
 import pygit.durable_owned_lock as durable
 from pygit.objects import BlobObject
+from pygit.objects.base import HASH_ALGO
 from pygit.repo import Repository
 
 
@@ -108,9 +111,7 @@ def test_loose_object_directory_fsync_failure_propagates_after_complete_replace(
     # The atomic replace already happened. The complete object may be visible,
     # but the caller did not receive success because the namespace fence failed.
     envelope = blob._build_store_bytes()
-    import hashlib
-
-    oid = hashlib.sha256(envelope).hexdigest()
+    oid = hashlib.new(HASH_ALGO, envelope).hexdigest()
     assert repo.store.read(oid).data == b"phase370-post-replace-failure"
     assert not list((repo.store.root / oid[:2]).glob(f".tmp-{oid}-*"))
 
@@ -130,3 +131,27 @@ def test_existing_valid_loose_object_fast_path_needs_no_new_fsync(
 
     assert repo.store.write(blob) == oid
     assert repo.store.read(oid).data == b"phase370-existing"
+
+
+def test_durable_writer_preserves_native_git_sha256_blob_identity(tmp_path: Path) -> None:
+    native = tmp_path / "native"
+    subprocess.run(
+        ["git", "init", "--object-format=sha256", str(native)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    payload = b"phase370-native-sha256\n"
+    native_oid = subprocess.run(
+        ["git", "-C", str(native), "hash-object", "--stdin"],
+        input=payload,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout.decode("ascii").strip()
+
+    repo = _repo(tmp_path)
+    pygit_oid = repo.store.write(BlobObject(payload))
+
+    assert len(native_oid) == 64
+    assert pygit_oid == native_oid
