@@ -213,9 +213,17 @@ def _run_check_ref_format(argv: Sequence[str]) -> int:
     )
     parser.add_argument(
         "--allow-onelevel",
+        dest="allow_onelevel",
         action="store_true",
         help="permit a refname with no slash",
     )
+    parser.add_argument(
+        "--no-allow-onelevel",
+        dest="allow_onelevel",
+        action="store_false",
+        help="require a refname with more than one level (the default)",
+    )
+    parser.set_defaults(allow_onelevel=False)
     parser.add_argument(
         "--branch",
         action="store_true",
@@ -228,6 +236,8 @@ def _run_check_ref_format(argv: Sequence[str]) -> int:
     )
     parser.add_argument(
         "--normalize",
+        "--print",
+        dest="normalize",
         action="store_true",
         help="remove leading/repeated slashes before validation and print the result",
     )
