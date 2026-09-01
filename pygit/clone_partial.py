@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Set
 
+from .clone_unborn import try_clone_explicit_unborn_remote
 from .fetch_importer import PromisorFilteredNativeImporter
 from .fetch_partial import _filtered_v2_fetch, _validate_filter_spec
 from .objects import CommitObject, TreeObject
@@ -20,6 +21,9 @@ from .promisor_materialize import materialize_promised_objects
 from .protocol_v2_fetch import SmartHttpV2FetchClient
 from .remote import Advertisement
 from .repo import Repository
+
+
+_ORIGINAL_SMART_HTTP_V2_FETCH_CLIENT = SmartHttpV2FetchClient
 
 
 def _default_branch(repo: Repository, advertisement: Advertisement) -> Optional[str]:
@@ -178,6 +182,23 @@ def clone_partial_repository(
 ) -> Repository:
     """Create a partial clone, optionally leaving its worktree unpopulated."""
     filter_spec = _validate_filter_spec(filter_spec)
+
+    # Production callers should observe the same explicit-unborn behavior as the
+    # clone CLI.  Preserve established tests/dependency-injection seams: when a
+    # caller replaces this module's fetch client, do not insert a hidden second
+    # network client ahead of that replacement.
+    if SmartHttpV2FetchClient is _ORIGINAL_SMART_HTTP_V2_FETCH_CLIENT:
+        empty = try_clone_explicit_unborn_remote(
+            url,
+            path,
+            branch_name=branch_name,
+            single_branch=single_branch,
+            server_options=server_options,
+            filter_spec=filter_spec,
+        )
+        if empty is not None:
+            return empty.repo
+
     if path is None:
         name = url.rstrip("/").rsplit("/", 1)[-1]
         path = name[:-4] if name.endswith(".git") else name
