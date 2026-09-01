@@ -65,7 +65,10 @@ def main() -> None:
     if (
         len(argv) == 2
         and argv[0] == "checkout"
-        and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[1]) is not None
+        and (
+            argv[1] == "-"
+            or _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[1]) is not None
+        )
     ):
         _run_safe(run_checkout_previous, argv[1:])
         return
