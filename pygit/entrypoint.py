@@ -12,6 +12,7 @@ from .index_plumbing import refresh_index, update_index
 from .ls_files_cli import run_ls_files
 from .plumbing import is_ancestor, list_refs, merge_bases, peel_oid, verify_ref
 from .ref_query import check_ref_format, format_ref, query_refs
+from .refspec_format import check_refspec_pattern
 from .repo import Repository
 from .tree_plumbing import make_tree, read_tree
 
@@ -221,6 +222,11 @@ def _run_check_ref_format(argv: Sequence[str]) -> int:
         help="validate a branch name (one-level names allowed; leading '-' rejected)",
     )
     parser.add_argument(
+        "--refspec-pattern",
+        action="store_true",
+        help="permit one '*' wildcard as a refspec refname pattern",
+    )
+    parser.add_argument(
         "--normalize",
         action="store_true",
         help="remove leading/repeated slashes before validation and print the result",
@@ -228,12 +234,22 @@ def _run_check_ref_format(argv: Sequence[str]) -> int:
     parser.add_argument("refname", metavar="REFNAME")
     args = parser.parse_args(list(argv))
 
-    checked = check_ref_format(
-        args.refname,
-        allow_onelevel=args.allow_onelevel,
-        branch=args.branch,
-        normalize=args.normalize,
-    )
+    if args.branch and args.refspec_pattern:
+        parser.error("--branch and --refspec-pattern are mutually exclusive")
+
+    if args.refspec_pattern:
+        checked = check_refspec_pattern(
+            args.refname,
+            allow_onelevel=args.allow_onelevel,
+            normalize=args.normalize,
+        )
+    else:
+        checked = check_ref_format(
+            args.refname,
+            allow_onelevel=args.allow_onelevel,
+            branch=args.branch,
+            normalize=args.normalize,
+        )
     if args.normalize:
         print(checked)
     return 0
