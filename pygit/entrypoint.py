@@ -244,8 +244,17 @@ def _run_check_ref_format(argv: Sequence[str]) -> int:
     parser.add_argument("refname", metavar="REFNAME")
     args = parser.parse_args(list(argv))
 
-    if args.branch and args.refspec_pattern:
-        parser.error("--branch and --refspec-pattern are mutually exclusive")
+    if args.branch and any(
+        option in argv
+        for option in (
+            "--allow-onelevel",
+            "--no-allow-onelevel",
+            "--refspec-pattern",
+            "--normalize",
+            "--print",
+        )
+    ):
+        parser.error("--branch cannot be combined with other check-ref-format modes")
 
     if args.refspec_pattern:
         checked = check_refspec_pattern(
@@ -260,7 +269,7 @@ def _run_check_ref_format(argv: Sequence[str]) -> int:
             branch=args.branch,
             normalize=args.normalize,
         )
-    if args.normalize:
+    if args.normalize or args.branch:
         print(checked)
     return 0
 
