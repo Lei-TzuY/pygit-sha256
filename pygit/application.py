@@ -73,6 +73,15 @@ def main() -> None:
         _run_safe(run_checkout_previous, argv[1:])
         return
 
+    if (
+        len(argv) == 3
+        and argv[0] == "checkout"
+        and argv[1] == "--detach"
+        and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
+    ):
+        _run_safe(run_checkout_previous, argv[1:])
+        return
+
     if argv and argv[0] == "reflog":
         if len(argv) >= 2 and argv[1] == "expire":
             _run_safe(run_reflog_expire, argv[2:])
