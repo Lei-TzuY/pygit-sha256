@@ -11,12 +11,19 @@ explicit storage-format selection for the formats pygit actually implements.
 Pygit is SHA-256-native with the files ref backend, so ``--object-format=sha256``
 and ``--ref-format=files`` are accepted while unsupported alternatives fail
 before repository creation instead of pretending to select an unusable backend.
+
+Phase385 additionally honors Git's ``GIT_DEFAULT_HASH`` and
+``GIT_DEFAULT_REF_FORMAT`` initialization defaults. An explicit CLI option wins
+over the corresponding environment value, matching native Git's precedence.
+Environment requests for storage modes pygit cannot implement still fail before
+filesystem mutation instead of being silently ignored.
 """
 
 from __future__ import annotations
 
 import argparse
 import io
+import os
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -28,6 +35,8 @@ from .repo import Repository
 
 _OBJECT_FORMAT = "sha256"
 _REF_FORMAT = "files"
+_OBJECT_FORMAT_ENV = "GIT_DEFAULT_HASH"
+_REF_FORMAT_ENV = "GIT_DEFAULT_REF_FORMAT"
 
 
 def _validate_initial_branch(name: str) -> str:
@@ -41,6 +50,19 @@ def _validate_initial_branch(name: str) -> str:
 
     check_ref_format(f"refs/heads/{name}")
     return name
+
+
+def _effective_storage_format(
+    cli_value: Optional[str],
+    env_name: str,
+    default: str,
+) -> str:
+    """Resolve one init storage format with Git-compatible CLI precedence."""
+
+    if cli_value is not None:
+        return cli_value
+    env_value = os.environ.get(env_name)
+    return default if env_value is None else env_value
 
 
 def _validate_storage_formats(
@@ -99,7 +121,17 @@ def run_init(argv: Sequence[str]) -> int:
     parser.add_argument("directory", nargs="?", default=".", metavar="DIR")
     args = parser.parse_args(list(argv))
 
-    _validate_storage_formats(args.object_format, args.ref_format)
+    object_format = _effective_storage_format(
+        args.object_format,
+        _OBJECT_FORMAT_ENV,
+        _OBJECT_FORMAT,
+    )
+    ref_format = _effective_storage_format(
+        args.ref_format,
+        _REF_FORMAT_ENV,
+        _REF_FORMAT,
+    )
+    _validate_storage_formats(object_format, ref_format)
 
     initial_branch = None
     if args.initial_branch is not None:
