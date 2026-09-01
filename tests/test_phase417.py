@@ -76,6 +76,8 @@ def test_branch_copy_force_overwrites_tip_but_preserves_existing_destination_con
 
     reopened = Repository(str(repo.worktree))
     assert reopened.refs.get_branch("dest") == topic
+    # Native Git appends the copied source section before the pre-existing
+    # destination section, so existing duplicate keys remain effective.
     assert reopened.config_get("branch", "dest.remote") == "other"
     assert reopened.config_get("branch", "dest.description") == "destination description"
     assert reopened.config_get("branch", "dest.merge") == "refs/heads/topic"
@@ -140,6 +142,7 @@ def test_branch_copy_onto_itself_appends_copy_event_without_moving_head(tmp_path
     repo, _base, topic = _seed_repo(tmp_path / "repo")
     repo.checkout("topic")
     repo.checkout("main")
+    # Now @{-1} is topic; copy it onto itself while main remains checked out.
     monkeypatch.chdir(repo.worktree)
     assert run_branch_copy_previous(["-c", "@{-1}", "topic"]) == 0
 
