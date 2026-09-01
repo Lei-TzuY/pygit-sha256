@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict
 
 from .git_bundle import GitBundlePayload
+from .ref_query import check_ref_format
 from .remote import NativeImporter, NativeObject
 from .store import ObjectStore
 
@@ -43,6 +44,17 @@ def _validate_native_object(oid: str, obj: NativeObject) -> None:
     canonical = f"{obj.type_name} {len(obj.data)}\0".encode() + obj.data
     if hashlib.sha1(canonical).hexdigest() != oid.lower():
         raise ValueError("Git bundle native object content does not match its SHA-1")
+
+
+def _validate_refname(refname: str) -> None:
+    if not isinstance(refname, str) or not refname:
+        raise ValueError("Git bundle staged import contains an invalid reference name")
+    if refname == "HEAD":
+        return
+    try:
+        check_ref_format(refname)
+    except ValueError as exc:
+        raise ValueError(f"Invalid staged Git bundle reference {refname!r}: {exc}") from exc
 
 
 def stage_git_bundle_import(
@@ -93,8 +105,7 @@ def stage_git_bundle_import(
 
     refs: Dict[str, str] = {}
     for refname, native_oid in bundle.refs.items():
-        if not isinstance(refname, str) or not refname:
-            raise ValueError("Git bundle staged import contains an invalid reference name")
+        _validate_refname(refname)
         if not isinstance(native_oid, str) or len(native_oid) != 40:
             raise ValueError("Git bundle reference target must be a full SHA-1")
         try:
