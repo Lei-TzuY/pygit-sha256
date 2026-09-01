@@ -77,7 +77,10 @@ def main() -> None:
         len(argv) == 3
         and argv[0] == "checkout"
         and argv[1] == "--detach"
-        and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
+        and (
+            argv[2] == "-"
+            or _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
+        )
     ):
         _run_safe(run_checkout_previous, argv[1:])
         return
