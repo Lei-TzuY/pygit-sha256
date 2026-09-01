@@ -45,6 +45,10 @@ def _loose_files(store: ObjectStore):
     return sorted(path for path in store.root.rglob("*") if path.is_file())
 
 
+def _path_snapshot(path: Path):
+    return path.exists(), path.read_bytes() if path.exists() else None
+
+
 def test_stages_simple_native_blob_as_true_local_sha256(tmp_path):
     native = _native("blob", b"hello bundle\n")
     store = ObjectStore(tmp_path / "objects")
@@ -180,13 +184,15 @@ def test_repository_metadata_is_untouched_by_bundle_object_staging(tmp_path):
     native = _native("blob", b"metadata-free")
     bundle = _payload({native.oid: native})
 
-    head_before = (repo.pygit_dir / "HEAD").read_bytes()
-    config_before = (repo.pygit_dir / "config.json").read_bytes()
+    head_path = repo.pygit_dir / "HEAD"
+    config_path = repo.pygit_dir / "config.json"
+    head_before = _path_snapshot(head_path)
+    config_before = _path_snapshot(config_path)
 
     result = stage_git_bundle_import(repo.store, bundle)
 
-    assert (repo.pygit_dir / "HEAD").read_bytes() == head_before
-    assert (repo.pygit_dir / "config.json").read_bytes() == config_before
+    assert _path_snapshot(head_path) == head_before
+    assert _path_snapshot(config_path) == config_before
     assert not any(path.is_file() for path in (repo.pygit_dir / "refs").rglob("*"))
     assert not (repo.pygit_dir / "shallow").exists()
     assert not (repo.pygit_dir / "promisor.json").exists()
