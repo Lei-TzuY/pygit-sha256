@@ -13,6 +13,12 @@ namespace fences. If the pathname changes during certification, normal atomic
 publication is used instead. This lets a later ``write()`` truthfully recover
 from a prior post-replace durability failure instead of silently accepting the
 visible-but-not-yet-certified object.
+
+Phase376 closes the corresponding new-publication race. The temporary file's
+inode is pinned before atomic replacement and its descriptor is retained across
+the namespace fences. ``write()`` reports success only if the live object path
+still names that exact fsynced inode after both fences. If another writer wins a
+replacement race, the visible candidate is certified or publication is retried.
 """
 
 from __future__ import annotations
@@ -127,6 +133,45 @@ def _certify_existing_loose_object(path: Path, sha: str, objects_root: Path) -> 
         os.close(fd)
 
 
+def _publish_new_loose_object(
+    path: Path,
+    sha: str,
+    compressed: bytes,
+    objects_root: Path,
+) -> bool:
+    """Publish one new loose-object inode and durably certify its namespace.
+
+    The temporary descriptor remains open after its contents are flushed and
+    fsynced. Its `(st_dev, st_ino)` identity is captured before `os.replace()`.
+    After the fanout and object-root namespace fences complete, success requires
+    the live object pathname to still name that exact inode. A competing writer
+    that replaced the pathname therefore causes a `False` result rather than a
+    false durability claim.
+    """
+
+    fanout = path.parent
+    fanout.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".tmp-{sha}-", dir=str(fanout))
+    temp_path = Path(temp_name)
+    try:
+        os.set_inheritable(fd, False)
+        with os.fdopen(fd, "wb", closefd=False) as handle:
+            handle.write(compressed)
+            handle.flush()
+            _fsync_retry(fd)
+        pinned = os.fstat(fd)
+        os.replace(temp_path, path)
+        fsync_directory(fanout)
+        fsync_directory(objects_root)
+        return _path_still_names_inode(path, pinned.st_dev, pinned.st_ino)
+    finally:
+        try:
+            os.close(fd)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+
 def install_durable_object_store_support() -> None:
     """Install success-after-durability loose-object publication once."""
 
@@ -144,31 +189,17 @@ def install_durable_object_store_support() -> None:
         if _certify_existing_loose_object(obj_path, sha, self.root):
             return sha
 
-        fanout = obj_path.parent
-        fanout.mkdir(parents=True, exist_ok=True)
         compressed = zlib.compress(store_bytes)
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".tmp-{sha}-",
-            dir=str(fanout),
-        )
-        temp_path = Path(temp_name)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(compressed)
-                handle.flush()
-                _fsync_retry(handle.fileno())
-            os.replace(temp_path, obj_path)
-            fsync_directory(fanout)
-            # Fence the parent namespace on every successful publication. A
-            # visible pre-existing fanout is not proof that a prior attempt's
-            # directory-entry fence completed; always fencing objects/ keeps a
-            # later success truthful after a previous root-fsync failure.
-            fsync_directory(self.root)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
+        while True:
+            if _publish_new_loose_object(obj_path, sha, compressed, self.root):
+                return sha
 
-        return sha
+            # Another writer replaced our fully durable inode before the final
+            # namespace correlation. Accept that winner only after independently
+            # certifying its content, inode, and durability. Otherwise retry our
+            # normal same-directory atomic publication.
+            if _certify_existing_loose_object(obj_path, sha, self.root):
+                return sha
 
     ObjectStore.write = write
     _INSTALLED = True
