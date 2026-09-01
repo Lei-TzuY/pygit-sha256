@@ -63,7 +63,7 @@ def test_checkout_previous_cli_preserves_detached_sha256_destination(
     assert capsys.readouterr().out == f"HEAD is now at {base[:12]}\n"
 
 
-def test_application_intercepts_only_single_previous_checkout_selector(
+def test_application_routes_supported_previous_checkout_forms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, list[str]]] = []
@@ -90,7 +90,7 @@ def test_application_intercepts_only_single_previous_checkout_selector(
     calls.clear()
     monkeypatch.setattr(sys, "argv", ["pygit", "checkout", "--detach", "@{-1}"])
     application.main()
-    assert calls == [("legacy", [])]
+    assert calls == [("previous", ["--detach", "@{-1}"])]
 
 
 def test_application_routes_zero_selector_to_fail_closed_handler(
