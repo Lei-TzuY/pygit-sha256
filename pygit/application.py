@@ -10,6 +10,7 @@ import re
 import sys
 from typing import Sequence
 
+from .branch_previous_cli import run_branch_previous
 from .cat_file_cli import run_cat_file
 from .checkout_create_previous_cli import run_checkout_create_previous
 from .checkout_index_cli import run_checkout_index
@@ -63,6 +64,14 @@ def _run_safe(handler, argv: Sequence[str]) -> None:
 
 def main() -> None:
     argv = sys.argv[1:]
+    if (
+        len(argv) == 3
+        and argv[0] == "branch"
+        and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
+    ):
+        _run_safe(run_branch_previous, argv[1:])
+        return
+
     if (
         len(argv) == 2
         and argv[0] == "checkout"
