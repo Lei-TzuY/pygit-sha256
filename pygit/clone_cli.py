@@ -10,6 +10,7 @@ from typing import Optional, Sequence
 from .clone_partial import clone_partial_repository
 from .clone_remote import clone_default_branch, configure_clone_remote
 from .clone_shallow import clone_shallow_repository
+from .clone_tag import try_clone_explicit_tag_remote
 from .clone_unborn import try_clone_explicit_unborn_remote
 from .fetch_partial import _validate_filter_spec
 from .fetch_protocol_v2 import protocol_v2_transport
@@ -105,7 +106,7 @@ def run_clone(argv: Sequence[str]) -> int:
         "-b",
         "--branch",
         metavar="BRANCH",
-        help="point HEAD to the specified branch after cloning",
+        help="check out the specified branch or tag after cloning",
     )
     parser.add_argument(
         "-n",
@@ -165,12 +166,14 @@ def run_clone(argv: Sequence[str]) -> int:
         else args.depth is not None
     )
 
-    empty_clone = None
-    if _empty_clone_preflight_available(
+    preflight_available = _empty_clone_preflight_available(
         filter_spec=args.filter,
         depth=args.depth,
         server_options=server_options,
-    ):
+    )
+
+    empty_clone = None
+    if preflight_available:
         empty_clone = try_clone_explicit_unborn_remote(
             args.url,
             args.directory,
@@ -181,8 +184,30 @@ def run_clone(argv: Sequence[str]) -> int:
             filter_spec=args.filter,
         )
 
+    # Phase400 deliberately handles only the ordinary full-clone tag case.
+    # Shallow/filtered tag cloning has additional boundary/promisor semantics and
+    # stays on its existing path until a dedicated phase composes those models.
+    tag_clone = None
+    if (
+        empty_clone is None
+        and preflight_available
+        and args.branch is not None
+        and args.depth is None
+        and args.filter is None
+    ):
+        tag_clone = try_clone_explicit_tag_remote(
+            args.url,
+            args.directory,
+            branch_name=args.branch,
+            single_branch=single_branch,
+            server_options=server_options,
+            checkout=not args.no_checkout,
+        )
+
     if empty_clone is not None:
         repo = empty_clone.repo
+    elif tag_clone is not None:
+        repo = tag_clone.repo
     elif args.filter is not None:
         partial_kwargs = {
             "filter_spec": args.filter,
@@ -245,7 +270,7 @@ def run_clone(argv: Sequence[str]) -> int:
                 )
 
     branch = repo.refs.current_branch()
-    if branch and empty_clone is None:
+    if branch and empty_clone is None and tag_clone is None:
         configure_clone_remote(
             repo,
             args.url,
