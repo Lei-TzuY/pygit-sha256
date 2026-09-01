@@ -11,6 +11,7 @@ import sys
 from typing import Sequence
 
 from .cat_file_cli import run_cat_file
+from .checkout_create_previous_cli import run_checkout_create_previous
 from .checkout_index_cli import run_checkout_index
 from .checkout_previous_cli import run_checkout_previous
 from .commit_graph_cli import run_commit_graph
@@ -83,6 +84,18 @@ def main() -> None:
         )
     ):
         _run_safe(run_checkout_previous, argv[1:])
+        return
+
+    if (
+        len(argv) == 4
+        and argv[0] == "checkout"
+        and argv[1] == "-b"
+        and (
+            argv[3] == "-"
+            or _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[3]) is not None
+        )
+    ):
+        _run_safe(run_checkout_create_previous, argv[1:])
         return
 
     if argv and argv[0] == "reflog":
