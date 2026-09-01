@@ -40,7 +40,7 @@ def test_branch_previous_selector_creates_without_checkout(tmp_path: Path, monke
     assert reopened.refs.current_branch() == "main"
     assert reopened.refs.resolve_head() == base
     assert len(topic) == 64
-    assert capsys.readouterr().out == "Created branch 'new'.\n"
+    assert capsys.readouterr().out == ""
 
 
 def test_branch_previous_detached_oid_preserves_sha256(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -55,6 +55,7 @@ def test_branch_previous_detached_oid_preserves_sha256(tmp_path: Path, monkeypat
     assert reopened.refs.get_branch("from-detached") == base
     assert len(base) == 64
     assert reopened.refs.current_branch() == "main"
+    assert capsys.readouterr().out == ""
 
 
 def test_branch_previous_without_history_fails_before_creation(tmp_path: Path, monkeypatch) -> None:
@@ -119,7 +120,9 @@ def test_native_git_and_pygit_branch_previous_match(tmp_path: Path, monkeypatch,
     (native / "f.txt").write_text("topic\n", encoding="utf-8")
     assert _git("commit", "-qam", "topic", cwd=native).returncode == 0
     assert _git("checkout", "-q", "main", cwd=native).returncode == 0
-    assert _git("branch", "new", "@{-1}", cwd=native).returncode == 0
+    native_branch = _git("branch", "new", "@{-1}", cwd=native)
+    assert native_branch.returncode == 0
+    assert native_branch.stdout == ""
     native_new = _git("rev-parse", "new", cwd=native)
     native_topic = _git("rev-parse", "topic", cwd=native)
     native_head = _git("symbolic-ref", "--short", "HEAD", cwd=native)
@@ -134,3 +137,4 @@ def test_native_git_and_pygit_branch_previous_match(tmp_path: Path, monkeypatch,
     assert len(native_new.stdout.strip()) == 64
     assert reopened.refs.get_branch("new") == topic
     assert reopened.refs.current_branch() + "\n" == native_head.stdout
+    assert capsys.readouterr().out == native_branch.stdout
