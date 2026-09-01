@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Dict, Optional
 
+from .hooks import HookRunner
+from .index import IndexEntry, _mode_for
+from .objects import CommitObject
 from .repo import Repository
+from .sparse import SparseCheckout
 
 _PREVIOUS_CHECKOUT_RE = re.compile(r"^@\{-(\d+)\}$")
 _MOVING_FROM_RE = re.compile(r"^checkout: moving from (.+) to (.+)$")
@@ -89,6 +93,60 @@ def expand_previous_checkout(repo: Repository, value: str) -> Optional[str]:
     raise ValueError(f"{value!r} does not name an earlier checkout")
 
 
+def _checkout_detached(repo: Repository, target: str, reflog_target: str) -> None:
+    """Restore *target* while leaving HEAD detached and naming *reflog_target*.
+
+    This mirrors :meth:`Repository.checkout`'s sparse-checkout, index rebuild,
+    and post-checkout-hook behavior, but deliberately writes a detached HEAD.
+    Git keeps the expanded symbolic previous-checkout name in the reflog even
+    when ``--detach`` resolves that name to a commit, so the display target is
+    kept separate from the content-derived SHA-256 object identity.
+    """
+
+    sha = repo.refs.resolve(target)
+    if not sha:
+        raise KeyError(f"Unknown revision: '{target}'")
+
+    obj = repo.store.read(sha)
+    if not isinstance(obj, CommitObject):
+        raise ValueError(f"'{target}' does not point to a commit")
+
+    new_tree: Dict[str, str] = {}
+    repo._flatten_tree(obj.tree, "", new_tree)
+    sparse = SparseCheckout(repo.pygit_dir)
+
+    for path in set(repo.index.paths()):
+        if path not in new_tree or not sparse.matches(path):
+            abs_path = repo.worktree / path
+            if abs_path.exists():
+                abs_path.unlink()
+
+    repo._restore_tree_sparse(obj.tree, repo.worktree, "", sparse)
+
+    repo.index.entries.clear()
+    for path, blob_sha in new_tree.items():
+        if not sparse.matches(path):
+            continue
+        abs_path = repo.worktree / path
+        mode = _mode_for(abs_path) if abs_path.exists() else "100644"
+        stat = abs_path.stat() if abs_path.exists() else None
+        repo.index.entries[path] = IndexEntry(
+            path=path,
+            sha=blob_sha,
+            mode=mode,
+            size=stat.st_size if stat else 0,
+            mtime=stat.st_mtime if stat else 0.0,
+        )
+    repo.index.save()
+
+    old_sha = repo.refs.resolve_head() or _ZERO_OID
+    repo.refs.set_head_detached(
+        sha,
+        message=f"checkout: moving to {reflog_target}",
+    )
+    HookRunner(repo.pygit_dir).run_hook("post-checkout", [old_sha, sha, "0"])
+
+
 def checkout_previous(
     repo: Repository, value: str = "@{-1}", *, detach: bool = False
 ) -> str:
@@ -98,26 +156,19 @@ def checkout_previous(
     Only ``@{-N}`` input is accepted; ordinary revision selection remains the
     responsibility of :meth:`Repository.checkout`.
 
-    The selector is expanded *before* invoking ``Repository.checkout``.  That
-    means the resulting HEAD reflog records the concrete branch name or detached
-    SHA-256 object ID, matching native Git's observable behavior instead of
-    persisting the literal ``@{-N}`` token.
-
-    When ``detach`` is true and the expansion names a local branch, checkout is
-    performed at that branch's genuine local SHA-256 tip rather than attaching
-    HEAD to the branch.  An expansion that is already a detached object ID is
-    used directly.
+    The selector is expanded *before* checkout.  Normal checkout therefore
+    records the concrete previous branch/commit rather than the literal
+    ``@{-N}`` token.  Detached checkout keeps the expanded symbolic destination
+    in the reflog while HEAD itself points directly at that destination's real
+    content-derived SHA-256 commit, matching native Git's observable behavior.
     """
 
     expanded = expand_previous_checkout(repo, value)
     if expanded is None:
         raise ValueError(f"{value!r} is not a previous checkout selector")
 
-    target = expanded
     if detach:
-        branch_oid = repo.refs.get_branch(expanded)
-        if branch_oid is not None:
-            target = branch_oid
-
-    repo.checkout(target)
+        _checkout_detached(repo, expanded, expanded)
+    else:
+        repo.checkout(expanded)
     return expanded
