@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
+from .branch_checkout import expand_previous_checkout
 from .cli import main as legacy_main
 from .index_plumbing import refresh_index, update_index
 from .ls_files_cli import run_ls_files
@@ -256,15 +257,21 @@ def _run_check_ref_format(argv: Sequence[str]) -> int:
     ):
         parser.error("--branch cannot be combined with other check-ref-format modes")
 
+    refname = args.refname
+    if args.branch and refname.startswith("@{-"):
+        expanded = expand_previous_checkout(_find_repo(), refname)
+        if expanded is not None:
+            refname = expanded
+
     if args.refspec_pattern:
         checked = check_refspec_pattern(
-            args.refname,
+            refname,
             allow_onelevel=args.allow_onelevel,
             normalize=args.normalize,
         )
     else:
         checked = check_ref_format(
-            args.refname,
+            refname,
             allow_onelevel=args.allow_onelevel,
             branch=args.branch,
             normalize=args.normalize,
