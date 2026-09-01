@@ -179,8 +179,6 @@ def query_refs(
             continue
         filtered.append(record)
 
-    # Python's sort is stable. Applying keys in command-line order makes the
-    # last --sort key the primary key, matching git for-each-ref.
     for key_spec in sort_keys:
         descending = key_spec.startswith("-")
         key_name = key_spec[1:] if descending else key_spec
@@ -326,6 +324,9 @@ def check_ref_format(
     The rules reject traversal-like/delimiter syntax, control characters,
     reserved ``@{`` syntax, dot components, and ``.lock`` suffixes.
     """
+    if normalize and refname.endswith("/"):
+        raise ValueError("reference name cannot end with '/'")
+
     candidate = normalize_refname(refname) if normalize else refname
 
     if branch:
