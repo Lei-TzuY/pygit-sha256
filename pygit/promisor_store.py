@@ -1,12 +1,18 @@
-"""ObjectStore extension for native-reference promisor trees.
+"""ObjectStore extensions for durable writes and native-reference promisor trees.
 
-Resolved entries are filled from persistent metadata immediately.  Unresolved
-entries receive an ephemeral resolver which materializes the promised object
-only if a consumer later accesses ``TreeEntry.sha``.
+Resolved promisor entries are filled from persistent metadata immediately.
+Unresolved entries receive an ephemeral resolver which materializes the promised
+object only if a consumer later accesses ``TreeEntry.sha``.
+
+The package-level ObjectStore extension hook also installs Phase370's durable
+loose-object writer before layering the promisor-aware reader. Keeping both
+ObjectStore extensions behind the existing installer preserves the public class
+API while making the write durability boundary active for normal imports.
 """
 
 from __future__ import annotations
 
+from .durable_object_store import install_durable_object_store_support
 from .objects import TreeObject
 from .promisor import promised_kind, resolved_native_objects
 from .store import ObjectStore
@@ -20,6 +26,7 @@ def install_promisor_store_support() -> None:
     if _INSTALLED:
         return
 
+    install_durable_object_store_support()
     original_read = ObjectStore.read
 
     def read(self: ObjectStore, sha: str):
