@@ -36,11 +36,13 @@ class BundlePrerequisite:
 class GitBundlePayload:
     """One verified Git bundle payload without repository mutation.
 
-    ``objects`` is populated only for a self-contained bundle.  Bundles with
-    prerequisites are commonly thin packs whose REF_DELTA bases live in the
-    receiver; their pack bytes are fully envelope/entry/checksum verified here,
-    but graph expansion deliberately waits for a later prerequisite-aware import
-    boundary.
+    ``objects`` is populated whenever the pack can be expanded without external
+    prerequisite bases.  A v3 ``filter`` capability is preserved separately:
+    those contained objects may parse successfully while the reachable graph is
+    deliberately incomplete.  Bundles with prerequisites are commonly thin
+    packs whose REF_DELTA bases live in the receiver; their pack bytes are fully
+    envelope/entry/checksum verified here, but graph expansion deliberately
+    waits for a later prerequisite-aware import boundary.
     """
 
     version: int
@@ -56,7 +58,7 @@ class GitBundlePayload:
 
     @property
     def is_self_contained(self) -> bool:
-        return not self.prerequisites
+        return not self.prerequisites and self.filter_spec is None
 
     @property
     def requires_prerequisites(self) -> bool:
