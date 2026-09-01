@@ -89,7 +89,9 @@ def expand_previous_checkout(repo: Repository, value: str) -> Optional[str]:
     raise ValueError(f"{value!r} does not name an earlier checkout")
 
 
-def checkout_previous(repo: Repository, value: str = "@{-1}") -> str:
+def checkout_previous(
+    repo: Repository, value: str = "@{-1}", *, detach: bool = False
+) -> str:
     """Checkout a Git-style previous-checkout selector and return its expansion.
 
     This is the operation-level counterpart to :func:`expand_previous_checkout`.
@@ -100,10 +102,22 @@ def checkout_previous(repo: Repository, value: str = "@{-1}") -> str:
     means the resulting HEAD reflog records the concrete branch name or detached
     SHA-256 object ID, matching native Git's observable behavior instead of
     persisting the literal ``@{-N}`` token.
+
+    When ``detach`` is true and the expansion names a local branch, checkout is
+    performed at that branch's genuine local SHA-256 tip rather than attaching
+    HEAD to the branch.  An expansion that is already a detached object ID is
+    used directly.
     """
 
     expanded = expand_previous_checkout(repo, value)
     if expanded is None:
         raise ValueError(f"{value!r} is not a previous checkout selector")
-    repo.checkout(expanded)
+
+    target = expanded
+    if detach:
+        branch_oid = repo.refs.get_branch(expanded)
+        if branch_oid is not None:
+            target = branch_oid
+
+    repo.checkout(target)
     return expanded
