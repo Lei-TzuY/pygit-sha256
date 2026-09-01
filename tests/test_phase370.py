@@ -69,7 +69,7 @@ def test_new_fanout_publication_fsyncs_file_fanout_and_objects_root(
     assert repo.store.read(oid).data == b"phase370-directory-fence"
 
 
-def test_preexisting_fanout_does_not_need_objects_root_fence(
+def test_preexisting_fanout_still_fences_objects_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -86,7 +86,7 @@ def test_preexisting_fanout_does_not_need_objects_root_fence(
     monkeypatch.setattr(durable_store, "fsync_directory", record)
 
     assert repo.store.write(blob) == oid
-    assert fenced == [fanout]
+    assert fenced == [fanout, repo.store.root]
 
 
 def test_loose_object_file_fsync_failure_does_not_publish_object(
@@ -139,7 +139,7 @@ def test_loose_object_fanout_fsync_failure_propagates_after_complete_replace(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory-fsync contract")
-def test_new_fanout_objects_root_fsync_failure_does_not_report_success(
+def test_objects_root_fsync_failure_does_not_report_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
