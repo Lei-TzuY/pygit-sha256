@@ -10,6 +10,7 @@ import re
 import sys
 from typing import Sequence
 
+from .branch_copy_previous_cli import run_branch_copy_previous
 from .branch_move_previous_cli import run_branch_move_previous
 from .branch_previous_cli import run_branch_previous
 from .cat_file_cli import run_cat_file
@@ -30,6 +31,7 @@ from .read_tree_cli import run_read_tree
 from .reflog_expire_cli import run_reflog_expire
 from .reflog_show_cli import run_reflog_show
 from .rev_list_disk_usage_cli import run_rev_list_disk_usage
+from .rev_parse_previous_cli import run_rev_parse_previous
 from .show_ref_cli import run_show_ref
 from .status_cli import run_status
 from .update_ref_cli import run_update_ref
@@ -47,6 +49,13 @@ _ERRORS = (
 )
 
 _PREVIOUS_CHECKOUT_SELECTOR = re.compile(r"^@\{-\d+\}$")
+_REV_PARSE_PREVIOUS_OPTIONS = {
+    "--verify",
+    "-q",
+    "--quiet",
+    "--abbrev-ref",
+    "--symbolic-full-name",
+}
 
 
 def _finish(code: int) -> None:
@@ -63,8 +72,42 @@ def _run_safe(handler, argv: Sequence[str]) -> None:
     _finish(code)
 
 
+def _is_previous_branch_copy(argv: Sequence[str]) -> bool:
+    if len(argv) == 4 and argv[0] == "branch":
+        return (
+            argv[1] in {"-c", "--copy", "-C"}
+            and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
+        )
+    if len(argv) == 5 and argv[0] == "branch":
+        options = argv[1:3]
+        return (
+            sum(item in {"-c", "--copy"} for item in options) == 1
+            and sum(item in {"-f", "--force"} for item in options) == 1
+            and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[3]) is not None
+        )
+    return False
+
+
+def _is_rev_parse_previous(argv: Sequence[str]) -> bool:
+    if len(argv) < 2 or argv[0] != "rev-parse":
+        return False
+    if _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[-1]) is None:
+        return False
+    options = argv[1:-1]
+    if any(option not in _REV_PARSE_PREVIOUS_OPTIONS for option in options):
+        return False
+    if options.count("--abbrev-ref") + options.count("--symbolic-full-name") > 1:
+        return False
+    return True
+
+
 def main() -> None:
     argv = sys.argv[1:]
+
+    if _is_previous_branch_copy(argv):
+        _run_safe(run_branch_copy_previous, argv[1:])
+        return
+
     if (
         len(argv) == 3
         and argv[0] == "branch"
@@ -137,6 +180,10 @@ def main() -> None:
         )
     ):
         _run_safe(run_checkout_create_previous, argv[1:])
+        return
+
+    if _is_rev_parse_previous(argv):
+        _run_safe(run_rev_parse_previous, argv[1:])
         return
 
     if argv and argv[0] == "reflog":
