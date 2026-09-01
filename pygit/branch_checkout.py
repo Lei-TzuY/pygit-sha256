@@ -1,4 +1,4 @@
-"""Resolve Git-style previous-checkout shorthands for branch validation."""
+"""Resolve Git-style previous-checkout shorthands and perform checkout navigation."""
 
 from __future__ import annotations
 
@@ -87,3 +87,23 @@ def expand_previous_checkout(repo: Repository, value: str) -> Optional[str]:
         return entry.old_sha
 
     raise ValueError(f"{value!r} does not name an earlier checkout")
+
+
+def checkout_previous(repo: Repository, value: str = "@{-1}") -> str:
+    """Checkout a Git-style previous-checkout selector and return its expansion.
+
+    This is the operation-level counterpart to :func:`expand_previous_checkout`.
+    Only ``@{-N}`` input is accepted; ordinary revision selection remains the
+    responsibility of :meth:`Repository.checkout`.
+
+    The selector is expanded *before* invoking ``Repository.checkout``.  That
+    means the resulting HEAD reflog records the concrete branch name or detached
+    SHA-256 object ID, matching native Git's observable behavior instead of
+    persisting the literal ``@{-N}`` token.
+    """
+
+    expanded = expand_previous_checkout(repo, value)
+    if expanded is None:
+        raise ValueError(f"{value!r} is not a previous checkout selector")
+    repo.checkout(expanded)
+    return expanded
