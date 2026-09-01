@@ -167,12 +167,12 @@ class TestReflog:
         entries = repo.reflog()
 
         assert entries[0].new_sha == first
-        assert entries[0].message == "checkout: moving to main"
+        assert entries[0].message == "checkout: moving from feature to main"
         assert any(entry.new_sha == second and entry.message == "commit: feature" for entry in entries)
         assert any(
             entry.old_sha == first
             and entry.new_sha == first
-            and entry.message == "checkout: moving to feature"
+            and entry.message == "checkout: moving from main to feature"
             for entry in entries
         )
         assert (tmp_path / ".pygit" / "logs" / "refs" / "heads" / "feature").exists()
