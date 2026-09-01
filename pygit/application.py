@@ -73,6 +73,15 @@ def main() -> None:
         return
 
     if (
+        len(argv) == 4
+        and argv[0] == "branch"
+        and argv[1] in {"-f", "--force"}
+        and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[3]) is not None
+    ):
+        _run_safe(run_branch_previous, argv[1:])
+        return
+
+    if (
         len(argv) == 2
         and argv[0] == "checkout"
         and (
