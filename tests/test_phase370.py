@@ -65,7 +65,11 @@ def test_new_fanout_publication_fsyncs_file_fanout_and_objects_root(
 
     oid = repo.store.write(BlobObject(b"phase370-directory-fence"))
 
-    assert kinds == ["file", "dir", "dir"]
+    # Phase370 supplied one object-file fsync plus pathname-opened fanout/root
+    # fences. Phase380 retains those two compatibility fences and adds one fsync
+    # on each pinned directory descriptor, so all five durability operations are
+    # intentional and ordered after the object contents become durable.
+    assert kinds == ["file", "dir", "dir", "dir", "dir"]
     assert repo.store.read(oid).data == b"phase370-directory-fence"
 
 
@@ -151,7 +155,9 @@ def test_objects_root_fsync_failure_does_not_report_success(
     def fail_root(fd: int) -> None:
         nonlocal calls
         calls += 1
-        if calls == 3:
+        # Phase380 inserts the retained-fanout descriptor fence as call 3. The
+        # mature pathname-opened objects-root fence is therefore call 4.
+        if calls == 4:
             raise error
         real_fsync(fd)
 
@@ -175,11 +181,16 @@ def test_existing_valid_loose_object_is_recertified_without_republication(
     oid = repo.store.write(blob)
     obj_path = repo.store._path_for(oid)
     file_fsyncs = 0
+    pinned_directory_fsyncs = 0
     fenced: list[Path] = []
 
-    def record_file_fsync(fd: int) -> None:
-        nonlocal file_fsyncs
-        file_fsyncs += 1
+    def record_inode_fsync(fd: int) -> None:
+        nonlocal file_fsyncs, pinned_directory_fsyncs
+        mode = os.fstat(fd).st_mode
+        if stat.S_ISDIR(mode):
+            pinned_directory_fsyncs += 1
+        else:
+            file_fsyncs += 1
 
     def record_directory(path: Path) -> None:
         fenced.append(Path(path))
@@ -187,13 +198,14 @@ def test_existing_valid_loose_object_is_recertified_without_republication(
     def unexpected_replace(src, dst) -> None:
         raise AssertionError("existing valid loose object should not be republished")
 
-    monkeypatch.setattr(durable_store, "_fsync_retry", record_file_fsync)
+    monkeypatch.setattr(durable_store, "_fsync_retry", record_inode_fsync)
     monkeypatch.setattr(durable_store, "fsync_directory", record_directory)
     monkeypatch.setattr(durable_store.os, "replace", unexpected_replace)
 
     assert repo.store.write(blob) == oid
     assert repo.store.read(oid).data == b"phase370-existing"
     assert file_fsyncs == 1
+    assert pinned_directory_fsyncs == 2
     assert fenced == [obj_path.parent, repo.store.root]
 
 
