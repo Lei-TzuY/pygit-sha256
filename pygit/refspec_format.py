@@ -24,7 +24,15 @@ def check_refspec_pattern(
     every other Git refname rule. The already-normalized original candidate is
     returned after successful validation, avoiding any sentinel-collision edge
     case in user-controlled ref text.
+
+    Git's normalization removes leading slashes and collapses repeated slashes,
+    but it does not make a trailing slash valid. Preserve that boundary before
+    calling ``normalize_refname()``, whose generic empty-component collapse is
+    intentionally broader for other internal callers.
     """
+
+    if normalize and refname.endswith("/"):
+        raise ValueError("reference name cannot end with '/'")
 
     candidate = normalize_refname(refname) if normalize else refname
     wildcard_count = candidate.count("*")
