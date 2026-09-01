@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import pygit.durable_object_store as durable_store
 import pygit.durable_owned_lock as durable
 from pygit.objects import BlobObject
 from pygit.objects.base import HASH_ALGO
@@ -16,6 +17,10 @@ from pygit.repo import Repository
 
 def _repo(tmp_path: Path) -> Repository:
     return Repository.init(str(tmp_path / "repo"))
+
+
+def _oid(blob: BlobObject) -> str:
+    return hashlib.new(HASH_ALGO, blob._build_store_bytes()).hexdigest()
 
 
 def test_loose_object_file_fsync_retries_eintr_before_success(
@@ -43,7 +48,7 @@ def test_loose_object_file_fsync_retries_eintr_before_success(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory-fsync contract")
-def test_loose_object_replace_is_followed_by_parent_directory_fsync(
+def test_new_fanout_publication_fsyncs_file_fanout_and_objects_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -60,8 +65,28 @@ def test_loose_object_replace_is_followed_by_parent_directory_fsync(
 
     oid = repo.store.write(BlobObject(b"phase370-directory-fence"))
 
-    assert kinds == ["file", "dir"]
+    assert kinds == ["file", "dir", "dir"]
     assert repo.store.read(oid).data == b"phase370-directory-fence"
+
+
+def test_preexisting_fanout_does_not_need_objects_root_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _repo(tmp_path)
+    blob = BlobObject(b"phase370-existing-fanout")
+    oid = _oid(blob)
+    fanout = repo.store.root / oid[:2]
+    fanout.mkdir(parents=True, exist_ok=True)
+    fenced: list[Path] = []
+
+    def record(path: Path) -> None:
+        fenced.append(Path(path))
+
+    monkeypatch.setattr(durable_store, "fsync_directory", record)
+
+    assert repo.store.write(blob) == oid
+    assert fenced == [fanout]
 
 
 def test_loose_object_file_fsync_failure_does_not_publish_object(
@@ -85,35 +110,60 @@ def test_loose_object_file_fsync_failure_does_not_publish_object(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory-fsync contract")
-def test_loose_object_directory_fsync_failure_propagates_after_complete_replace(
+def test_loose_object_fanout_fsync_failure_propagates_after_complete_replace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = _repo(tmp_path)
     real_fsync = durable.os.fsync
-    error = OSError("injected loose-object directory durability failure")
+    error = OSError("injected loose-object fanout durability failure")
     calls = 0
 
-    def fail_directory(fd: int) -> None:
+    def fail_fanout(fd: int) -> None:
         nonlocal calls
         calls += 1
         if calls == 2:
             raise error
         real_fsync(fd)
 
-    monkeypatch.setattr(durable.os, "fsync", fail_directory)
+    monkeypatch.setattr(durable.os, "fsync", fail_fanout)
     blob = BlobObject(b"phase370-post-replace-failure")
 
     with pytest.raises(OSError) as excinfo:
         repo.store.write(blob)
 
     assert excinfo.value is error
-    # The atomic replace already happened. The complete object may be visible,
-    # but the caller did not receive success because the namespace fence failed.
-    envelope = blob._build_store_bytes()
-    oid = hashlib.new(HASH_ALGO, envelope).hexdigest()
+    oid = _oid(blob)
     assert repo.store.read(oid).data == b"phase370-post-replace-failure"
     assert not list((repo.store.root / oid[:2]).glob(f".tmp-{oid}-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory-fsync contract")
+def test_new_fanout_objects_root_fsync_failure_does_not_report_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _repo(tmp_path)
+    real_fsync = durable.os.fsync
+    error = OSError("injected objects-root durability failure")
+    calls = 0
+
+    def fail_root(fd: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise error
+        real_fsync(fd)
+
+    monkeypatch.setattr(durable.os, "fsync", fail_root)
+    blob = BlobObject(b"phase370-root-fence-failure")
+
+    with pytest.raises(OSError) as excinfo:
+        repo.store.write(blob)
+
+    assert excinfo.value is error
+    oid = _oid(blob)
+    assert repo.store.read(oid).data == b"phase370-root-fence-failure"
 
 
 def test_existing_valid_loose_object_fast_path_needs_no_new_fsync(
