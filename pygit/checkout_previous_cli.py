@@ -13,21 +13,23 @@ def run_checkout_previous(argv: Sequence[str]) -> int:
     """Handle focused previous-checkout compatibility forms.
 
     ``pygit checkout -`` is Git's shorthand for ``pygit checkout @{-1}``.
+    ``pygit checkout --detach @{-N}`` detaches at the selected branch/commit.
     The legacy checkout parser remains authoritative for every other checkout
-    form. The top-level application router calls this adapter only for an exact
-    single previous-checkout target.
+    form. The top-level application router calls this adapter only for the
+    focused previous-checkout forms it owns.
     """
 
     parser = argparse.ArgumentParser(
         prog="pygit checkout",
         description="Switch to a previous checkout selected by HEAD reflog history.",
     )
+    parser.add_argument("--detach", action="store_true")
     parser.add_argument("selector", metavar="@{-N}|-")
     args = parser.parse_args(list(argv))
 
     selector = "@{-1}" if args.selector == "-" else args.selector
     repo = _find_repo()
-    destination = checkout_previous(repo, selector)
+    destination = checkout_previous(repo, selector, detach=args.detach)
     branch = repo.refs.current_branch()
     if branch is not None:
         print(f"Switched to branch '{branch}'")
