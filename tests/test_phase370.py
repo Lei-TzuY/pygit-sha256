@@ -166,21 +166,35 @@ def test_objects_root_fsync_failure_does_not_report_success(
     assert repo.store.read(oid).data == b"phase370-root-fence-failure"
 
 
-def test_existing_valid_loose_object_fast_path_needs_no_new_fsync(
+def test_existing_valid_loose_object_is_recertified_without_republication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = _repo(tmp_path)
     blob = BlobObject(b"phase370-existing")
     oid = repo.store.write(blob)
+    obj_path = repo.store._path_for(oid)
+    file_fsyncs = 0
+    fenced: list[Path] = []
 
-    def unexpected(fd: int) -> None:
+    def record_file_fsync(fd: int) -> None:
+        nonlocal file_fsyncs
+        file_fsyncs += 1
+
+    def record_directory(path: Path) -> None:
+        fenced.append(Path(path))
+
+    def unexpected_replace(src, dst) -> None:
         raise AssertionError("existing valid loose object should not be republished")
 
-    monkeypatch.setattr(durable.os, "fsync", unexpected)
+    monkeypatch.setattr(durable_store, "_fsync_retry", record_file_fsync)
+    monkeypatch.setattr(durable_store, "fsync_directory", record_directory)
+    monkeypatch.setattr(durable_store.os, "replace", unexpected_replace)
 
     assert repo.store.write(blob) == oid
     assert repo.store.read(oid).data == b"phase370-existing"
+    assert file_fsyncs == 1
+    assert fenced == [obj_path.parent, repo.store.root]
 
 
 def test_durable_writer_preserves_native_git_sha256_blob_identity(tmp_path: Path) -> None:
