@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 import subprocess
 import zlib
 from pathlib import Path
@@ -165,6 +166,9 @@ def test_native_git_strict_fsck_rejects_loose_object_trailing_garbage(
         stderr=subprocess.PIPE,
     ).stdout.decode("ascii").strip()
     path = native / ".git" / "objects" / oid[:2] / oid[2:]
+    # Git 2.55 writes loose objects read-only. The fixture must deliberately
+    # corrupt it, so add owner-write permission before appending test garbage.
+    path.chmod(path.stat().st_mode | stat.S_IWUSR)
     path.write_bytes(path.read_bytes() + b"junk-after-zlib-stream")
 
     result = subprocess.run(
