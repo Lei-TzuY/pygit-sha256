@@ -1,0 +1,64 @@
+# Phase370 — Durable SHA-256 loose-object publication
+
+Phase370 moves the shared success-after-durability discipline from packfile-URI metadata into the repository's primary SHA-256 content-addressed object store.
+
+## Problem
+
+`ObjectStore.write()` already used a strong basic publication shape:
+
+`same-directory temp -> write compressed object -> flush -> fsync -> atomic replace`
+
+Two durability gaps remained:
+
+1. the file fence used one direct `os.fsync()` call, so a transient POSIX `InterruptedError` could abort an otherwise complete object write;
+2. after `os.replace()` made the new loose-object pathname visible, the containing two-hex fanout directory was not fsynced before `write()` reported success.
+
+The second distinction matters for crash semantics: a complete file can be visible in the current process while the namespace replacement is not yet guaranteed durable across an unclean shutdown.
+
+## Implementation
+
+A dedicated `pygit.durable_object_store` installer replaces `ObjectStore.write()` without changing its public signature, hash computation, compression format, alternate-store rules, or existing-object fast path.
+
+The durable write order is:
+
+1. build the canonical Git object envelope;
+2. compute the existing local `HASH_ALGO` content identity;
+3. return immediately if a valid object already occupies the content-addressed path;
+4. create a same-directory temporary in the object fanout directory;
+5. write and flush the zlib-compressed object;
+6. durability-fence the file through shared `_fsync_retry(fd)`;
+7. atomically replace the final content-addressed pathname;
+8. on POSIX, fsync the containing fanout directory through shared `fsync_directory()`;
+9. return the SHA-256 object id only after all applicable durability fences succeed.
+
+Windows preserves the project's existing boundary: the object file is fsynced, while no POSIX directory-fd durability claim is made.
+
+A pre-replace durability failure removes the temporary and exposes no new object. A post-replace directory-fsync failure propagates even though the complete object may already be visible; the caller is not told that publication durably succeeded.
+
+The installer is activated through the package's existing ObjectStore extension hook before the promisor-aware read wrapper is layered. This follows the project's established `install_*_support()` pattern while avoiding a rewrite of the mature store reader/pack/alternate code.
+
+## Regression coverage
+
+`tests/test_phase370.py` verifies:
+
+- loose-object file fsync retries EINTR before success;
+- POSIX atomic replacement is followed by a fanout-directory fsync;
+- a non-EINTR file-fsync failure leaves no published loose object;
+- a post-replace directory-fsync failure propagates while leaving only the complete content-addressed object visible;
+- writing an already-valid object takes the existing zero-publication fast path and performs no new fsync;
+- a native SHA-256 Git `hash-object` differential produces exactly the same 64-hex blob identity as the durable pygit writer.
+
+## Git compatibility and identity invariants
+
+The durable writer does not alter object bytes. Local loose objects remain standard Git-style `<type> <size>\0<payload>` envelopes compressed with zlib and addressed by the repository's SHA-256 hash algorithm. The native differential guards that identity boundary directly.
+
+Remote/native compatibility identities elsewhere remain genuine full 40-hex SHA-1 values where protocol interoperability requires them. No padding, truncation, object-id text rehashing, surrogate SHA-256, or metadata-derived identity is introduced.
+
+## Coordination
+
+- exact base: Phase369 / PR #346 head `e800ef9364019c1cb2d013f4fc94f600dcb4b771`;
+- Phase369 Tests #3104 / run `33456806013`: success;
+- Python 3.9 / 3.13 on the base: 2683 passed each;
+- CI Git on the base: 2.55.0;
+- Phase370 and Phase371 namespaces were collision-checked immediately before branch creation;
+- this phase intentionally remains stacked, open, and unmerged.
