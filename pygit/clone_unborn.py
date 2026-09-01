@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
+from .clone_origin import DEFAULT_CLONE_REMOTE, validate_clone_remote_name
 from .protocol_v2_unborn import (
     ProtocolV2LsRefsResult,
     SmartHttpV2UnbornQueryClient,
@@ -86,11 +87,12 @@ def _record_historical_remote_default(
     *,
     url: str,
     branch: str,
+    remote: str,
 ) -> None:
     """Keep the pre-Git-config remote metadata used by ``Repository.fetch``."""
 
     config = repo._read_config()
-    settings = config.setdefault("remotes", {}).setdefault("origin", {})
+    settings = config.setdefault("remotes", {}).setdefault(remote, {})
     settings["url"] = url
     settings["default_branch"] = branch
     repo._write_config(config)
@@ -101,6 +103,7 @@ def _configure_empty_clone_metadata(
     *,
     url: str,
     branch: str,
+    remote: str,
     single_branch: bool,
     depth: Optional[int],
     filter_spec: Optional[str],
@@ -112,16 +115,16 @@ def _configure_empty_clone_metadata(
     fetch refspec entirely because there is no concrete selected branch ref.
     """
 
-    repo.config_set("remote", "origin.url", url)
+    repo.config_set("remote", f"{remote}.url", url)
     if not single_branch:
         repo.config_set(
             "remote",
-            "origin.fetch",
-            "+refs/heads/*:refs/remotes/origin/*",
+            f"{remote}.fetch",
+            f"+refs/heads/*:refs/remotes/{remote}/*",
         )
-    repo.refs.delete_remote_head("origin")
+    repo.refs.delete_remote_head(remote)
 
-    repo.config_set("branch", f"{branch}.remote", "origin")
+    repo.config_set("branch", f"{branch}.remote", remote)
     repo.config_set("branch", f"{branch}.merge", f"refs/heads/{branch}")
 
     # The mature pygit shallow/partial clone paths persist protocol v2 because
@@ -131,9 +134,9 @@ def _configure_empty_clone_metadata(
     if depth is not None or filter_spec is not None:
         repo.config_set("protocol", "version", "2")
     if filter_spec is not None:
-        repo.config_set("extensions", "partialClone", "origin")
-        repo.config_set("remote", "origin.promisor", "true")
-        repo.config_set("remote", "origin.partialCloneFilter", filter_spec)
+        repo.config_set("extensions", "partialClone", remote)
+        repo.config_set("remote", f"{remote}.promisor", "true")
+        repo.config_set("remote", f"{remote}.partialCloneFilter", filter_spec)
 
 
 def _rollback_empty_clone_destination(destination: Path, *, existed: bool) -> None:
@@ -156,6 +159,7 @@ def try_clone_explicit_unborn_remote(
     server_options: Sequence[str] = (),
     depth: Optional[int] = None,
     filter_spec: Optional[str] = None,
+    remote_name: str = DEFAULT_CLONE_REMOTE,
 ) -> Optional[EmptyRemoteCloneResult]:
     """Clone an explicitly unborn protocol-v2 remote, or return ``None``.
 
@@ -165,6 +169,7 @@ def try_clone_explicit_unborn_remote(
     ``unborn HEAD`` record can enter the metadata-only empty-clone path.
     """
 
+    remote_name = validate_clone_remote_name(remote_name)
     destination = _clone_destination(url, path)
     destination_existed = destination.exists()
 
@@ -184,23 +189,25 @@ def try_clone_explicit_unborn_remote(
     # unborn symref target is not such a ref, even when the spelling matches.
     if branch_name is not None:
         raise RuntimeError(
-            f"Remote branch {branch_name} not found in upstream origin"
+            f"Remote branch {branch_name} not found in upstream {remote_name}"
         )
 
     repo: Optional[Repository] = None
     try:
         repo = Repository.init(str(destination))
-        repo.add_remote("origin", url)
+        repo.add_remote(remote_name, url)
         _record_historical_remote_default(
             repo,
             url=url,
             branch=unborn_branch,
+            remote=remote_name,
         )
         branch = initialize_empty_remote_head(repo, result)
         _configure_empty_clone_metadata(
             repo,
             url=url,
             branch=branch,
+            remote=remote_name,
             single_branch=single_branch,
             depth=depth,
             filter_spec=filter_spec,
