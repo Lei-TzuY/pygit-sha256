@@ -30,9 +30,9 @@ def _copy_branch_config(repo, source: str, destination: str) -> None:
     """Copy source branch config while preserving existing destination overrides.
 
     Native ``git branch -C`` copies the source branch section in front of an
-    already-existing destination section.  Consequently destination keys that
+    already-existing destination section. Consequently destination keys that
     already existed remain the effective values, while source-only keys become
-    available on the copied branch.  Pygit's config backend stores one value per
+    available on the copied branch. Pygit's config backend stores one value per
     key, so retaining an existing destination value reproduces that observable
     precedence without inventing a multi-valued representation.
     """
@@ -56,32 +56,10 @@ def _copy_branch_config(repo, source: str, destination: str) -> None:
             repo.config_set("branch", target_key, value)
 
 
-def _replace_branch_reflog(repo, source: str, destination: str, oid: str) -> None:
-    """Clone the source reflog and append Git's branch-copy event."""
-
-    source_log = repo.refs._log_path(f"refs/heads/{source}")
-    destination_log = repo.refs._log_path(f"refs/heads/{destination}")
-    history = source_log.read_bytes() if source_log.exists() else b""
-
-    destination_log.parent.mkdir(parents=True, exist_ok=True)
-    if history:
-        destination_log.write_bytes(history)
-    elif destination_log.exists():
-        destination_log.unlink()
-
-    repo.refs._append_reflog(
-        f"refs/heads/{destination}",
-        oid,
-        oid,
-        f"Branch: copied refs/heads/{source} to refs/heads/{destination}",
-        force=True,
-    )
-
-
 def run_branch_copy_previous(argv: Sequence[str]) -> int:
     """Handle exact ``branch -c/-C @{-N} <new>`` forms.
 
-    ``branch -c``/``--copy`` copies a *branch*, not an arbitrary revision.  A
+    ``branch -c``/``--copy`` copies a *branch*, not an arbitrary revision. A
     previous-checkout selector that resolves to a detached commit therefore
     fails even though that commit is otherwise a valid branch start point.
     """
@@ -121,8 +99,9 @@ def run_branch_copy_previous(argv: Sequence[str]) -> int:
         message=f"Branch: copied refs/heads/{expanded} to refs/heads/{destination}",
     )
 
-    # Restore the exact source history (set_branch may have appended a normal
-    # movement entry) and then append the forced same-OID branch-copy event.
+    # set_branch() updates the ref correctly but its normal movement event is not
+    # Git branch-copy history. Replace the destination log with the source log,
+    # then append Git's forced same-OID copy event.
     destination_log = repo.refs._log_path(f"refs/heads/{destination}")
     destination_log.parent.mkdir(parents=True, exist_ok=True)
     if source_history:
