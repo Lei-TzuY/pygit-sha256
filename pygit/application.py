@@ -85,11 +85,24 @@ def main() -> None:
     if (
         len(argv) == 4
         and argv[0] == "branch"
-        and argv[1] in {"-m", "--move"}
+        and argv[1] in {"-m", "--move", "-M"}
         and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
     ):
         _run_safe(run_branch_move_previous, argv[1:])
         return
+
+    if len(argv) == 5 and argv[0] == "branch":
+        move_flags = set(argv[1:3])
+        has_move = bool(move_flags & {"-m", "--move"})
+        has_force = bool(move_flags & {"-f", "--force"})
+        if (
+            has_move
+            and has_force
+            and len(move_flags) == 2
+            and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[3]) is not None
+        ):
+            _run_safe(run_branch_move_previous, argv[1:])
+            return
 
     if (
         len(argv) == 2
