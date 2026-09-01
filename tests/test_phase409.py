@@ -97,12 +97,12 @@ def test_checkout_dash_without_history_fails_before_head_mutation(
 ) -> None:
     repo, _ = _seed_repo(tmp_path / "repo")
     monkeypatch.chdir(repo.worktree)
-    before = (repo.gitdir / "HEAD").read_bytes()
+    before = (repo.pygit_dir / "HEAD").read_bytes()
 
     with pytest.raises(ValueError):
         run_checkout_previous(["-"])
 
-    assert (repo.gitdir / "HEAD").read_bytes() == before
+    assert (repo.pygit_dir / "HEAD").read_bytes() == before
 
 
 def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
