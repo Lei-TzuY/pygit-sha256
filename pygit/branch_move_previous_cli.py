@@ -13,26 +13,26 @@ from .repo import Repository
 
 
 def _move_branch_config(repo: Repository, old: str, new: str) -> None:
-    """Move pygit's flattened ``branch.<name>.*`` configuration keys."""
+    """Move pygit's flattened ``branch.<name>.*`` configuration keys.
+
+    Native Git permits a destination config section to pre-exist even when the
+    destination ref does not. Git's config format can retain duplicate values;
+    pygit's scalar config API cannot. Preserve the already-visible destination
+    value for a colliding key and move every non-colliding source key.
+    """
 
     old_prefix = f"{old}."
-    new_prefix = f"{new}."
     entries = [
         (key, value)
         for section, key, value in repo.config_list()
         if section == "branch" and key.startswith(old_prefix)
     ]
-    collisions = [
-        key
-        for section, key, _ in repo.config_list()
-        if section == "branch" and key.startswith(new_prefix)
-    ]
-    if collisions:
-        raise ValueError(f"branch configuration already exists for {new!r}")
 
     for key, value in entries:
         suffix = key[len(old_prefix) :]
-        repo.config_set("branch", f"{new}.{suffix}", value)
+        destination_key = f"{new}.{suffix}"
+        if repo.config_get("branch", destination_key) is None:
+            repo.config_set("branch", destination_key, value)
     for key, _ in entries:
         repo.config_unset("branch", key)
 
