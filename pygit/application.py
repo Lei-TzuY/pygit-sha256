@@ -29,6 +29,7 @@ from .read_tree_cli import run_read_tree
 from .reflog_expire_cli import run_reflog_expire
 from .reflog_show_cli import run_reflog_show
 from .rev_list_disk_usage_cli import run_rev_list_disk_usage
+from .rev_parse_previous_cli import run_rev_parse_previous
 from .show_ref_cli import run_show_ref
 from .status_cli import run_status
 from .update_ref_cli import run_update_ref
@@ -46,6 +47,13 @@ _ERRORS = (
 )
 
 _PREVIOUS_CHECKOUT_SELECTOR = re.compile(r"^@\{-\d+\}$")
+_REV_PARSE_PREVIOUS_OPTIONS = {
+    "--verify",
+    "-q",
+    "--quiet",
+    "--abbrev-ref",
+    "--symbolic-full-name",
+}
 
 
 def _finish(code: int) -> None:
@@ -60,6 +68,19 @@ def _run_safe(handler, argv: Sequence[str]) -> None:
         print(f"error: {exc}", file=sys.stderr)
         code = 1
     _finish(code)
+
+
+def _is_rev_parse_previous(argv: Sequence[str]) -> bool:
+    if len(argv) < 2 or argv[0] != "rev-parse":
+        return False
+    if _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[-1]) is None:
+        return False
+    options = argv[1:-1]
+    if any(option not in _REV_PARSE_PREVIOUS_OPTIONS for option in options):
+        return False
+    if options.count("--abbrev-ref") + options.count("--symbolic-full-name") > 1:
+        return False
+    return True
 
 
 def main() -> None:
@@ -114,6 +135,10 @@ def main() -> None:
         )
     ):
         _run_safe(run_checkout_create_previous, argv[1:])
+        return
+
+    if _is_rev_parse_previous(argv):
+        _run_safe(run_rev_parse_previous, argv[1:])
         return
 
     if argv and argv[0] == "reflog":
