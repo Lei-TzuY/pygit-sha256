@@ -10,6 +10,7 @@ import re
 import sys
 from typing import Sequence
 
+from .branch_copy_previous_cli import run_branch_copy_previous
 from .branch_previous_cli import run_branch_previous
 from .cat_file_cli import run_cat_file
 from .checkout_create_previous_cli import run_checkout_create_previous
@@ -62,8 +63,28 @@ def _run_safe(handler, argv: Sequence[str]) -> None:
     _finish(code)
 
 
+def _is_previous_branch_copy(argv: Sequence[str]) -> bool:
+    if len(argv) == 4 and argv[0] == "branch":
+        return (
+            argv[1] in {"-c", "--copy", "-C"}
+            and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
+        )
+    if len(argv) == 5 and argv[0] == "branch":
+        options = argv[1:3]
+        return (
+            sum(item in {"-c", "--copy"} for item in options) == 1
+            and sum(item in {"-f", "--force"} for item in options) == 1
+            and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[3]) is not None
+        )
+    return False
+
+
 def main() -> None:
     argv = sys.argv[1:]
+    if _is_previous_branch_copy(argv):
+        _run_safe(run_branch_copy_previous, argv[1:])
+        return
+
     if (
         len(argv) == 3
         and argv[0] == "branch"
