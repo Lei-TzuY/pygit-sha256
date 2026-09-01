@@ -7,11 +7,13 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
+from .branch_checkout import expand_previous_checkout
 from .cli import main as legacy_main
 from .index_plumbing import refresh_index, update_index
 from .ls_files_cli import run_ls_files
 from .plumbing import is_ancestor, list_refs, merge_bases, peel_oid, verify_ref
 from .ref_query import check_ref_format, format_ref, query_refs
+from .refspec_format import check_refspec_pattern
 from .repo import Repository
 from .tree_plumbing import make_tree, read_tree
 
@@ -212,29 +214,69 @@ def _run_check_ref_format(argv: Sequence[str]) -> int:
     )
     parser.add_argument(
         "--allow-onelevel",
+        dest="allow_onelevel",
         action="store_true",
         help="permit a refname with no slash",
     )
+    parser.add_argument(
+        "--no-allow-onelevel",
+        dest="allow_onelevel",
+        action="store_false",
+        help="require a refname with more than one level (the default)",
+    )
+    parser.set_defaults(allow_onelevel=False)
     parser.add_argument(
         "--branch",
         action="store_true",
         help="validate a branch name (one-level names allowed; leading '-' rejected)",
     )
     parser.add_argument(
+        "--refspec-pattern",
+        action="store_true",
+        help="permit one '*' wildcard as a refspec refname pattern",
+    )
+    parser.add_argument(
         "--normalize",
+        "--print",
+        dest="normalize",
         action="store_true",
         help="remove leading/repeated slashes before validation and print the result",
     )
     parser.add_argument("refname", metavar="REFNAME")
     args = parser.parse_args(list(argv))
 
-    checked = check_ref_format(
-        args.refname,
-        allow_onelevel=args.allow_onelevel,
-        branch=args.branch,
-        normalize=args.normalize,
-    )
-    if args.normalize:
+    if args.branch and any(
+        option in argv
+        for option in (
+            "--allow-onelevel",
+            "--no-allow-onelevel",
+            "--refspec-pattern",
+            "--normalize",
+            "--print",
+        )
+    ):
+        parser.error("--branch cannot be combined with other check-ref-format modes")
+
+    refname = args.refname
+    if args.branch and refname.startswith("@{-"):
+        expanded = expand_previous_checkout(_find_repo(), refname)
+        if expanded is not None:
+            refname = expanded
+
+    if args.refspec_pattern:
+        checked = check_refspec_pattern(
+            refname,
+            allow_onelevel=args.allow_onelevel,
+            normalize=args.normalize,
+        )
+    else:
+        checked = check_ref_format(
+            refname,
+            allow_onelevel=args.allow_onelevel,
+            branch=args.branch,
+            normalize=args.normalize,
+        )
+    if args.normalize or args.branch:
         print(checked)
     return 0
 

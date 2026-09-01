@@ -6,11 +6,17 @@ modern nested/custom grammar are handled here before the legacy argparse stack.
 
 from __future__ import annotations
 
+import re
 import sys
 from typing import Sequence
 
+from .branch_copy_previous_cli import run_branch_copy_previous
+from .branch_move_previous_cli import run_branch_move_previous
+from .branch_previous_cli import run_branch_previous
 from .cat_file_cli import run_cat_file
+from .checkout_create_previous_cli import run_checkout_create_previous
 from .checkout_index_cli import run_checkout_index
+from .checkout_previous_cli import run_checkout_previous
 from .commit_graph_cli import run_commit_graph
 from .count_objects_cli import run_count_objects
 from .for_each_ref_cli import run_for_each_ref
@@ -25,6 +31,7 @@ from .read_tree_cli import run_read_tree
 from .reflog_expire_cli import run_reflog_expire
 from .reflog_show_cli import run_reflog_show
 from .rev_list_disk_usage_cli import run_rev_list_disk_usage
+from .rev_parse_previous_cli import run_rev_parse_previous
 from .show_ref_cli import run_show_ref
 from .status_cli import run_status
 from .update_ref_cli import run_update_ref
@@ -41,6 +48,15 @@ _ERRORS = (
     OSError,
 )
 
+_PREVIOUS_CHECKOUT_SELECTOR = re.compile(r"^@\{-\d+\}$")
+_REV_PARSE_PREVIOUS_OPTIONS = {
+    "--verify",
+    "-q",
+    "--quiet",
+    "--abbrev-ref",
+    "--symbolic-full-name",
+}
+
 
 def _finish(code: int) -> None:
     if code:
@@ -56,8 +72,120 @@ def _run_safe(handler, argv: Sequence[str]) -> None:
     _finish(code)
 
 
+def _is_previous_branch_copy(argv: Sequence[str]) -> bool:
+    if len(argv) == 4 and argv[0] == "branch":
+        return (
+            argv[1] in {"-c", "--copy", "-C"}
+            and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
+        )
+    if len(argv) == 5 and argv[0] == "branch":
+        options = argv[1:3]
+        return (
+            sum(item in {"-c", "--copy"} for item in options) == 1
+            and sum(item in {"-f", "--force"} for item in options) == 1
+            and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[3]) is not None
+        )
+    return False
+
+
+def _is_rev_parse_previous(argv: Sequence[str]) -> bool:
+    if len(argv) < 2 or argv[0] != "rev-parse":
+        return False
+    if _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[-1]) is None:
+        return False
+    options = argv[1:-1]
+    if any(option not in _REV_PARSE_PREVIOUS_OPTIONS for option in options):
+        return False
+    if options.count("--abbrev-ref") + options.count("--symbolic-full-name") > 1:
+        return False
+    return True
+
+
 def main() -> None:
     argv = sys.argv[1:]
+
+    if _is_previous_branch_copy(argv):
+        _run_safe(run_branch_copy_previous, argv[1:])
+        return
+
+    if (
+        len(argv) == 3
+        and argv[0] == "branch"
+        and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
+    ):
+        _run_safe(run_branch_previous, argv[1:])
+        return
+
+    if (
+        len(argv) == 4
+        and argv[0] == "branch"
+        and argv[1] in {"-f", "--force"}
+        and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[3]) is not None
+    ):
+        _run_safe(run_branch_previous, argv[1:])
+        return
+
+    if (
+        len(argv) == 4
+        and argv[0] == "branch"
+        and argv[1] in {"-m", "--move", "-M"}
+        and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
+    ):
+        _run_safe(run_branch_move_previous, argv[1:])
+        return
+
+    if len(argv) == 5 and argv[0] == "branch":
+        move_flags = set(argv[1:3])
+        has_move = bool(move_flags & {"-m", "--move"})
+        has_force = bool(move_flags & {"-f", "--force"})
+        if (
+            has_move
+            and has_force
+            and len(move_flags) == 2
+            and _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[3]) is not None
+        ):
+            _run_safe(run_branch_move_previous, argv[1:])
+            return
+
+    if (
+        len(argv) == 2
+        and argv[0] == "checkout"
+        and (
+            argv[1] == "-"
+            or _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[1]) is not None
+        )
+    ):
+        _run_safe(run_checkout_previous, argv[1:])
+        return
+
+    if (
+        len(argv) == 3
+        and argv[0] == "checkout"
+        and argv[1] == "--detach"
+        and (
+            argv[2] == "-"
+            or _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[2]) is not None
+        )
+    ):
+        _run_safe(run_checkout_previous, argv[1:])
+        return
+
+    if (
+        len(argv) == 4
+        and argv[0] == "checkout"
+        and argv[1] == "-b"
+        and (
+            argv[3] == "-"
+            or _PREVIOUS_CHECKOUT_SELECTOR.fullmatch(argv[3]) is not None
+        )
+    ):
+        _run_safe(run_checkout_create_previous, argv[1:])
+        return
+
+    if _is_rev_parse_previous(argv):
+        _run_safe(run_rev_parse_previous, argv[1:])
+        return
+
     if argv and argv[0] == "reflog":
         if len(argv) >= 2 and argv[1] == "expire":
             _run_safe(run_reflog_expire, argv[2:])
