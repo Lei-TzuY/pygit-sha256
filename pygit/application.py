@@ -22,6 +22,7 @@ from .count_objects_cli import run_count_objects
 from .for_each_ref_cli import run_for_each_ref
 from .fsck_cli import run_fsck
 from .gc_cli import run_gc
+from .init_cli import run_init
 from .launcher import main as launcher_main
 from .ls_files_cli import run_ls_files
 from .ls_tree_cli import run_ls_tree
@@ -103,6 +104,10 @@ def _is_rev_parse_previous(argv: Sequence[str]) -> bool:
 
 def main() -> None:
     argv = sys.argv[1:]
+
+    if argv and argv[0] == "init":
+        _run_safe(run_init, argv[1:])
+        return
 
     if _is_previous_branch_copy(argv):
         _run_safe(run_branch_copy_previous, argv[1:])
