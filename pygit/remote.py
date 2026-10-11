@@ -17,7 +17,7 @@ import zlib
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from .objects import BlobObject, CommitObject, Identity, TreeObject
+from .objects import BlobObject, CommitObject, Identity, TagObject, TreeObject
 from .store import ObjectStore
 
 
@@ -355,6 +355,16 @@ class NativeExporter:
             lines.append(f"committer {obj.committer.encode()}")
             lines.extend(("", obj.message))
             data = "\n".join(lines).encode()
+        elif isinstance(obj, TagObject):
+            type_name = "tag"
+            tag = TagObject(
+                target_sha=self.export_oid(obj.target_sha),
+                target_type=obj.target_type,
+                tag_name=obj.tag_name,
+                tagger=obj.tagger,
+                message=obj.message,
+            )
+            data = tag.serialize()
         else:
             raise ValueError(f"Unsupported pygit object type: {type(obj).__name__}")
 
@@ -644,7 +654,10 @@ class NativeImporter:
                 )
             )
         if obj.type_name == "tag":
-            return self.converted[self._tag_target(obj.data)]
+            tag = TagObject()
+            tag.deserialize(obj.data)
+            tag.target_sha = self.converted[self._tag_target(obj.data)]
+            return self.store.write(tag)
         raise ValueError(f"Unsupported native object type: {obj.type_name}")
 
     @staticmethod
