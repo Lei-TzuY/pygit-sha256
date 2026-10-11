@@ -189,3 +189,10 @@ class TestPhase47CLI:
         code = dispatch(["check-ref-format", "refs/heads/bad..name"])
         assert code == 1
         assert "error:" in capsys.readouterr().err
+
+
+def test_for_each_ref_help_renders_literal_format_atoms(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        dispatch(["for-each-ref", "--help"])
+    assert exc.value.code == 0
+    assert "%(...)-style ref atoms" in " ".join(capsys.readouterr().out.split())
