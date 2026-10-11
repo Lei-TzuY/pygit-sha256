@@ -41,8 +41,8 @@ def run_reflog_show(argv: Sequence[str]) -> int:
         default=_DEFAULT_FORMAT,
         metavar="FORMAT",
         help=(
-            "format using %H %h %o %gD %gs %ct %r and %% "
-            f"(default: {_DEFAULT_FORMAT!r})"
+            "format using %%H %%h %%o %%gD %%gs %%ct %%r and %%%% "
+            "(default: %(default)r)"
         ),
     )
     parser.add_argument(

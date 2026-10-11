@@ -224,3 +224,19 @@ def test_show_is_read_only_and_cli_options_match_api(tmp_path: Path) -> None:
         f"{entry.selector}\t{entry.new_oid}\t{entry.message}" for entry in api
     ]
     assert _snapshot_logs(repo) == before
+
+
+@pytest.mark.parametrize("arguments", [("reflog",), ("reflog", "show")])
+def test_reflog_help_renders_literal_format_tokens(tmp_path: Path, arguments) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "pygit", *arguments, "--help"],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    help_text = " ".join(result.stdout.split())
+    assert "format using %H %h %o %gD %gs %ct %r and %" in help_text
+    assert "default: '%h %gD: %gs'" in help_text
