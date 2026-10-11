@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Tuple
 from .diff import diff_stat, format_stat_block, unified_diff
 from .ignore import IgnoreMatcher
 from .index import Index, IndexEntry, _mode_for
-from .objects import BlobObject, CommitObject, GitObject, TreeObject
+from .objects import BlobObject, CommitObject, GitObject, TagObject, TreeObject
 from .objects.commit import Identity
 from .refs import ReflogEntry, RefStore
 from .store import ObjectStore
@@ -232,6 +232,18 @@ class Repository:
         advertisement = client.discover()
         native_map = self._read_native_map(remote)
         known_by_native = {native: sha for sha, native in native_map.items()}
+        # Older fetches flattened annotated tags and overwrote their targets'
+        # native identities. Restore each peeled target before advertising haves
+        # so the server sends the missing tag objects instead of omitting them.
+        for ref_name, peeled_oid in advertisement.refs.items():
+            if not ref_name.startswith("refs/tags/") or not ref_name.endswith("^{}"):
+                continue
+            tag_oid = advertisement.refs.get(ref_name[:-3])
+            flattened_sha = known_by_native.get(tag_oid)
+            if flattened_sha and not isinstance(self.store.read(flattened_sha), TagObject):
+                native_map[flattened_sha] = peeled_oid
+                del known_by_native[tag_oid]
+                known_by_native[peeled_oid] = flattened_sha
         native_refs = self._advertised_import_refs(advertisement.refs)
 
         if native_refs and all(native_oid in known_by_native for native_oid in native_refs.values()):
